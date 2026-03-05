@@ -70,9 +70,9 @@ string gemCudaEscapeCString(const string& in) {
 
 string gemExtractHierarchy(const string& name) {
     size_t lastDot = name.rfind("__DOT__");
-    if (lastDot == string::npos) return ""; // トップレベルモジュールの直下
+    if (lastDot == string::npos) return "";  // Directly under top module
     string hier = name.substr(0, lastDot);
-    // __DOT__ を . に置換してパスを整える
+    // Replace __DOT__ with '.' for hierarchy path readability.
     size_t pos = 0;
     while ((pos = hier.find("__DOT__", pos)) != string::npos) {
         hier.replace(pos, 7, ".");
@@ -91,7 +91,7 @@ bool gemIsActivator(const string& name) {
     string lowerStr;
     string baseName = gemExtractBaseName(name);
     for (char c : baseName) lowerStr += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    return (lowerStr.find("enable") != string::npos || 
+    return (lowerStr.find("enable") != string::npos ||
             lowerStr == "en" || lowerStr.find("_en") != string::npos ||
             lowerStr.find("clk_en") != string::npos ||
             lowerStr.find("valid") != string::npos ||
@@ -301,8 +301,10 @@ void V3EmitGem::emitGemCuda() VL_MT_DISABLED {
                 "(supported expr ops: VARREF/CONST/AND/OR/XOR/NOT plus CCAST/EXTEND wrappers)");
     }
 
+    const size_t supportedAssignw = collector.assigns().size();
     const size_t skipped = collector.skippedUnsupported() + collector.skippedInternal()
                            + collector.skippedNonVarLhs() + collector.skippedTiming();
+    const size_t totalAssignw = supportedAssignw + skipped;
     if (skipped) {
         v3info("--gem-cuda-only ignored " << skipped
                                           << " ASSIGNW nodes (unsupported or internal "
@@ -331,11 +333,13 @@ void V3EmitGem::emitGemCuda() VL_MT_DISABLED {
 
     const GemCudaExprEmitter emitter{collector.varToIndex()};
     std::unordered_set<string> emittedAssignKeys;
+    size_t emittedUniqueAssignw = 0;
     for (const GemCudaCollector::AssignRec& as : collector.assigns()) {
         const size_t lhsIdx = collector.varToIndex().at(as.m_lhsVarp);
         const string expr = emitter.emit(as.m_rhsp);
         const string key = cvtToStr(lhsIdx) + "|" + expr;
         if (!emittedAssignKeys.emplace(key).second) continue;
+        ++emittedUniqueAssignw;
         of << "    v_" << lhsIdx << " = " << expr << ";  // "
            << as.m_lhsVarp->name() << "\n";
     }
@@ -370,10 +374,10 @@ void V3EmitGem::emitGemCuda() VL_MT_DISABLED {
         met << "index\tname\thierarchy\tdirection\tis_primary_io\twidth\tis_activator\n";
         for (size_t i = 0; i < collector.vars().size(); ++i) {
             const AstVar* const varp = collector.vars().at(i);
-            met << i << '\t' << varp->name() << '\t' 
-                << gemExtractHierarchy(varp->name()) << '\t' 
+            met << i << '\t' << varp->name() << '\t'
+                << gemExtractHierarchy(varp->name()) << '\t'
                 << varp->direction().ascii() << '\t'
-                << (varp->isPrimaryIO() ? "1" : "0") << '\t' 
+                << (varp->isPrimaryIO() ? "1" : "0") << '\t'
                 << varp->widthMin() << '\t'
                 << (gemIsActivator(varp->name()) ? "1" : "0") << '\n';
         }
@@ -383,9 +387,10 @@ void V3EmitGem::emitGemCuda() VL_MT_DISABLED {
     std::ofstream dep{depsFilename};
     if (dep.is_open()) {
         dep << "lhs_idx\trhs_idx_list\n";
+        const auto& varToIndex = collector.varToIndex();
         std::unordered_set<string> emittedDepKeys;
         for (const GemCudaCollector::AssignRec& as : collector.assigns()) {
-            const size_t lhsIdx = collector.varToIndex().at(as.m_lhsVarp);
+            const size_t lhsIdx = varToIndex.at(as.m_lhsVarp);
             // Skip duplicate assigns to simplify deps graph
             const string expr = emitter.emit(as.m_rhsp);
             const string key = cvtToStr(lhsIdx) + "|" + expr;
@@ -394,13 +399,27 @@ void V3EmitGem::emitGemCuda() VL_MT_DISABLED {
             dep << lhsIdx << "\t";
             bool first = true;
             for (const AstVar* rhsVar : as.m_rhsVarps) {
-                if (collector.varToIndex().find(rhsVar) != collector.varToIndex().end()) {
+                if (varToIndex.find(rhsVar) != varToIndex.end()) {
                     if (!first) dep << ",";
-                    dep << collector.varToIndex().at(rhsVar);
+                    dep << varToIndex.at(rhsVar);
                     first = false;
                 }
             }
             dep << "\n";
         }
+    }
+
+    {
+        const double cov = totalAssignw ? (100.0 * static_cast<double>(supportedAssignw)
+                                           / static_cast<double>(totalAssignw))
+                                        : 0.0;
+        std::ostringstream covStr;
+        covStr << std::fixed << std::setprecision(2) << cov;
+        v3info("--gem-cuda-only stats "
+               << "assignw_supported=" << supportedAssignw << " "
+               << "assignw_total=" << totalAssignw << " "
+               << "assignw_ignored=" << skipped << " "
+               << "assignw_emitted_unique=" << emittedUniqueAssignw << " "
+               << "assignw_coverage_pct=" << covStr.str());
     }
 }
