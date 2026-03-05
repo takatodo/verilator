@@ -2500,17 +2500,21 @@ class VlTest:
     def vcd_identical(self, fn1: str, fn2: str, ignore_attr: bool = False) -> None:
         """Test if two VCD files have logically-identical contents"""
         # vcddiff to check transitions, if installed
-        cmd = "vcddiff --help"
-        out = test.run_capture(cmd, check=True)
-        cmd = 'vcddiff ' + fn1 + ' ' + fn2
-        out = test.run_capture(cmd, check=True)
-        if out != "":
-            cmd = 'vcddiff ' + fn2 + " " + fn1  # Reversed arguments
-            out = VtOs.run_capture(cmd, check=False)
+        if shutil.which("vcddiff"):
+            # Run vcddiff on a best-effort basis; if command invocation fails
+            # (tool missing from PATH at runtime or CLI incompatibility), fall
+            # back to the in-driver VCD parser below.
+            cmd = "vcddiff --help"
+            out = test.run_capture(cmd, check=False)
+            cmd = 'vcddiff ' + fn1 + ' ' + fn2
+            out = test.run_capture(cmd, check=False)
             if out != "":
-                print(out)
-                self.copy_if_golden(fn1, fn2)
-                self.error("VCD miscompares " + fn2 + " " + fn1)
+                cmd = 'vcddiff ' + fn2 + " " + fn1  # Reversed arguments
+                out = VtOs.run_capture(cmd, check=False)
+                if out != "":
+                    print(out)
+                    self.copy_if_golden(fn1, fn2)
+                    self.error("VCD miscompares " + fn2 + " " + fn1)
 
         # vcddiff doesn't check module and variable scope, so check that
         # Also provides backup if vcddiff not installed
