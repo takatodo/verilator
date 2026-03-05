@@ -20,6 +20,7 @@
 #include "V3Global.h"
 #include "V3Options.h"
 
+#include <cctype>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -67,11 +68,43 @@ string gemCudaEscapeCString(const string& in) {
     return out;
 }
 
+string gemExtractHierarchy(const string& name) {
+    size_t lastDot = name.rfind("__DOT__");
+    if (lastDot == string::npos) return ""; // トップレベルモジュールの直下
+    string hier = name.substr(0, lastDot);
+    // __DOT__ を . に置換してパスを整える
+    size_t pos = 0;
+    while ((pos = hier.find("__DOT__", pos)) != string::npos) {
+        hier.replace(pos, 7, ".");
+        pos += 1;
+    }
+    return hier;
+}
+
+string gemExtractBaseName(const string& name) {
+    size_t lastDot = name.rfind("__DOT__");
+    if (lastDot == string::npos) return name;
+    return name.substr(lastDot + 7);
+}
+
+bool gemIsActivator(const string& name) {
+    string lowerStr;
+    string baseName = gemExtractBaseName(name);
+    for (char c : baseName) lowerStr += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return (lowerStr.find("enable") != string::npos || 
+            lowerStr == "en" || lowerStr.find("_en") != string::npos ||
+            lowerStr.find("clk_en") != string::npos ||
+            lowerStr.find("valid") != string::npos ||
+            lowerStr.find("ready") != string::npos ||
+            lowerStr.find("active") != string::npos);
+}
+
 class GemCudaCollector final : public VNVisitorConst {
 public:
     struct AssignRec final {
         AstVar* m_lhsVarp = nullptr;
         const AstNodeExpr* m_rhsp = nullptr;
+        std::vector<const AstVar*> m_rhsVarps;
     };
 
 private:
@@ -123,41 +156,45 @@ private:
         return false;
     }
 
-    void collectExprVars(const AstNodeExpr* nodep) {
+    void collectExprVars(const AstNodeExpr* nodep, std::unordered_set<const AstVar*>& currentRhsVars) {
         if (!nodep) return;
         if (const AstVarRef* const refp = VN_CAST(nodep, VarRef)) {
             rememberVar(refp->varp());
+            const AstVar* varp = refp->varp();
+            if (varp && !gemCudaIsInternalVar(varp) && gemCudaWidthSupported(varp)) {
+                currentRhsVars.insert(varp);
+            }
             return;
         }
         if (const AstAnd* const andp = VN_CAST(nodep, And)) {
-            collectExprVars(andp->lhsp());
-            collectExprVars(andp->rhsp());
+            collectExprVars(andp->lhsp(), currentRhsVars);
+            collectExprVars(andp->rhsp(), currentRhsVars);
             return;
         }
         if (const AstOr* const orp = VN_CAST(nodep, Or)) {
-            collectExprVars(orp->lhsp());
-            collectExprVars(orp->rhsp());
+            collectExprVars(orp->lhsp(), currentRhsVars);
+            collectExprVars(orp->rhsp(), currentRhsVars);
             return;
         }
         if (const AstXor* const xorp = VN_CAST(nodep, Xor)) {
-            collectExprVars(xorp->lhsp());
-            collectExprVars(xorp->rhsp());
+            collectExprVars(xorp->lhsp(), currentRhsVars);
+            collectExprVars(xorp->rhsp(), currentRhsVars);
             return;
         }
         if (const AstNot* const notp = VN_CAST(nodep, Not)) {
-            collectExprVars(notp->lhsp());
+            collectExprVars(notp->lhsp(), currentRhsVars);
             return;
         }
         if (const AstCCast* const castp = VN_CAST(nodep, CCast)) {
-            collectExprVars(castp->lhsp());
+            collectExprVars(castp->lhsp(), currentRhsVars);
             return;
         }
         if (const AstExtend* const extp = VN_CAST(nodep, Extend)) {
-            collectExprVars(extp->lhsp());
+            collectExprVars(extp->lhsp(), currentRhsVars);
             return;
         }
         if (const AstExtendS* const extp = VN_CAST(nodep, ExtendS)) {
-            collectExprVars(extp->lhsp());
+            collectExprVars(extp->lhsp(), currentRhsVars);
             return;
         }
     }
@@ -186,8 +223,9 @@ public:
             ++m_skippedUnsupported;
             return;
         }
-        collectExprVars(nodep->rhsp());
-        m_assigns.push_back({lhsVarp, nodep->rhsp()});
+        std::unordered_set<const AstVar*> rhsVars;
+        collectExprVars(nodep->rhsp(), rhsVars);
+        m_assigns.push_back({lhsVarp, nodep->rhsp(), std::vector<const AstVar*>(rhsVars.begin(), rhsVars.end())});
     }
 
     const std::vector<AssignRec>& assigns() const { return m_assigns; }
@@ -329,11 +367,40 @@ void V3EmitGem::emitGemCuda() VL_MT_DISABLED {
     const string metaFilename = filename + ".vars.tsv";
     std::ofstream met{metaFilename};
     if (met.is_open()) {
-        met << "index\tname\tdirection\tis_primary_io\twidth\n";
+        met << "index\tname\thierarchy\tdirection\tis_primary_io\twidth\tis_activator\n";
         for (size_t i = 0; i < collector.vars().size(); ++i) {
             const AstVar* const varp = collector.vars().at(i);
-            met << i << '\t' << varp->name() << '\t' << varp->direction().ascii() << '\t'
-                << (varp->isPrimaryIO() ? "1" : "0") << '\t' << varp->widthMin() << '\n';
+            met << i << '\t' << varp->name() << '\t' 
+                << gemExtractHierarchy(varp->name()) << '\t' 
+                << varp->direction().ascii() << '\t'
+                << (varp->isPrimaryIO() ? "1" : "0") << '\t' 
+                << varp->widthMin() << '\t'
+                << (gemIsActivator(varp->name()) ? "1" : "0") << '\n';
+        }
+    }
+
+    const string depsFilename = filename + ".deps.tsv";
+    std::ofstream dep{depsFilename};
+    if (dep.is_open()) {
+        dep << "lhs_idx\trhs_idx_list\n";
+        std::unordered_set<string> emittedDepKeys;
+        for (const GemCudaCollector::AssignRec& as : collector.assigns()) {
+            const size_t lhsIdx = collector.varToIndex().at(as.m_lhsVarp);
+            // Skip duplicate assigns to simplify deps graph
+            const string expr = emitter.emit(as.m_rhsp);
+            const string key = cvtToStr(lhsIdx) + "|" + expr;
+            if (!emittedDepKeys.emplace(key).second) continue;
+
+            dep << lhsIdx << "\t";
+            bool first = true;
+            for (const AstVar* rhsVar : as.m_rhsVarps) {
+                if (collector.varToIndex().find(rhsVar) != collector.varToIndex().end()) {
+                    if (!first) dep << ",";
+                    dep << collector.varToIndex().at(rhsVar);
+                    first = false;
+                }
+            }
+            dep << "\n";
         }
     }
 }
