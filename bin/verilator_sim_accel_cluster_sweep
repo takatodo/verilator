@@ -32,6 +32,12 @@ Options:
                         (default: gpu_candidate,cpu_boundary_heavy)
   --cluster-indices LIST
                         Explicit comma-separated cluster indices to benchmark
+  --worthy-min-speedup X
+                        Minimum cpu/gpu speedup ratio to mark a cluster as offload-worthy
+                        (default: 1.05)
+  --worthy-min-margin-ms X
+                        Minimum cpu_ms - gpu_ms margin to mark a cluster as offload-worthy
+                        (default: 0.50)
   --keep-cluster-outdirs
                         Keep per-cluster output directories (default: off)
 
@@ -65,6 +71,8 @@ CLUSTER_MAX_INPUT_BITS=128
 CLUSTER_MIN_ASSIGNS=1
 CLUSTER_OWNER_LIST="gpu_candidate,cpu_boundary_heavy"
 CLUSTER_INDICES=""
+WORTHY_MIN_SPEEDUP="1.05"
+WORTHY_MIN_MARGIN_MS="0.50"
 KEEP_CLUSTER_OUTDIRS=0
 declare -a SOURCES=()
 INVOCATION_CWD="$(pwd)"
@@ -103,6 +111,10 @@ while [[ $# -gt 0 ]]; do
       CLUSTER_OWNER_LIST="$2"; shift 2 ;;
     --cluster-indices)
       CLUSTER_INDICES="$2"; shift 2 ;;
+    --worthy-min-speedup)
+      WORTHY_MIN_SPEEDUP="$2"; shift 2 ;;
+    --worthy-min-margin-ms)
+      WORTHY_MIN_MARGIN_MS="$2"; shift 2 ;;
     --keep-cluster-outdirs)
       KEEP_CLUSTER_OUTDIRS=1; shift ;;
     --help|-h)
@@ -125,6 +137,12 @@ fi
 
 for v in NSTATES GPU_REPS CPU_REPS BLOCK_SIZE ASSIGNS_PER_KERNEL CLUSTER_LIMIT CLUSTER_MAX_INPUT_BITS CLUSTER_MIN_ASSIGNS INIT_SEED; do
   if ! [[ "${!v}" =~ ^[0-9]+$ ]]; then
+    echo "Invalid numeric value for $v: ${!v}" >&2
+    exit 2
+  fi
+done
+for v in WORTHY_MIN_SPEEDUP WORTHY_MIN_MARGIN_MS; do
+  if ! [[ "${!v}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
     echo "Invalid numeric value for $v: ${!v}" >&2
     exit 2
   fi
@@ -220,7 +238,7 @@ if (( ${#SELECTED_LINES[@]} == 0 )); then
   exit 2
 fi
 
-printf 'cluster_idx\tassign_count\tinput_signature_bits\towner_hint\ttopo_rank\tdominant_hierarchy\thybrid_gpu_ms_per_rep\thybrid_cpu_ms_per_rep\thybrid_static_h2d_bytes_per_batch\thybrid_dynamic_h2d_bytes_per_batch\thybrid_actual_h2d_bytes_per_batch\thybrid_actual_d2h_bytes_per_batch\thybrid_mismatch\tnvcc_compile_s\tbench_run_s\ttotal_elapsed_s\n' > "$SUMMARY_TSV"
+printf 'cluster_idx\tassign_count\tinput_signature_bits\towner_hint\ttopo_rank\tdominant_hierarchy\thybrid_gpu_ms_per_rep\thybrid_cpu_ms_per_rep\thybrid_speedup_gpu_over_cpu\thybrid_margin_ms\thybrid_static_h2d_bytes_per_batch\thybrid_dynamic_h2d_bytes_per_batch\thybrid_actual_h2d_bytes_per_batch\thybrid_actual_d2h_bytes_per_batch\thybrid_transfer_total_bytes_per_batch\tassigns_per_kib_transferred\toffload_score\toffload_worthy\thybrid_mismatch\tnvcc_compile_s\tbench_run_s\ttotal_elapsed_s\n' > "$SUMMARY_TSV"
 
 echo "[3/3] Running cluster benches..."
 for line in "${SELECTED_LINES[@]}"; do
@@ -242,9 +260,10 @@ for line in "${SELECTED_LINES[@]}"; do
     -- "${SOURCES[@]}"
 
   python3 - "$CLUSTER_OUTDIR/bench_run.log" "$SUMMARY_TSV" "$CLUSTER_IDX" "$ASSIGN_COUNT" \
-    "$INPUT_BITS" "$OWNER_HINT" "$TOPO_RANK" "$DOM_HIER" <<'PY'
+    "$INPUT_BITS" "$OWNER_HINT" "$TOPO_RANK" "$DOM_HIER" "$WORTHY_MIN_SPEEDUP" \
+    "$WORTHY_MIN_MARGIN_MS" <<'PY'
 import sys
-log_path, out_tsv, cluster_idx, assign_count, input_bits, owner_hint, topo_rank, dom_hier = sys.argv[1:9]
+log_path, out_tsv, cluster_idx, assign_count, input_bits, owner_hint, topo_rank, dom_hier, worthy_min_speedup, worthy_min_margin_ms = sys.argv[1:11]
 want = {
     'hybrid_gpu_ms_per_rep': '',
     'hybrid_cpu_ms_per_rep': '',
@@ -265,12 +284,32 @@ with open(log_path, encoding='utf-8') as fh:
         k, v = line.split('=', 1)
         if k in want:
             want[k] = v
+gpu_ms = float(want['hybrid_gpu_ms_per_rep'] or 0.0)
+cpu_ms = float(want['hybrid_cpu_ms_per_rep'] or 0.0)
+static_h2d = int(want['hybrid_static_h2d_bytes_per_batch'] or 0)
+dynamic_h2d = int(want['hybrid_dynamic_h2d_bytes_per_batch'] or 0)
+actual_h2d = int(want['hybrid_actual_h2d_bytes_per_batch'] or 0)
+actual_d2h = int(want['hybrid_actual_d2h_bytes_per_batch'] or 0)
+transfer_total = actual_h2d + actual_d2h
+assign_count_i = int(assign_count)
+speedup = (cpu_ms / gpu_ms) if gpu_ms > 0.0 else 0.0
+margin_ms = cpu_ms - gpu_ms
+assigns_per_kib = (assign_count_i * 1024.0 / transfer_total) if transfer_total > 0 else 0.0
+score = margin_ms * assigns_per_kib
+offload_worthy = (
+    want['hybrid_mismatch'] == '0'
+    and speedup >= float(worthy_min_speedup)
+    and margin_ms >= float(worthy_min_margin_ms)
+)
 with open(out_tsv, 'a', encoding='utf-8') as fh:
     fh.write('\t'.join([
         cluster_idx, assign_count, input_bits, owner_hint, topo_rank, dom_hier,
         want['hybrid_gpu_ms_per_rep'], want['hybrid_cpu_ms_per_rep'],
+        f"{speedup:.6f}", f"{margin_ms:.6f}",
         want['hybrid_static_h2d_bytes_per_batch'], want['hybrid_dynamic_h2d_bytes_per_batch'],
         want['hybrid_actual_h2d_bytes_per_batch'], want['hybrid_actual_d2h_bytes_per_batch'],
+        str(transfer_total), f"{assigns_per_kib:.6f}", f"{score:.6f}",
+        '1' if offload_worthy else '0',
         want['hybrid_mismatch'], want['nvcc_compile_s'], want['bench_run_s'],
         want['total_elapsed_s'],
     ]) + '\n')
@@ -280,5 +319,47 @@ PY
     rm -rf "$CLUSTER_OUTDIR"
   fi
 done
+
+python3 - "$SUMMARY_TSV" "$SUMMARY_JSON" "$WORTHY_MIN_SPEEDUP" "$WORTHY_MIN_MARGIN_MS" <<'PY'
+import csv
+import json
+import sys
+
+tsv_path, json_path, worthy_min_speedup, worthy_min_margin_ms = sys.argv[1:5]
+rows = list(csv.DictReader(open(tsv_path, newline=''), delimiter='\t'))
+for row in rows:
+    row['cluster_idx'] = int(row['cluster_idx'])
+    row['assign_count'] = int(row['assign_count'])
+    row['input_signature_bits'] = int(row['input_signature_bits'])
+    row['hybrid_gpu_ms_per_rep'] = float(row['hybrid_gpu_ms_per_rep'])
+    row['hybrid_cpu_ms_per_rep'] = float(row['hybrid_cpu_ms_per_rep'])
+    row['hybrid_speedup_gpu_over_cpu'] = float(row['hybrid_speedup_gpu_over_cpu'])
+    row['hybrid_margin_ms'] = float(row['hybrid_margin_ms'])
+    row['hybrid_actual_h2d_bytes_per_batch'] = int(row['hybrid_actual_h2d_bytes_per_batch'])
+    row['hybrid_actual_d2h_bytes_per_batch'] = int(row['hybrid_actual_d2h_bytes_per_batch'])
+    row['hybrid_transfer_total_bytes_per_batch'] = int(row['hybrid_transfer_total_bytes_per_batch'])
+    row['assigns_per_kib_transferred'] = float(row['assigns_per_kib_transferred'])
+    row['offload_score'] = float(row['offload_score'])
+    row['offload_worthy'] = (row['offload_worthy'] == '1')
+    row['hybrid_mismatch'] = int(row['hybrid_mismatch'])
+
+rows_by_score = sorted(rows, key=lambda r: (r['offload_score'], r['hybrid_speedup_gpu_over_cpu']), reverse=True)
+worthy = [r for r in rows_by_score if r['offload_worthy']]
+
+payload = {
+    'heuristic': {
+        'worthy_min_speedup': float(worthy_min_speedup),
+        'worthy_min_margin_ms': float(worthy_min_margin_ms),
+        'score_definition': 'score = (cpu_ms - gpu_ms) * (assign_count / (transfer_total_bytes / 1024))',
+    },
+    'cluster_count': len(rows),
+    'worthy_cluster_count': len(worthy),
+    'worthy_cluster_indices': [r['cluster_idx'] for r in worthy],
+    'top_clusters_by_score': rows_by_score[:10],
+    'rows': rows,
+}
+with open(json_path, 'w', encoding='utf-8') as fh:
+    json.dump(payload, fh, indent=2)
+PY
 
 echo "Wrote: $SUMMARY_TSV"
