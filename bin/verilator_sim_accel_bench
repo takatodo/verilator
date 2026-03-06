@@ -270,17 +270,6 @@ static std::vector<uint32_t> gatherSlotsVarMajor(const std::vector<uint32_t>& st
   return out;
 }
 
-static void materializeSlotsVarMajor(const std::vector<uint32_t>& compactState,
-                                     const std::vector<uint32_t>& varIdxs, uint32_t nvars,
-                                     uint32_t nstates, std::vector<uint32_t>* outp) {
-  outp->assign(static_cast<size_t>(nvars) * nstates, 0u);
-  for (size_t slot = 0; slot < varIdxs.size(); ++slot) {
-    const size_t srcBase = slot * static_cast<size_t>(nstates);
-    const size_t dstBase = static_cast<size_t>(varIdxs[slot]) * nstates;
-    std::copy_n(compactState.begin() + srcBase, nstates, outp->begin() + dstBase);
-  }
-}
-
 static void applyInitMode(std::vector<uint32_t>& h_in, uint32_t nvars, uint32_t nstates,
                           const std::string& mode, uint32_t seed) {
   const size_t elems = static_cast<size_t>(nvars) * nstates;
@@ -425,6 +414,46 @@ static size_t chunkedIndex(uint32_t varIdx, uint32_t stateIdx, uint32_t nvars, u
   return chunkBase + static_cast<size_t>(varIdx) * stateChunk + local;
 }
 
+__host__ __device__ static size_t simAccelLinearIndex(uint32_t varIdx, uint32_t stateIdx,
+                                                      uint32_t nvars, uint32_t nstates,
+                                                      uint32_t stateChunk) {
+  if (stateChunk == 0 || stateChunk >= nstates) {
+    return static_cast<size_t>(varIdx) * nstates + stateIdx;
+  }
+  const uint32_t chunkId = stateIdx / stateChunk;
+  const uint32_t local = stateIdx % stateChunk;
+  const size_t chunkBase = static_cast<size_t>(chunkId) * static_cast<size_t>(nvars) * stateChunk;
+  return chunkBase + static_cast<size_t>(varIdx) * stateChunk + local;
+}
+
+__global__ void sim_accel_scatter_inputs_u32(const uint32_t* compactIn, const uint32_t* inputVarIdxs,
+                                             uint32_t ninputVars, uint32_t* stateFull,
+                                             uint32_t nvars, uint32_t nstates,
+                                             uint32_t stateChunk) {
+  const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid >= nstates) return;
+  for (uint32_t slot = 0; slot < ninputVars; ++slot) {
+    const uint32_t varIdx = inputVarIdxs[slot];
+    const size_t src = static_cast<size_t>(slot) * nstates + tid;
+    const size_t dst = simAccelLinearIndex(varIdx, tid, nvars, nstates, stateChunk);
+    stateFull[dst] = compactIn[src];
+  }
+}
+
+__global__ void sim_accel_gather_outputs_u32(const uint32_t* stateFull, const uint32_t* outputVarIdxs,
+                                             uint32_t noutputVars, uint32_t* compactOut,
+                                             uint32_t nvars, uint32_t nstates,
+                                             uint32_t stateChunk) {
+  const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid >= nstates) return;
+  for (uint32_t slot = 0; slot < noutputVars; ++slot) {
+    const uint32_t varIdx = outputVarIdxs[slot];
+    const size_t src = simAccelLinearIndex(varIdx, tid, nvars, nstates, stateChunk);
+    const size_t dst = static_cast<size_t>(slot) * nstates + tid;
+    compactOut[dst] = stateFull[src];
+  }
+}
+
 static std::vector<uint32_t> unchunkToVarMajor(const std::vector<uint32_t>& chunked, uint32_t nvars,
                                                uint32_t nstates, uint32_t stateChunk) {
   std::vector<uint32_t> out(static_cast<size_t>(nvars) * nstates, 0u);
@@ -503,14 +532,17 @@ int main(int argc, char** argv) {
   const size_t bytes = elemsAlloc * sizeof(uint32_t);
   const size_t compactInputElems = static_cast<size_t>(inputVarIdxs.size()) * nstates;
   const size_t compactOutputElems = static_cast<size_t>(outputVarIdxs.size()) * nstates;
-  const size_t compactRoundtripBytes = (compactInputElems + compactOutputElems) * sizeof(uint32_t);
+  const size_t compactInputBytes = compactInputElems * sizeof(uint32_t);
+  const size_t compactOutputBytes = compactOutputElems * sizeof(uint32_t);
+  const size_t compactRoundtripBytes = compactInputBytes + compactOutputBytes;
   const size_t fullRoundtripBytes = elems * sizeof(uint32_t) * 2u;
+  const size_t commIndexBytes = (inputVarIdxs.size() + outputVarIdxs.size()) * sizeof(uint32_t);
 
   std::vector<uint32_t> h_seed_varmajor(elems);
   std::vector<uint32_t> h_in_compact;
   std::vector<uint32_t> h_in_varmajor(elems, 0u);
-  std::vector<uint32_t> h_in(elemsAlloc, 0);
-  std::vector<uint32_t> h_out_gpu(elemsAlloc, 0);
+  std::vector<uint32_t> h_out_gpu_verify(elemsAlloc, 0);
+  std::vector<uint32_t> h_out_gpu_compact;
   std::vector<uint32_t> h_out_cpu_varmajor(elems, 0);
 
   applyInitMode(h_seed_varmajor, nvars, nstates, initMode, initSeed);
@@ -526,25 +558,50 @@ int main(int argc, char** argv) {
     }
   }
   h_in_compact = gatherSlotsVarMajor(h_seed_varmajor, inputVarIdxs, nstates);
-  materializeSlotsVarMajor(h_in_compact, inputVarIdxs, nvars, nstates, &h_in_varmajor);
-
-  if (useChunkLayout) {
-    for (uint32_t varIdx = 0; varIdx < nvars; ++varIdx) {
-      const size_t srcBase = static_cast<size_t>(varIdx) * nstates;
-      for (uint32_t stateIdx = 0; stateIdx < nstates; ++stateIdx) {
-        const size_t dst = chunkedIndex(varIdx, stateIdx, nvars, stateChunk);
-        h_in[dst] = h_in_varmajor[srcBase + stateIdx];
-      }
-    }
-  } else {
-    std::copy(h_in_varmajor.begin(), h_in_varmajor.end(), h_in.begin());
+  for (size_t slot = 0; slot < inputVarIdxs.size(); ++slot) {
+    const size_t srcBase = slot * static_cast<size_t>(nstates);
+    const size_t dstBase = static_cast<size_t>(inputVarIdxs[slot]) * nstates;
+    std::copy_n(h_in_compact.begin() + srcBase, nstates, h_in_varmajor.begin() + dstBase);
   }
 
+  uint32_t* d_inputVarIdxs = nullptr;
+  uint32_t* d_outputVarIdxs = nullptr;
+  uint32_t* d_in_compact = nullptr;
+  uint32_t* d_out_compact = nullptr;
   uint32_t* d_in = nullptr;
   uint32_t* d_out = nullptr;
+  if (!inputVarIdxs.empty()) {
+    checkCuda(cudaMalloc(&d_inputVarIdxs, inputVarIdxs.size() * sizeof(uint32_t)),
+              "cudaMalloc d_inputVarIdxs");
+    checkCuda(cudaMemcpy(d_inputVarIdxs, inputVarIdxs.data(), inputVarIdxs.size() * sizeof(uint32_t),
+                         cudaMemcpyHostToDevice),
+              "H2D input var idxs");
+    checkCuda(cudaMalloc(&d_in_compact, compactInputBytes), "cudaMalloc d_in_compact");
+    checkCuda(cudaMemcpy(d_in_compact, h_in_compact.data(), compactInputBytes, cudaMemcpyHostToDevice),
+              "H2D compact in");
+  }
+  if (!outputVarIdxs.empty()) {
+    checkCuda(cudaMalloc(&d_outputVarIdxs, outputVarIdxs.size() * sizeof(uint32_t)),
+              "cudaMalloc d_outputVarIdxs");
+    checkCuda(cudaMemcpy(d_outputVarIdxs, outputVarIdxs.data(),
+                         outputVarIdxs.size() * sizeof(uint32_t), cudaMemcpyHostToDevice),
+              "H2D output var idxs");
+    checkCuda(cudaMalloc(&d_out_compact, compactOutputBytes), "cudaMalloc d_out_compact");
+    h_out_gpu_compact.assign(compactOutputElems, 0u);
+  }
   checkCuda(cudaMalloc(&d_in, bytes), "cudaMalloc d_in");
   checkCuda(cudaMalloc(&d_out, bytes), "cudaMalloc d_out");
-  checkCuda(cudaMemcpy(d_in, h_in.data(), bytes, cudaMemcpyHostToDevice), "H2D in");
+  checkCuda(cudaMemset(d_in, 0, bytes), "memset d_in");
+  checkCuda(cudaMemset(d_out, 0, bytes), "memset d_out");
+  if (!inputVarIdxs.empty()) {
+    const int scatterBlock = static_cast<int>(blockSize);
+    const int scatterGrid = static_cast<int>((nstates + scatterBlock - 1) / scatterBlock);
+    sim_accel_scatter_inputs_u32<<<scatterGrid, scatterBlock>>>(
+        d_in_compact, d_inputVarIdxs, static_cast<uint32_t>(inputVarIdxs.size()), d_in, nvars,
+        nstates, stateChunk);
+    checkCuda(cudaGetLastError(), "scatter launch");
+    checkCuda(cudaDeviceSynchronize(), "scatter sync");
+  }
   checkCuda(cudaMemcpy(d_out, d_in, bytes, cudaMemcpyDeviceToDevice), "D2D init out");
 
   const int block = static_cast<int>(blockSize);
@@ -585,10 +642,24 @@ int main(int argc, char** argv) {
 
   float gpu_ms = 0.0f;
   checkCuda(cudaEventElapsedTime(&gpu_ms, evStart, evStop), "elapsed");
-  checkCuda(cudaMemcpy(h_out_gpu.data(), d_out, bytes, cudaMemcpyDeviceToHost), "D2H out");
+  if (!outputVarIdxs.empty()) {
+    const int gatherBlock = static_cast<int>(blockSize);
+    const int gatherGrid = static_cast<int>((nstates + gatherBlock - 1) / gatherBlock);
+    sim_accel_gather_outputs_u32<<<gatherGrid, gatherBlock>>>(
+        d_out, d_outputVarIdxs, static_cast<uint32_t>(outputVarIdxs.size()), d_out_compact, nvars,
+        nstates, stateChunk);
+    checkCuda(cudaGetLastError(), "gather launch");
+    checkCuda(cudaDeviceSynchronize(), "gather sync");
+    checkCuda(cudaMemcpy(h_out_gpu_compact.data(), d_out_compact, compactOutputBytes,
+                         cudaMemcpyDeviceToHost),
+              "D2H compact out");
+  }
+  checkCuda(cudaMemcpy(h_out_gpu_verify.data(), d_out, bytes, cudaMemcpyDeviceToHost),
+            "D2H verify full out");
   const std::vector<uint32_t> h_out_gpu_varmajor
-      = useChunkLayout ? unchunkToVarMajor(h_out_gpu, nvars, nstates, stateChunk)
-                       : std::vector<uint32_t>(h_out_gpu.begin(), h_out_gpu.begin() + elems);
+      = useChunkLayout ? unchunkToVarMajor(h_out_gpu_verify, nvars, nstates, stateChunk)
+                       : std::vector<uint32_t>(h_out_gpu_verify.begin(),
+                                              h_out_gpu_verify.begin() + elems);
 
   auto cpu_t0 = std::chrono::high_resolution_clock::now();
   for (int i = 0; i < cpu_reps; ++i) {
@@ -602,8 +673,6 @@ int main(int argc, char** argv) {
   for (size_t i = 0; i < elems; ++i) {
     if (h_out_cpu_varmajor[i] != h_out_gpu_varmajor[i]) ++mismatch;
   }
-  const std::vector<uint32_t> h_out_gpu_compact
-      = gatherSlotsVarMajor(h_out_gpu_varmajor, outputVarIdxs, nstates);
   const std::vector<uint32_t> h_out_cpu_compact
       = gatherSlotsVarMajor(h_out_cpu_varmajor, outputVarIdxs, nstates);
   size_t compactMismatch = 0;
@@ -637,10 +706,12 @@ int main(int argc, char** argv) {
   std::cout << "compact_mismatch=" << compactMismatch << "\n";
   std::cout << "comm_input_vars=" << inputVarIdxs.size() << "\n";
   std::cout << "comm_output_vars=" << outputVarIdxs.size() << "\n";
-  std::cout << "comm_input_bytes_per_batch=" << (compactInputElems * sizeof(uint32_t)) << "\n";
-  std::cout << "comm_output_bytes_per_batch=" << (compactOutputElems * sizeof(uint32_t)) << "\n";
+  std::cout << "comm_index_bytes_static=" << commIndexBytes << "\n";
+  std::cout << "comm_input_bytes_per_batch=" << compactInputBytes << "\n";
+  std::cout << "comm_output_bytes_per_batch=" << compactOutputBytes << "\n";
   std::cout << "comm_total_bytes_per_batch=" << compactRoundtripBytes << "\n";
   std::cout << "comm_full_roundtrip_bytes=" << fullRoundtripBytes << "\n";
+  std::cout << "comm_verify_full_d2h_bytes=" << bytes << "\n";
   if (fullRoundtripBytes != 0) {
     const double ratio = (100.0 * static_cast<double>(compactRoundtripBytes))
                          / static_cast<double>(fullRoundtripBytes);
@@ -657,6 +728,10 @@ int main(int argc, char** argv) {
     std::cout << "auto_engine_recommendation=tie\n";
   }
 
+  if (d_inputVarIdxs) cudaFree(d_inputVarIdxs);
+  if (d_outputVarIdxs) cudaFree(d_outputVarIdxs);
+  if (d_in_compact) cudaFree(d_in_compact);
+  if (d_out_compact) cudaFree(d_out_compact);
   cudaFree(d_in);
   cudaFree(d_out);
   cudaEventDestroy(evStart);
