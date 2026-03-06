@@ -21,9 +21,11 @@ Options:
   --init-seed N        Seed for random init mode (default: 1)
   --init-file PATH     Optional init override file (index/name based)
   --assigns-per-kernel N  Limit emitted assigns per generated CUDA kernel partition (default: 0)
-  --hybrid-mode MODE   Runtime path: off|single-partition|single-cluster (default: off)
+  --hybrid-mode MODE   Runtime path: off|single-partition|single-cluster|cluster-group (default: off)
   --hybrid-partition-index N  Selected partition for --hybrid-mode single-partition
   --hybrid-cluster-index N  Selected cluster for --hybrid-mode single-cluster
+  --hybrid-cluster-indices LIST
+                         Comma-separated cluster indices for --hybrid-mode cluster-group
   --hybrid-cluster-auto  Auto-select cluster for --hybrid-mode single-cluster
   --hybrid-cluster-auto-max-input-bits N
                          Max input-signature bits for auto-selected cluster (default: 128)
@@ -67,6 +69,7 @@ ASSIGNS_PER_KERNEL=0
 HYBRID_MODE="off"
 HYBRID_PARTITION_INDEX=""
 HYBRID_CLUSTER_INDEX=""
+HYBRID_CLUSTER_INDICES=""
 HYBRID_CLUSTER_AUTO=0
 HYBRID_CLUSTER_AUTO_MAX_INPUT_BITS=128
 COMPILE_CACHE_DIR="${SIM_ACCEL_COMPILE_CACHE_DIR:-/tmp/verilator-sim-accel-compile-cache}"
@@ -106,6 +109,8 @@ while [[ $# -gt 0 ]]; do
       HYBRID_PARTITION_INDEX="$2"; shift 2 ;;
     --hybrid-cluster-index)
       HYBRID_CLUSTER_INDEX="$2"; shift 2 ;;
+    --hybrid-cluster-indices)
+      HYBRID_CLUSTER_INDICES="$2"; shift 2 ;;
     --hybrid-cluster-auto)
       HYBRID_CLUSTER_AUTO=1; shift ;;
     --hybrid-cluster-auto-max-input-bits)
@@ -156,9 +161,9 @@ if ! [[ "$HYBRID_CLUSTER_AUTO_MAX_INPUT_BITS" =~ ^[0-9]+$ ]]; then
   exit 2
 fi
 case "$HYBRID_MODE" in
-  off|single-partition|single-cluster) ;;
+  off|single-partition|single-cluster|cluster-group) ;;
   *)
-    echo "Invalid --hybrid-mode: $HYBRID_MODE (expected off|single-partition|single-cluster)" >&2
+    echo "Invalid --hybrid-mode: $HYBRID_MODE (expected off|single-partition|single-cluster|cluster-group)" >&2
     exit 2 ;;
 esac
 if [[ "$HYBRID_MODE" == "single-partition" ]]; then
@@ -172,6 +177,10 @@ if [[ "$HYBRID_MODE" == "single-partition" ]]; then
   fi
   if [[ -n "$HYBRID_CLUSTER_INDEX" ]]; then
     echo "--hybrid-cluster-index requires --hybrid-mode single-cluster" >&2
+    exit 2
+  fi
+  if [[ -n "$HYBRID_CLUSTER_INDICES" ]]; then
+    echo "--hybrid-cluster-indices requires --hybrid-mode cluster-group" >&2
     exit 2
   fi
 elif [[ "$HYBRID_MODE" == "single-cluster" ]]; then
@@ -191,6 +200,40 @@ elif [[ "$HYBRID_MODE" == "single-cluster" ]]; then
     echo "--hybrid-partition-index requires --hybrid-mode single-partition" >&2
     exit 2
   fi
+  if [[ -n "$HYBRID_CLUSTER_INDICES" ]]; then
+    echo "--hybrid-cluster-indices requires --hybrid-mode cluster-group" >&2
+    exit 2
+  fi
+elif [[ "$HYBRID_MODE" == "cluster-group" ]]; then
+  if [[ -z "$HYBRID_CLUSTER_INDICES" ]]; then
+    echo "--hybrid-cluster-indices is required with --hybrid-mode cluster-group" >&2
+    exit 2
+  fi
+  if ! [[ "$HYBRID_CLUSTER_INDICES" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+    echo "Invalid --hybrid-cluster-indices: $HYBRID_CLUSTER_INDICES (expected comma-separated integers)" >&2
+    exit 2
+  fi
+  declare -A seen_hybrid_cluster_indices=()
+  IFS=',' read -r -a hybrid_cluster_tokens <<<"$HYBRID_CLUSTER_INDICES"
+  for cluster_idx in "${hybrid_cluster_tokens[@]}"; do
+    if [[ -n "${seen_hybrid_cluster_indices[$cluster_idx]:-}" ]]; then
+      echo "Duplicate cluster index in --hybrid-cluster-indices: $cluster_idx" >&2
+      exit 2
+    fi
+    seen_hybrid_cluster_indices[$cluster_idx]=1
+  done
+  if [[ -n "$HYBRID_PARTITION_INDEX" ]]; then
+    echo "--hybrid-partition-index requires --hybrid-mode single-partition" >&2
+    exit 2
+  fi
+  if [[ -n "$HYBRID_CLUSTER_INDEX" ]]; then
+    echo "--hybrid-cluster-index requires --hybrid-mode single-cluster" >&2
+    exit 2
+  fi
+  if [[ "$HYBRID_CLUSTER_AUTO" -ne 0 ]]; then
+    echo "--hybrid-cluster-auto requires --hybrid-mode single-cluster" >&2
+    exit 2
+  fi
 else
   if [[ -n "$HYBRID_PARTITION_INDEX" ]]; then
     echo "--hybrid-partition-index requires --hybrid-mode single-partition" >&2
@@ -198,6 +241,10 @@ else
   fi
   if [[ -n "$HYBRID_CLUSTER_INDEX" ]]; then
     echo "--hybrid-cluster-index requires --hybrid-mode single-cluster" >&2
+    exit 2
+  fi
+  if [[ -n "$HYBRID_CLUSTER_INDICES" ]]; then
+    echo "--hybrid-cluster-indices requires --hybrid-mode cluster-group" >&2
     exit 2
   fi
   if [[ "$HYBRID_CLUSTER_AUTO" -ne 0 ]]; then
@@ -376,6 +423,7 @@ compute_compile_cache_key() {
     printf 'generated_bundle_sha=%s\n' "$bundle_sha"
     printf 'hybrid_mode=%s\n' "$HYBRID_MODE"
     printf 'hybrid_cluster_build_index=%s\n' "${HYBRID_BUILD_CLUSTER_INDEX:-}"
+    printf 'hybrid_cluster_build_indices=%s\n' "${HYBRID_BUILD_CLUSTER_INDICES:-}"
     printf 'hybrid_cluster_build_owner_hint=%s\n' "${HYBRID_BUILD_CLUSTER_OWNER_HINT:-}"
     printf 'hybrid_cluster_build_fallback=%s\n' "${HYBRID_BUILD_CLUSTER_FALLBACK:-0}"
   } | sha256sum | awk '{print $1}'
@@ -529,6 +577,53 @@ if end is None:
     raise SystemExit(f"Could not find function body end in {path}")
 
 replacement = f'''extern "C" __host__ cudaError_t sim_accel_eval_assignw_launch_cluster(uint32_t index,\n                                                               const uint32_t* state_in,\n                                                               uint32_t* state_out,\n                                                               uint32_t nstates,\n                                                               uint32_t block_size) {{\n    const uint32_t block = block_size ? block_size : 256U;\n    const uint32_t grid = (nstates + block - 1U) / block;\n    switch (index) {{\n    case {cluster}U:\n        sim_accel_eval_assignw_u32_cluster{cluster}<<<grid, block>>>(state_in, state_out, nstates);\n        return cudaGetLastError();\n    default:\n        return cudaErrorInvalidValue;\n    }}\n}}'''
+
+with open(path, "w", encoding="utf-8") as fh:
+    fh.write(text[:start] + replacement + text[end:])
+PY
+}
+
+prepare_cluster_group_link_source() {
+  local link_src="$1"
+  local cluster_indices_csv="$2"
+  python3 - "$link_src" "$cluster_indices_csv" <<'PY'
+import sys
+
+path = sys.argv[1]
+clusters = [int(x) for x in sys.argv[2].split(",") if x]
+func_name = 'extern "C" __host__ cudaError_t sim_accel_eval_assignw_launch_cluster('
+
+with open(path, "r", encoding="utf-8") as fh:
+    text = fh.read()
+
+start = text.find(func_name)
+if start < 0:
+    raise SystemExit(f"Could not find cluster launch function in {path}")
+brace_start = text.find("{", start)
+if brace_start < 0:
+    raise SystemExit(f"Could not find function body start in {path}")
+
+depth = 0
+end = None
+for idx in range(brace_start, len(text)):
+    ch = text[idx]
+    if ch == "{":
+        depth += 1
+    elif ch == "}":
+        depth -= 1
+        if depth == 0:
+            end = idx + 1
+            break
+if end is None:
+    raise SystemExit(f"Could not find function body end in {path}")
+
+cases = "\n".join(
+    f"    case {cluster}U:\n"
+    f"        sim_accel_eval_assignw_u32_cluster{cluster}<<<grid, block>>>(state_in, state_out, nstates);\n"
+    f"        return cudaGetLastError();"
+    for cluster in clusters
+)
+replacement = f'''extern "C" __host__ cudaError_t sim_accel_eval_assignw_launch_cluster(uint32_t index,\n                                                               const uint32_t* state_in,\n                                                               uint32_t* state_out,\n                                                               uint32_t nstates,\n                                                               uint32_t block_size) {{\n    const uint32_t block = block_size ? block_size : 256U;\n    const uint32_t grid = (nstates + block - 1U) / block;\n    switch (index) {{\n{cases}\n    default:\n        return cudaErrorInvalidValue;\n    }}\n}}'''
 
 with open(path, "w", encoding="utf-8") as fh:
     fh.write(text[:start] + replacement + text[end:])
@@ -795,6 +890,28 @@ static bool parseU64(const std::string& s, uint64_t* out) {
   return true;
 }
 
+static bool parseCommaSeparatedU32s(const std::string& s, std::vector<uint32_t>* outp) {
+  outp->clear();
+  if (s.empty()) return false;
+  std::stringstream ss(s);
+  std::string token;
+  while (std::getline(ss, token, ',')) {
+    uint64_t raw = 0;
+    if (!parseU64(token, &raw) || raw > 0xffffffffULL) return false;
+    outp->push_back(static_cast<uint32_t>(raw));
+  }
+  return !outp->empty();
+}
+
+static std::string joinU32Csv(const std::vector<uint32_t>& values) {
+  std::ostringstream os;
+  for (size_t i = 0; i < values.size(); ++i) {
+    if (i) os << ",";
+    os << values[i];
+  }
+  return os.str();
+}
+
 static uint32_t maskToWidth(uint64_t value, uint32_t width) {
   if (width == 0) return 0;
   if (width >= 32) return static_cast<uint32_t>(value);
@@ -806,6 +923,13 @@ struct InitFileStats {
   size_t rules_applied = 0;
   size_t values_applied = 0;
   size_t lines_ignored = 0;
+};
+
+struct HybridTimingStats {
+  double cpu_dispatch_ms = 0.0;
+  double dynamic_h2d_ms = 0.0;
+  double kernel_ms = 0.0;
+  double d2h_ms = 0.0;
 };
 
 static std::vector<uint32_t> loadVarWidths(const std::string& varsPath, uint32_t nvars) {
@@ -862,6 +986,20 @@ static std::vector<uint32_t> subtractOrderedVarIdxs(const std::vector<uint32_t>&
   out.reserve(allVarIdxs.size());
   for (const uint32_t varIdx : allVarIdxs) {
     if (varIdx >= nvars || !removed[varIdx]) out.push_back(varIdx);
+  }
+  return out;
+}
+
+static std::vector<uint32_t> unionOrderedVarIdxLists(
+    const std::vector<std::vector<uint32_t>>& varIdxLists, uint32_t nvars) {
+  std::vector<uint8_t> seen(nvars, 0);
+  std::vector<uint32_t> out;
+  for (const auto& varIdxs : varIdxLists) {
+    for (const uint32_t varIdx : varIdxs) {
+      if (varIdx >= nvars || seen[varIdx]) continue;
+      seen[varIdx] = 1;
+      out.push_back(varIdx);
+    }
   }
   return out;
 }
@@ -1113,8 +1251,9 @@ static void printUsageAndExit(const char* argv0) {
               << " [--init-mode random|zero|ones|counter] [--init-seed N] [--init-file PATH]"
             << " --nstates N --gpu-reps N --cpu-reps N"
             << " [--state-chunk N] [--block-size N]"
-            << " [--hybrid-mode off|single-partition|single-cluster]"
+            << " [--hybrid-mode off|single-partition|single-cluster|cluster-group]"
             << " [--hybrid-partition-index N] [--hybrid-cluster-index N]"
+            << " [--hybrid-cluster-indices I,J,...]"
             << " [--hybrid-cluster-auto] [--hybrid-cluster-auto-max-input-bits N]\n";
   std::exit(2);
 }
@@ -1205,6 +1344,9 @@ int main(int argc, char** argv) {
   uint32_t hybridPartitionIndex = 0;
   bool hybridClusterIndexSet = false;
   uint32_t hybridClusterIndex = 0;
+  bool hybridClusterIndicesSet = false;
+  std::string hybridClusterIndicesCsv;
+  std::vector<uint32_t> hybridClusterIndices;
   bool hybridClusterAuto = false;
   uint64_t hybridClusterAutoMaxInputBits = 128;
   bool hybridClusterAutoFallbackUsed = false;
@@ -1263,6 +1405,13 @@ int main(int argc, char** argv) {
       if (!parseU64(argv[++i], &raw) || raw > 0xffffffffULL) printUsageAndExit(argv[0]);
       hybridClusterIndex = static_cast<uint32_t>(raw);
       hybridClusterIndexSet = true;
+    } else if (a == "--hybrid-cluster-indices") {
+      if (i + 1 >= argc) printUsageAndExit(argv[0]);
+      hybridClusterIndicesCsv = argv[++i];
+      if (!parseCommaSeparatedU32s(hybridClusterIndicesCsv, &hybridClusterIndices)) {
+        printUsageAndExit(argv[0]);
+      }
+      hybridClusterIndicesSet = true;
     } else if (a == "--hybrid-cluster-auto") {
       hybridClusterAuto = true;
     } else if (a == "--hybrid-cluster-auto-max-input-bits") {
@@ -1280,7 +1429,8 @@ int main(int argc, char** argv) {
     return 2;
   }
   if (nstates == 0 || gpu_reps <= 0 || cpu_reps <= 0) printUsageAndExit(argv[0]);
-  if (hybridMode != "off" && hybridMode != "single-partition" && hybridMode != "single-cluster") {
+  if (hybridMode != "off" && hybridMode != "single-partition" && hybridMode != "single-cluster"
+      && hybridMode != "cluster-group") {
     std::cerr << "Invalid --hybrid-mode: " << hybridMode << "\n";
     return 2;
   }
@@ -1292,8 +1442,16 @@ int main(int argc, char** argv) {
     std::cerr << "--hybrid-cluster-index and --hybrid-cluster-auto are mutually exclusive\n";
     return 2;
   }
+  if (hybridMode == "single-cluster" && hybridClusterIndicesSet) {
+    std::cerr << "--hybrid-cluster-indices requires --hybrid-mode cluster-group\n";
+    return 2;
+  }
   if (hybridMode == "single-cluster" && !hybridClusterIndexSet && !hybridClusterAuto) {
     std::cerr << "--hybrid-cluster-index or --hybrid-cluster-auto is required with --hybrid-mode single-cluster\n";
+    return 2;
+  }
+  if (hybridMode == "cluster-group" && !hybridClusterIndicesSet) {
+    std::cerr << "--hybrid-cluster-indices is required with --hybrid-mode cluster-group\n";
     return 2;
   }
   if (hybridMode != "single-partition" && hybridPartitionIndexSet) {
@@ -1302,6 +1460,10 @@ int main(int argc, char** argv) {
   }
   if (hybridMode != "single-cluster" && hybridClusterIndexSet) {
     std::cerr << "--hybrid-cluster-index requires --hybrid-mode single-cluster\n";
+    return 2;
+  }
+  if (hybridMode != "cluster-group" && hybridClusterIndicesSet) {
+    std::cerr << "--hybrid-cluster-indices requires --hybrid-mode cluster-group\n";
     return 2;
   }
   if (hybridMode != "single-cluster" && hybridClusterAuto) {
@@ -1337,6 +1499,27 @@ int main(int argc, char** argv) {
     std::cerr << "Invalid --hybrid-cluster-index: " << hybridClusterIndex
               << " (cluster_count=" << clusterCount << ")\n";
     return 2;
+  }
+  if (hybridMode == "cluster-group") {
+    std::vector<uint8_t> seenCluster(clusterCount, 0);
+    for (uint32_t clusterIdx : hybridClusterIndices) {
+      if (clusterIdx >= clusterCount) {
+        std::cerr << "Invalid --hybrid-cluster-indices entry: " << clusterIdx
+                  << " (cluster_count=" << clusterCount << ")\n";
+        return 2;
+      }
+      if (seenCluster[clusterIdx]) {
+        std::cerr << "Duplicate cluster index in --hybrid-cluster-indices: " << clusterIdx << "\n";
+        return 2;
+      }
+      seenCluster[clusterIdx] = 1;
+      if (sim_accel_eval_cluster_assign_count(clusterIdx) == 0) {
+        std::cerr << "Selected hybrid cluster has no emitted assigns: " << clusterIdx << "\n";
+        return 2;
+      }
+    }
+    std::sort(hybridClusterIndices.begin(), hybridClusterIndices.end());
+    hybridClusterIndicesCsv = joinU32Csv(hybridClusterIndices);
   }
   if (hybridMode == "single-cluster"
       && sim_accel_eval_cluster_assign_count(hybridClusterIndex) == 0) {
@@ -1386,6 +1569,11 @@ int main(int argc, char** argv) {
   std::vector<uint32_t> hybridReadFromOutputVarIdxs;
   std::vector<uint32_t> hybridReadInputVarIdxs;
   std::vector<uint32_t> hybridWriteVarIdxs;
+  std::vector<std::vector<uint32_t>> hybridGroupReadFromOutputVarIdxs(clusterCount);
+  std::vector<std::vector<uint32_t>> hybridGroupWriteVarIdxs(clusterCount);
+  std::vector<uint8_t> hybridSelectedClusterMask(clusterCount, 0);
+  uint32_t hybridClusterGroupAssignCount = 0;
+  uint64_t hybridClusterGroupInputSignatureBits = 0;
   size_t hybridBoundaryInputBytes = 0;
   size_t hybridBoundaryOutputBytes = 0;
   size_t hybridStaticH2dBytes = 0;
@@ -1429,6 +1617,54 @@ int main(int argc, char** argv) {
     hybridDynamicH2dBytes = compactTransferBytes(hybridReadFromOutputVarIdxs, nstates);
     hybridActualH2dBytes = hybridStaticH2dBytes + hybridDynamicH2dBytes;
     hybridActualD2hBytes = compactTransferBytes(hybridWriteVarIdxs, nstates);
+  } else if (hybridMode == "cluster-group") {
+    std::vector<std::vector<uint32_t>> groupReadVarIdxLists;
+    std::vector<std::vector<uint32_t>> groupReadFromOutputVarIdxLists;
+    std::vector<std::vector<uint32_t>> groupWriteVarIdxLists;
+    std::vector<uint8_t> gpuProducedVarMask(nvars, 0);
+    for (uint32_t clusterIdx : hybridClusterIndices) {
+      hybridSelectedClusterMask[clusterIdx] = 1;
+      hybridClusterGroupAssignCount += sim_accel_eval_cluster_assign_count(clusterIdx);
+      hybridClusterGroupInputSignatureBits
+          += sim_accel_eval_cluster_input_signature_bits(clusterIdx);
+      auto readVarIdxs = loadPartitionVarIdxs(clusterIdx, sim_accel_eval_cluster_read_count,
+                                             sim_accel_eval_cluster_read_var_index);
+      auto readFromOutputVarIdxs = loadPartitionVarIdxs(
+          clusterIdx, sim_accel_eval_cluster_read_from_output_count,
+          sim_accel_eval_cluster_read_from_output_var_index);
+      auto writeVarIdxs = loadPartitionVarIdxs(clusterIdx, sim_accel_eval_cluster_write_count,
+                                              sim_accel_eval_cluster_write_var_index);
+      hybridGroupReadFromOutputVarIdxs[clusterIdx] = readFromOutputVarIdxs;
+      hybridGroupWriteVarIdxs[clusterIdx] = writeVarIdxs;
+      groupReadVarIdxLists.push_back(readVarIdxs);
+      groupReadFromOutputVarIdxLists.push_back(readFromOutputVarIdxs);
+      groupWriteVarIdxLists.push_back(writeVarIdxs);
+    }
+    hybridReadVarIdxs = unionOrderedVarIdxLists(groupReadVarIdxLists, nvars);
+    hybridReadFromOutputVarIdxs = unionOrderedVarIdxLists(groupReadFromOutputVarIdxLists, nvars);
+    hybridReadInputVarIdxs
+        = subtractOrderedVarIdxs(hybridReadVarIdxs, hybridReadFromOutputVarIdxs, nvars);
+    hybridWriteVarIdxs = unionOrderedVarIdxLists(groupWriteVarIdxLists, nvars);
+    hybridBoundaryInputBytes = logicalBytesPerBatch(hybridReadVarIdxs, widths, nstates);
+    hybridBoundaryOutputBytes = logicalBytesPerBatch(hybridWriteVarIdxs, widths, nstates);
+    hybridStaticH2dBytes = compactTransferBytes(hybridReadInputVarIdxs, nstates);
+    for (uint32_t clusterIdx : clusterTopoOrder) {
+      if (!hybridSelectedClusterMask[clusterIdx]) continue;
+      const auto& readFromOutputVarIdxs = hybridGroupReadFromOutputVarIdxs[clusterIdx];
+      std::vector<uint32_t> externalReadFromOutputVarIdxs;
+      externalReadFromOutputVarIdxs.reserve(readFromOutputVarIdxs.size());
+      for (uint32_t varIdx : readFromOutputVarIdxs) {
+        if (varIdx < nvars && !gpuProducedVarMask[varIdx]) {
+          externalReadFromOutputVarIdxs.push_back(varIdx);
+        }
+      }
+      hybridDynamicH2dBytes += compactTransferBytes(externalReadFromOutputVarIdxs, nstates);
+      hybridActualD2hBytes += compactTransferBytes(hybridGroupWriteVarIdxs[clusterIdx], nstates);
+      for (uint32_t varIdx : hybridGroupWriteVarIdxs[clusterIdx]) {
+        if (varIdx < nvars) gpuProducedVarMask[varIdx] = 1;
+      }
+    }
+    hybridActualH2dBytes = hybridStaticH2dBytes + hybridDynamicH2dBytes;
   }
   for (uint32_t idx = 0; idx < nvars; ++idx) {
     const size_t base = static_cast<size_t>(idx) * nstates;
@@ -1491,6 +1727,7 @@ int main(int argc, char** argv) {
   std::vector<uint32_t> h_hybridInputCompact;
   std::vector<uint32_t> h_hybridReadOutputCompact;
   std::vector<uint32_t> h_hybridWriteCompact;
+  double hybridSetupH2dMs = 0.0;
   if (hybridMode != "off") {
     if (!hybridReadInputVarIdxs.empty()) {
       h_hybridInputCompact = gatherSlotsVarMajor(h_in_varmajor, hybridReadInputVarIdxs, nstates);
@@ -1503,6 +1740,7 @@ int main(int argc, char** argv) {
       checkCuda(cudaMalloc(&d_hybridInputCompact,
                            static_cast<size_t>(hybridReadInputVarIdxs.size()) * nstates * sizeof(uint32_t)),
                 "cudaMalloc d_hybridInputCompact");
+      auto hybridStaticH2dT0 = std::chrono::high_resolution_clock::now();
       checkCuda(cudaMemcpy(d_hybridInputCompact, h_hybridInputCompact.data(),
                            static_cast<size_t>(hybridReadInputVarIdxs.size()) * nstates * sizeof(uint32_t),
                            cudaMemcpyHostToDevice),
@@ -1514,6 +1752,8 @@ int main(int argc, char** argv) {
           static_cast<uint32_t>(hybridReadInputVarIdxs.size()), d_in, nvars, nstates, 0);
       checkCuda(cudaGetLastError(), "hybrid input scatter launch");
       checkCuda(cudaDeviceSynchronize(), "hybrid input scatter sync");
+      auto hybridStaticH2dT1 = std::chrono::high_resolution_clock::now();
+      hybridSetupH2dMs = std::chrono::duration<double, std::milli>(hybridStaticH2dT1 - hybridStaticH2dT0).count();
     }
     if (!hybridReadFromOutputVarIdxs.empty()) {
       checkCuda(cudaMalloc(&d_hybridReadOutputVarIdxs,
@@ -1559,11 +1799,12 @@ int main(int argc, char** argv) {
     }
   };
 
-  auto runHybridPartitionPass = [&](std::vector<uint32_t>& stateOut) {
+  auto runHybridPartitionPass = [&](std::vector<uint32_t>& stateOut, HybridTimingStats* statsp) {
     stateOut = h_in_varmajor;
     for (uint32_t partitionIdx = 0; partitionIdx < partitionCount; ++partitionIdx) {
       if (partitionIdx == hybridPartitionIndex) {
         if (!hybridReadFromOutputVarIdxs.empty()) {
+          auto h2dT0 = std::chrono::high_resolution_clock::now();
           gatherSlotsVarMajorInto(stateOut, hybridReadFromOutputVarIdxs, nstates,
                                   &h_hybridReadOutputCompact);
           checkCuda(cudaMemcpy(d_hybridReadOutputCompact, h_hybridReadOutputCompact.data(),
@@ -1577,12 +1818,22 @@ int main(int argc, char** argv) {
               static_cast<uint32_t>(hybridReadFromOutputVarIdxs.size()), d_out, nvars, nstates, 0);
           checkCuda(cudaGetLastError(), "hybrid partition read-output scatter launch");
           checkCuda(cudaDeviceSynchronize(), "hybrid partition read-output scatter sync");
+          auto h2dT1 = std::chrono::high_resolution_clock::now();
+          if (statsp) {
+            statsp->dynamic_h2d_ms += std::chrono::duration<double, std::milli>(h2dT1 - h2dT0).count();
+          }
         }
+        auto kernelT0 = std::chrono::high_resolution_clock::now();
         checkCuda(sim_accel_eval_assignw_launch_partition(partitionIdx, d_in, d_out, nstates,
                                                           blockSize),
                   "launch_partition hybrid");
         checkCuda(cudaDeviceSynchronize(), "hybrid partition sync");
+        auto kernelT1 = std::chrono::high_resolution_clock::now();
+        if (statsp) {
+          statsp->kernel_ms += std::chrono::duration<double, std::milli>(kernelT1 - kernelT0).count();
+        }
         if (!hybridWriteVarIdxs.empty()) {
+          auto d2hT0 = std::chrono::high_resolution_clock::now();
           const int gatherBlock = static_cast<int>(blockSize);
           const int gatherGrid = static_cast<int>((nstates + gatherBlock - 1) / gatherBlock);
           sim_accel_gather_outputs_u32<<<gatherGrid, gatherBlock>>>(
@@ -1595,19 +1846,29 @@ int main(int argc, char** argv) {
                                cudaMemcpyDeviceToHost),
                     "D2H hybrid partition write compact");
           scatterSlotsVarMajor(stateOut, h_hybridWriteCompact, hybridWriteVarIdxs, nstates);
+          auto d2hT1 = std::chrono::high_resolution_clock::now();
+          if (statsp) {
+            statsp->d2h_ms += std::chrono::duration<double, std::milli>(d2hT1 - d2hT0).count();
+          }
         }
       } else {
+        auto cpuT0 = std::chrono::high_resolution_clock::now();
         sim_accel_eval_assignw_cpu_partition(partitionIdx, h_in_varmajor.data(), stateOut.data(),
                                              nstates);
+        auto cpuT1 = std::chrono::high_resolution_clock::now();
+        if (statsp) {
+          statsp->cpu_dispatch_ms += std::chrono::duration<double, std::milli>(cpuT1 - cpuT0).count();
+        }
       }
     }
   };
 
-  auto runHybridClusterPass = [&](std::vector<uint32_t>& stateOut) {
+  auto runHybridClusterPass = [&](std::vector<uint32_t>& stateOut, HybridTimingStats* statsp) {
     stateOut = h_in_varmajor;
     for (uint32_t clusterIdx : clusterTopoOrder) {
       if (clusterIdx == hybridClusterIndex) {
         if (!hybridReadFromOutputVarIdxs.empty()) {
+          auto h2dT0 = std::chrono::high_resolution_clock::now();
           gatherSlotsVarMajorInto(stateOut, hybridReadFromOutputVarIdxs, nstates,
                                   &h_hybridReadOutputCompact);
           checkCuda(cudaMemcpy(d_hybridReadOutputCompact, h_hybridReadOutputCompact.data(),
@@ -1621,11 +1882,21 @@ int main(int argc, char** argv) {
               static_cast<uint32_t>(hybridReadFromOutputVarIdxs.size()), d_out, nvars, nstates, 0);
           checkCuda(cudaGetLastError(), "hybrid cluster read-output scatter launch");
           checkCuda(cudaDeviceSynchronize(), "hybrid cluster read-output scatter sync");
+          auto h2dT1 = std::chrono::high_resolution_clock::now();
+          if (statsp) {
+            statsp->dynamic_h2d_ms += std::chrono::duration<double, std::milli>(h2dT1 - h2dT0).count();
+          }
         }
+        auto kernelT0 = std::chrono::high_resolution_clock::now();
         checkCuda(sim_accel_eval_assignw_launch_cluster(clusterIdx, d_in, d_out, nstates, blockSize),
                   "launch_cluster hybrid");
         checkCuda(cudaDeviceSynchronize(), "hybrid cluster sync");
+        auto kernelT1 = std::chrono::high_resolution_clock::now();
+        if (statsp) {
+          statsp->kernel_ms += std::chrono::duration<double, std::milli>(kernelT1 - kernelT0).count();
+        }
         if (!hybridWriteVarIdxs.empty()) {
+          auto d2hT0 = std::chrono::high_resolution_clock::now();
           const int gatherBlock = static_cast<int>(blockSize);
           const int gatherGrid = static_cast<int>((nstates + gatherBlock - 1) / gatherBlock);
           sim_accel_gather_outputs_u32<<<gatherGrid, gatherBlock>>>(
@@ -1638,10 +1909,105 @@ int main(int argc, char** argv) {
                                cudaMemcpyDeviceToHost),
                     "D2H hybrid cluster write compact");
           scatterSlotsVarMajor(stateOut, h_hybridWriteCompact, hybridWriteVarIdxs, nstates);
+          auto d2hT1 = std::chrono::high_resolution_clock::now();
+          if (statsp) {
+            statsp->d2h_ms += std::chrono::duration<double, std::milli>(d2hT1 - d2hT0).count();
+          }
         }
       } else {
+        auto cpuT0 = std::chrono::high_resolution_clock::now();
         sim_accel_eval_assignw_cpu_cluster_dispatch(clusterIdx, h_in_varmajor.data(),
                                                     stateOut.data(), nstates);
+        auto cpuT1 = std::chrono::high_resolution_clock::now();
+        if (statsp) {
+          statsp->cpu_dispatch_ms += std::chrono::duration<double, std::milli>(cpuT1 - cpuT0).count();
+        }
+      }
+    }
+  };
+
+  auto runHybridClusterGroupPass = [&](std::vector<uint32_t>& stateOut, HybridTimingStats* statsp) {
+    stateOut = h_in_varmajor;
+    std::vector<uint8_t> gpuProducedVarMask(nvars, 0);
+    for (uint32_t clusterIdx : clusterTopoOrder) {
+      if (clusterIdx < hybridSelectedClusterMask.size() && hybridSelectedClusterMask[clusterIdx]) {
+        const auto& clusterReadFromOutputVarIdxs = hybridGroupReadFromOutputVarIdxs[clusterIdx];
+        std::vector<uint32_t> externalReadFromOutputVarIdxs;
+        externalReadFromOutputVarIdxs.reserve(clusterReadFromOutputVarIdxs.size());
+        for (uint32_t varIdx : clusterReadFromOutputVarIdxs) {
+          if (varIdx < nvars && !gpuProducedVarMask[varIdx]) {
+            externalReadFromOutputVarIdxs.push_back(varIdx);
+          }
+        }
+        if (!externalReadFromOutputVarIdxs.empty()) {
+          auto h2dT0 = std::chrono::high_resolution_clock::now();
+          gatherSlotsVarMajorInto(stateOut, externalReadFromOutputVarIdxs, nstates,
+                                  &h_hybridReadOutputCompact);
+          checkCuda(cudaMemcpy(d_hybridReadOutputVarIdxs, externalReadFromOutputVarIdxs.data(),
+                               externalReadFromOutputVarIdxs.size() * sizeof(uint32_t),
+                               cudaMemcpyHostToDevice),
+                    "H2D hybrid cluster-group read-output var idxs");
+          checkCuda(cudaMemcpy(d_hybridReadOutputCompact, h_hybridReadOutputCompact.data(),
+                               h_hybridReadOutputCompact.size() * sizeof(uint32_t),
+                               cudaMemcpyHostToDevice),
+                    "H2D hybrid cluster-group read-output compact");
+          const int scatterBlock = static_cast<int>(blockSize);
+          const int scatterGrid = static_cast<int>((nstates + scatterBlock - 1) / scatterBlock);
+          sim_accel_scatter_inputs_u32<<<scatterGrid, scatterBlock>>>(
+              d_hybridReadOutputCompact, d_hybridReadOutputVarIdxs,
+              static_cast<uint32_t>(externalReadFromOutputVarIdxs.size()), d_out, nvars, nstates,
+              0);
+          checkCuda(cudaGetLastError(), "hybrid cluster-group read-output scatter launch");
+          checkCuda(cudaDeviceSynchronize(), "hybrid cluster-group read-output scatter sync");
+          auto h2dT1 = std::chrono::high_resolution_clock::now();
+          if (statsp) {
+            statsp->dynamic_h2d_ms += std::chrono::duration<double, std::milli>(h2dT1 - h2dT0).count();
+          }
+        }
+        auto kernelT0 = std::chrono::high_resolution_clock::now();
+        checkCuda(sim_accel_eval_assignw_launch_cluster(clusterIdx, d_in, d_out, nstates, blockSize),
+                  "launch_cluster hybrid group");
+        checkCuda(cudaDeviceSynchronize(), "hybrid cluster-group sync");
+        auto kernelT1 = std::chrono::high_resolution_clock::now();
+        if (statsp) {
+          statsp->kernel_ms += std::chrono::duration<double, std::milli>(kernelT1 - kernelT0).count();
+        }
+        const auto& clusterWriteVarIdxs = hybridGroupWriteVarIdxs[clusterIdx];
+        if (!clusterWriteVarIdxs.empty()) {
+          h_hybridWriteCompact.resize(static_cast<size_t>(clusterWriteVarIdxs.size()) * nstates);
+          auto d2hT0 = std::chrono::high_resolution_clock::now();
+          checkCuda(cudaMemcpy(d_hybridWriteVarIdxs, clusterWriteVarIdxs.data(),
+                               clusterWriteVarIdxs.size() * sizeof(uint32_t),
+                               cudaMemcpyHostToDevice),
+                    "H2D hybrid cluster-group write var idxs");
+          const int gatherBlock = static_cast<int>(blockSize);
+          const int gatherGrid = static_cast<int>((nstates + gatherBlock - 1) / gatherBlock);
+          sim_accel_gather_outputs_u32<<<gatherGrid, gatherBlock>>>(
+              d_out, d_hybridWriteVarIdxs, static_cast<uint32_t>(clusterWriteVarIdxs.size()),
+              d_hybridWriteCompact, nvars, nstates, 0);
+          checkCuda(cudaGetLastError(), "hybrid cluster-group write gather launch");
+          checkCuda(cudaDeviceSynchronize(), "hybrid cluster-group write gather sync");
+          checkCuda(cudaMemcpy(h_hybridWriteCompact.data(), d_hybridWriteCompact,
+                               h_hybridWriteCompact.size() * sizeof(uint32_t),
+                               cudaMemcpyDeviceToHost),
+                    "D2H hybrid cluster-group write compact");
+          scatterSlotsVarMajor(stateOut, h_hybridWriteCompact, clusterWriteVarIdxs, nstates);
+          auto d2hT1 = std::chrono::high_resolution_clock::now();
+          if (statsp) {
+            statsp->d2h_ms += std::chrono::duration<double, std::milli>(d2hT1 - d2hT0).count();
+          }
+          for (uint32_t varIdx : clusterWriteVarIdxs) {
+            if (varIdx < nvars) gpuProducedVarMask[varIdx] = 1;
+          }
+        }
+      } else {
+        auto cpuT0 = std::chrono::high_resolution_clock::now();
+        sim_accel_eval_assignw_cpu_cluster_dispatch(clusterIdx, h_in_varmajor.data(),
+                                                    stateOut.data(), nstates);
+        auto cpuT1 = std::chrono::high_resolution_clock::now();
+        if (statsp) {
+          statsp->cpu_dispatch_ms += std::chrono::duration<double, std::milli>(cpuT1 - cpuT0).count();
+        }
       }
     }
   };
@@ -1651,6 +2017,7 @@ int main(int argc, char** argv) {
   float gpu_ms = 0.0f;
   double hybrid_ms = 0.0;
   double hybrid_cpu_ms = 0.0;
+  HybridTimingStats hybridTimingTotal;
 
   if (hybridMode == "off") {
     for (int i = 0; i < 10; ++i) {
@@ -1711,17 +2078,21 @@ int main(int argc, char** argv) {
     std::vector<uint32_t> hybridWarmup(elems, 0u);
     for (int i = 0; i < 3; ++i) {
       if (hybridMode == "single-partition") {
-        runHybridPartitionPass(hybridWarmup);
+        runHybridPartitionPass(hybridWarmup, nullptr);
+      } else if (hybridMode == "single-cluster") {
+        runHybridClusterPass(hybridWarmup, nullptr);
       } else {
-        runHybridClusterPass(hybridWarmup);
+        runHybridClusterGroupPass(hybridWarmup, nullptr);
       }
     }
     auto hybrid_t0 = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < gpu_reps; ++i) {
       if (hybridMode == "single-partition") {
-        runHybridPartitionPass(h_out_hybrid_varmajor);
+        runHybridPartitionPass(h_out_hybrid_varmajor, &hybridTimingTotal);
+      } else if (hybridMode == "single-cluster") {
+        runHybridClusterPass(h_out_hybrid_varmajor, &hybridTimingTotal);
       } else {
-        runHybridClusterPass(h_out_hybrid_varmajor);
+        runHybridClusterGroupPass(h_out_hybrid_varmajor, &hybridTimingTotal);
       }
     }
     auto hybrid_t1 = std::chrono::high_resolution_clock::now();
@@ -1770,6 +2141,16 @@ int main(int argc, char** argv) {
   const double cpu_ms_per_rep = cpu_ms / cpu_reps;
   const double hybrid_ms_per_rep = (hybridMode == "off") ? 0.0 : (hybrid_ms / gpu_reps);
   const double hybrid_cpu_ms_per_rep = (hybridMode == "off") ? 0.0 : (hybrid_cpu_ms / cpu_reps);
+  const double hybrid_setup_h2d_ms = (hybridMode == "off") ? 0.0 : hybridSetupH2dMs;
+  const double hybrid_dynamic_h2d_ms_per_rep
+      = (hybridMode == "off") ? 0.0 : (hybridTimingTotal.dynamic_h2d_ms / gpu_reps);
+  const double hybrid_kernel_ms_per_rep
+      = (hybridMode == "off") ? 0.0 : (hybridTimingTotal.kernel_ms / gpu_reps);
+  const double hybrid_d2h_ms_per_rep
+      = (hybridMode == "off") ? 0.0 : (hybridTimingTotal.d2h_ms / gpu_reps);
+  const double hybrid_transfer_ms_per_rep = hybrid_dynamic_h2d_ms_per_rep + hybrid_d2h_ms_per_rep;
+  const double hybrid_cpu_dispatch_ms_per_rep
+      = (hybridMode == "off") ? 0.0 : (hybridTimingTotal.cpu_dispatch_ms / gpu_reps);
   const double speedup = (hybridMode == "off" && gpu_ms_per_rep > 0.0)
                              ? (cpu_ms_per_rep / gpu_ms_per_rep)
                              : 0.0;
@@ -1808,10 +2189,16 @@ int main(int argc, char** argv) {
     std::cout << "hybrid_dynamic_h2d_bytes_per_batch=" << hybridDynamicH2dBytes << "\n";
     std::cout << "hybrid_actual_h2d_bytes_per_batch=" << hybridActualH2dBytes << "\n";
     std::cout << "hybrid_actual_d2h_bytes_per_batch=" << hybridActualD2hBytes << "\n";
+    std::cout << "hybrid_setup_h2d_ms=" << hybrid_setup_h2d_ms << "\n";
+    std::cout << "hybrid_dynamic_h2d_ms_per_rep=" << hybrid_dynamic_h2d_ms_per_rep << "\n";
+    std::cout << "hybrid_kernel_ms_per_rep=" << hybrid_kernel_ms_per_rep << "\n";
+    std::cout << "hybrid_d2h_ms_per_rep=" << hybrid_d2h_ms_per_rep << "\n";
+    std::cout << "hybrid_transfer_ms_per_rep=" << hybrid_transfer_ms_per_rep << "\n";
+    std::cout << "hybrid_cpu_dispatch_ms_per_rep=" << hybrid_cpu_dispatch_ms_per_rep << "\n";
     std::cout << "hybrid_gpu_ms_per_rep=" << hybrid_ms_per_rep << "\n";
     std::cout << "hybrid_cpu_ms_per_rep=" << hybrid_cpu_ms_per_rep << "\n";
     std::cout << "hybrid_mismatch=" << hybridMismatch << "\n";
-  } else {
+  } else if (hybridMode == "single-cluster") {
     std::cout << "hybrid_cluster_index=" << hybridClusterIndex << "\n";
     std::cout << "hybrid_cluster_auto=" << (hybridClusterAuto ? 1 : 0) << "\n";
     std::cout << "hybrid_cluster_auto_max_input_bits=" << hybridClusterAutoMaxInputBits << "\n";
@@ -1834,6 +2221,35 @@ int main(int argc, char** argv) {
     std::cout << "hybrid_dynamic_h2d_bytes_per_batch=" << hybridDynamicH2dBytes << "\n";
     std::cout << "hybrid_actual_h2d_bytes_per_batch=" << hybridActualH2dBytes << "\n";
     std::cout << "hybrid_actual_d2h_bytes_per_batch=" << hybridActualD2hBytes << "\n";
+    std::cout << "hybrid_setup_h2d_ms=" << hybrid_setup_h2d_ms << "\n";
+    std::cout << "hybrid_dynamic_h2d_ms_per_rep=" << hybrid_dynamic_h2d_ms_per_rep << "\n";
+    std::cout << "hybrid_kernel_ms_per_rep=" << hybrid_kernel_ms_per_rep << "\n";
+    std::cout << "hybrid_d2h_ms_per_rep=" << hybrid_d2h_ms_per_rep << "\n";
+    std::cout << "hybrid_transfer_ms_per_rep=" << hybrid_transfer_ms_per_rep << "\n";
+    std::cout << "hybrid_cpu_dispatch_ms_per_rep=" << hybrid_cpu_dispatch_ms_per_rep << "\n";
+    std::cout << "hybrid_gpu_ms_per_rep=" << hybrid_ms_per_rep << "\n";
+    std::cout << "hybrid_cpu_ms_per_rep=" << hybrid_cpu_ms_per_rep << "\n";
+    std::cout << "hybrid_mismatch=" << hybridMismatch << "\n";
+  } else {
+    std::cout << "hybrid_cluster_indices=" << hybridClusterIndicesCsv << "\n";
+    std::cout << "hybrid_cluster_group_size=" << hybridClusterIndices.size() << "\n";
+    std::cout << "hybrid_cluster_group_assign_count=" << hybridClusterGroupAssignCount << "\n";
+    std::cout << "hybrid_cluster_group_input_signature_bits="
+              << hybridClusterGroupInputSignatureBits << "\n";
+    std::cout << "hybrid_cluster_read_vars=" << hybridReadVarIdxs.size() << "\n";
+    std::cout << "hybrid_cluster_write_vars=" << hybridWriteVarIdxs.size() << "\n";
+    std::cout << "hybrid_cluster_input_bytes_per_batch=" << hybridBoundaryInputBytes << "\n";
+    std::cout << "hybrid_cluster_output_bytes_per_batch=" << hybridBoundaryOutputBytes << "\n";
+    std::cout << "hybrid_static_h2d_bytes_per_batch=" << hybridStaticH2dBytes << "\n";
+    std::cout << "hybrid_dynamic_h2d_bytes_per_batch=" << hybridDynamicH2dBytes << "\n";
+    std::cout << "hybrid_actual_h2d_bytes_per_batch=" << hybridActualH2dBytes << "\n";
+    std::cout << "hybrid_actual_d2h_bytes_per_batch=" << hybridActualD2hBytes << "\n";
+    std::cout << "hybrid_setup_h2d_ms=" << hybrid_setup_h2d_ms << "\n";
+    std::cout << "hybrid_dynamic_h2d_ms_per_rep=" << hybrid_dynamic_h2d_ms_per_rep << "\n";
+    std::cout << "hybrid_kernel_ms_per_rep=" << hybrid_kernel_ms_per_rep << "\n";
+    std::cout << "hybrid_d2h_ms_per_rep=" << hybrid_d2h_ms_per_rep << "\n";
+    std::cout << "hybrid_transfer_ms_per_rep=" << hybrid_transfer_ms_per_rep << "\n";
+    std::cout << "hybrid_cpu_dispatch_ms_per_rep=" << hybrid_cpu_dispatch_ms_per_rep << "\n";
     std::cout << "hybrid_gpu_ms_per_rep=" << hybrid_ms_per_rep << "\n";
     std::cout << "hybrid_cpu_ms_per_rep=" << hybrid_cpu_ms_per_rep << "\n";
     std::cout << "hybrid_mismatch=" << hybridMismatch << "\n";
@@ -1917,6 +2333,7 @@ USE_PARTITION_OBJECTS=0
 declare -a PARTITION_SOURCES=()
 declare -a CLUSTER_SOURCES=()
 HYBRID_BUILD_CLUSTER_INDEX=""
+HYBRID_BUILD_CLUSTER_INDICES=""
 HYBRID_BUILD_CLUSTER_OWNER_HINT=""
 HYBRID_BUILD_CLUSTER_FALLBACK=0
 if [[ -f "$OUTDIR/kernel_generated.api.h" && -f "$OUTDIR/kernel_generated.cpu.cpp" && -f "$OUTDIR/kernel_generated.link.cu" ]]; then
@@ -1954,6 +2371,21 @@ if [[ "$HYBRID_MODE" == "single-cluster" && "$USE_PARTITION_OBJECTS" -eq 1 ]]; t
   fi
   prepare_single_cluster_link_source "$OUTDIR/kernel_generated.link.cu" "$HYBRID_BUILD_CLUSTER_INDEX"
   CLUSTER_SOURCES=("$selected_cluster_src")
+  HYBRID_BUILD_CLUSTER_INDICES="$HYBRID_BUILD_CLUSTER_INDEX"
+elif [[ "$HYBRID_MODE" == "cluster-group" && "$USE_PARTITION_OBJECTS" -eq 1 ]]; then
+  HYBRID_BUILD_CLUSTER_INDICES="$HYBRID_CLUSTER_INDICES"
+  declare -a SELECTED_CLUSTER_SOURCES=()
+  IFS=',' read -r -a HYBRID_GROUP_CLUSTER_ARRAY <<<"$HYBRID_CLUSTER_INDICES"
+  for cluster_idx in "${HYBRID_GROUP_CLUSTER_ARRAY[@]}"; do
+    selected_cluster_src="$OUTDIR/kernel_generated.cluster${cluster_idx}.cu"
+    if [[ ! -f "$selected_cluster_src" ]]; then
+      echo "Missing generated source for selected hybrid cluster: $selected_cluster_src" >&2
+      exit 2
+    fi
+    SELECTED_CLUSTER_SOURCES+=("$selected_cluster_src")
+  done
+  prepare_cluster_group_link_source "$OUTDIR/kernel_generated.link.cu" "$HYBRID_CLUSTER_INDICES"
+  CLUSTER_SOURCES=("${SELECTED_CLUSTER_SOURCES[@]}")
 fi
 
 BENCH_GENERATED_INCLUDE="kernel_generated.cu"
@@ -2096,6 +2528,8 @@ echo "[4/4] Running benchmark..."
     else
       BENCH_CMD+=(--hybrid-cluster-index "$HYBRID_CLUSTER_INDEX")
     fi
+  elif [[ "$HYBRID_MODE" == "cluster-group" ]]; then
+    BENCH_CMD+=(--hybrid-mode "$HYBRID_MODE" --hybrid-cluster-indices "$HYBRID_CLUSTER_INDICES")
   fi
   if [[ -n "$INIT_FILE_ABS" ]]; then
     BENCH_CMD+=(--init-file "$INIT_FILE_ABS")
