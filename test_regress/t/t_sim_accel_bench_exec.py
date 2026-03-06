@@ -52,7 +52,7 @@ if os.path.exists(kernel_comm):
 
 test.file_grep(bench_run_log, r"mismatch=0")
 test.file_grep(bench_run_log, r"compact_mismatch=0")
-test.file_grep(bench_run_log, r"speedup_cpu_over_gpu=")
+test.file_grep(bench_run_log, r"speedup_gpu_over_cpu=")
 test.file_grep(bench_run_log, r"auto_engine_recommendation=")
 test.file_grep(bench_run_log, r"comm_input_vars=")
 test.file_grep(bench_run_log, r"comm_output_vars=")

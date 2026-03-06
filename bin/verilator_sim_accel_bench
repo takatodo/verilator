@@ -701,7 +701,7 @@ int main(int argc, char** argv) {
   }
   std::cout << "gpu_ms_per_rep=" << gpu_ms_per_rep << "\n";
   std::cout << "cpu_ms_per_rep=" << cpu_ms_per_rep << "\n";
-  std::cout << "speedup_cpu_over_gpu=" << speedup << "x\n";
+  std::cout << "speedup_gpu_over_cpu=" << speedup << "x\n";
   std::cout << "mismatch=" << mismatch << "\n";
   std::cout << "compact_mismatch=" << compactMismatch << "\n";
   std::cout << "comm_input_vars=" << inputVarIdxs.size() << "\n";
