@@ -808,6 +808,8 @@ if [[ -n "$ASSIGNW_SUPPORTED" && -n "$ASSIGNW_TOTAL" && -n "$ASSIGNW_COV_PCT" ]]
     echo "cuda_assignw_total=$ASSIGNW_TOTAL"
     echo "cuda_assignw_ignored=$ASSIGNW_IGNORED"
     echo "cuda_assignw_coverage_pct=$ASSIGNW_COV_PCT"
+    echo "cuda_assignw_coverage_scope=post_lowering_assignw_nodes"
+    echo "cuda_assignw_coverage_basis=supported_assignw_div_total_assignw"
   } >> "$OUTDIR/bench_run.log"
 fi
 
