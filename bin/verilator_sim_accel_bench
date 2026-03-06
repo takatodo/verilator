@@ -1176,6 +1176,16 @@ static std::vector<uint32_t> unionOrderedVarIdxLists(
   return out;
 }
 
+static std::vector<uint32_t> filterOrderedVarIdxsByMask(const std::vector<uint32_t>& varIdxs,
+                                                        const std::vector<uint8_t>& keepMask) {
+  std::vector<uint32_t> out;
+  out.reserve(varIdxs.size());
+  for (const uint32_t varIdx : varIdxs) {
+    if (varIdx < keepMask.size() && keepMask[varIdx]) out.push_back(varIdx);
+  }
+  return out;
+}
+
 static size_t logicalBytesPerBatch(const std::vector<uint32_t>& varIdxs,
                                    const std::vector<uint32_t>& widths, uint32_t nstates) {
   size_t perStateBytes = 0;
@@ -1742,6 +1752,7 @@ int main(int argc, char** argv) {
   std::vector<uint32_t> hybridReadInputVarIdxs;
   std::vector<uint32_t> hybridWriteVarIdxs;
   std::vector<std::vector<uint32_t>> hybridGroupReadFromOutputVarIdxs(clusterCount);
+  std::vector<std::vector<uint32_t>> hybridGroupAllWriteVarIdxs(clusterCount);
   std::vector<std::vector<uint32_t>> hybridGroupWriteVarIdxs(clusterCount);
   std::vector<uint8_t> hybridSelectedClusterMask(clusterCount, 0);
   uint32_t hybridClusterGroupAssignCount = 0;
@@ -1752,7 +1763,19 @@ int main(int argc, char** argv) {
   size_t hybridDynamicH2dBytes = 0;
   size_t hybridActualH2dBytes = 0;
   size_t hybridActualD2hBytes = 0;
+  std::vector<uint8_t> hybridCpuNeededVarMask(nvars, 0);
+  for (const uint32_t varIdx : outputVarIdxs) {
+    if (varIdx < nvars) hybridCpuNeededVarMask[varIdx] = 1;
+  }
   if (hybridMode == "single-partition") {
+    for (uint32_t partitionIdx = hybridPartitionIndex + 1; partitionIdx < partitionCount; ++partitionIdx) {
+      const auto laterReadVarIdxs = loadPartitionVarIdxs(partitionIdx,
+                                                         sim_accel_eval_partition_read_count,
+                                                         sim_accel_eval_partition_read_var_index);
+      for (const uint32_t varIdx : laterReadVarIdxs) {
+        if (varIdx < nvars) hybridCpuNeededVarMask[varIdx] = 1;
+      }
+    }
     hybridReadVarIdxs = loadPartitionVarIdxs(hybridPartitionIndex,
                                              sim_accel_eval_partition_read_count,
                                              sim_accel_eval_partition_read_var_index);
@@ -1762,9 +1785,10 @@ int main(int argc, char** argv) {
                                sim_accel_eval_partition_read_from_output_var_index);
     hybridReadInputVarIdxs
         = subtractOrderedVarIdxs(hybridReadVarIdxs, hybridReadFromOutputVarIdxs, nvars);
-    hybridWriteVarIdxs = loadPartitionVarIdxs(hybridPartitionIndex,
-                                              sim_accel_eval_partition_write_count,
-                                              sim_accel_eval_partition_write_var_index);
+    const auto hybridAllWriteVarIdxs = loadPartitionVarIdxs(hybridPartitionIndex,
+                                                            sim_accel_eval_partition_write_count,
+                                                            sim_accel_eval_partition_write_var_index);
+    hybridWriteVarIdxs = filterOrderedVarIdxsByMask(hybridAllWriteVarIdxs, hybridCpuNeededVarMask);
     hybridBoundaryInputBytes = logicalBytesPerBatch(hybridReadVarIdxs, widths, nstates);
     hybridBoundaryOutputBytes = logicalBytesPerBatch(hybridWriteVarIdxs, widths, nstates);
     hybridStaticH2dBytes = compactTransferBytes(hybridReadInputVarIdxs, nstates);
@@ -1772,6 +1796,14 @@ int main(int argc, char** argv) {
     hybridActualH2dBytes = hybridStaticH2dBytes + hybridDynamicH2dBytes;
     hybridActualD2hBytes = compactTransferBytes(hybridWriteVarIdxs, nstates);
   } else if (hybridMode == "single-cluster") {
+    for (uint32_t clusterIdx : clusterTopoOrder) {
+      if (clusterIdx == hybridClusterIndex) continue;
+      const auto laterReadVarIdxs = loadPartitionVarIdxs(clusterIdx, sim_accel_eval_cluster_read_count,
+                                                         sim_accel_eval_cluster_read_var_index);
+      for (const uint32_t varIdx : laterReadVarIdxs) {
+        if (varIdx < nvars) hybridCpuNeededVarMask[varIdx] = 1;
+      }
+    }
     hybridReadVarIdxs = loadPartitionVarIdxs(hybridClusterIndex, sim_accel_eval_cluster_read_count,
                                              sim_accel_eval_cluster_read_var_index);
     hybridReadFromOutputVarIdxs
@@ -1780,9 +1812,10 @@ int main(int argc, char** argv) {
                                sim_accel_eval_cluster_read_from_output_var_index);
     hybridReadInputVarIdxs
         = subtractOrderedVarIdxs(hybridReadVarIdxs, hybridReadFromOutputVarIdxs, nvars);
-    hybridWriteVarIdxs = loadPartitionVarIdxs(hybridClusterIndex,
-                                              sim_accel_eval_cluster_write_count,
-                                              sim_accel_eval_cluster_write_var_index);
+    const auto hybridAllWriteVarIdxs = loadPartitionVarIdxs(hybridClusterIndex,
+                                                            sim_accel_eval_cluster_write_count,
+                                                            sim_accel_eval_cluster_write_var_index);
+    hybridWriteVarIdxs = filterOrderedVarIdxsByMask(hybridAllWriteVarIdxs, hybridCpuNeededVarMask);
     hybridBoundaryInputBytes = logicalBytesPerBatch(hybridReadVarIdxs, widths, nstates);
     hybridBoundaryOutputBytes = logicalBytesPerBatch(hybridWriteVarIdxs, widths, nstates);
     hybridStaticH2dBytes = compactTransferBytes(hybridReadInputVarIdxs, nstates);
@@ -1792,10 +1825,20 @@ int main(int argc, char** argv) {
   } else if (hybridMode == "cluster-group") {
     std::vector<std::vector<uint32_t>> groupReadVarIdxLists;
     std::vector<std::vector<uint32_t>> groupReadFromOutputVarIdxLists;
-    std::vector<std::vector<uint32_t>> groupWriteVarIdxLists;
+    std::vector<std::vector<uint32_t>> groupWritebackVarIdxLists;
     std::vector<uint8_t> gpuProducedVarMask(nvars, 0);
     for (uint32_t clusterIdx : hybridClusterIndices) {
       hybridSelectedClusterMask[clusterIdx] = 1;
+    }
+    for (uint32_t clusterIdx : clusterTopoOrder) {
+      if (clusterIdx < hybridSelectedClusterMask.size() && hybridSelectedClusterMask[clusterIdx]) continue;
+      const auto laterReadVarIdxs = loadPartitionVarIdxs(clusterIdx, sim_accel_eval_cluster_read_count,
+                                                         sim_accel_eval_cluster_read_var_index);
+      for (const uint32_t varIdx : laterReadVarIdxs) {
+        if (varIdx < nvars) hybridCpuNeededVarMask[varIdx] = 1;
+      }
+    }
+    for (uint32_t clusterIdx : hybridClusterIndices) {
       hybridClusterGroupAssignCount += sim_accel_eval_cluster_assign_count(clusterIdx);
       hybridClusterGroupInputSignatureBits
           += sim_accel_eval_cluster_input_signature_bits(clusterIdx);
@@ -1807,16 +1850,18 @@ int main(int argc, char** argv) {
       auto writeVarIdxs = loadPartitionVarIdxs(clusterIdx, sim_accel_eval_cluster_write_count,
                                               sim_accel_eval_cluster_write_var_index);
       hybridGroupReadFromOutputVarIdxs[clusterIdx] = readFromOutputVarIdxs;
-      hybridGroupWriteVarIdxs[clusterIdx] = writeVarIdxs;
+      hybridGroupAllWriteVarIdxs[clusterIdx] = writeVarIdxs;
+      hybridGroupWriteVarIdxs[clusterIdx]
+          = filterOrderedVarIdxsByMask(writeVarIdxs, hybridCpuNeededVarMask);
       groupReadVarIdxLists.push_back(readVarIdxs);
       groupReadFromOutputVarIdxLists.push_back(readFromOutputVarIdxs);
-      groupWriteVarIdxLists.push_back(writeVarIdxs);
+      groupWritebackVarIdxLists.push_back(hybridGroupWriteVarIdxs[clusterIdx]);
     }
     hybridReadVarIdxs = unionOrderedVarIdxLists(groupReadVarIdxLists, nvars);
     hybridReadFromOutputVarIdxs = unionOrderedVarIdxLists(groupReadFromOutputVarIdxLists, nvars);
     hybridReadInputVarIdxs
         = subtractOrderedVarIdxs(hybridReadVarIdxs, hybridReadFromOutputVarIdxs, nvars);
-    hybridWriteVarIdxs = unionOrderedVarIdxLists(groupWriteVarIdxLists, nvars);
+    hybridWriteVarIdxs = unionOrderedVarIdxLists(groupWritebackVarIdxLists, nvars);
     hybridBoundaryInputBytes = logicalBytesPerBatch(hybridReadVarIdxs, widths, nstates);
     hybridBoundaryOutputBytes = logicalBytesPerBatch(hybridWriteVarIdxs, widths, nstates);
     hybridStaticH2dBytes = compactTransferBytes(hybridReadInputVarIdxs, nstates);
@@ -1832,7 +1877,7 @@ int main(int argc, char** argv) {
       }
       hybridDynamicH2dBytes += compactTransferBytes(externalReadFromOutputVarIdxs, nstates);
       hybridActualD2hBytes += compactTransferBytes(hybridGroupWriteVarIdxs[clusterIdx], nstates);
-      for (uint32_t varIdx : hybridGroupWriteVarIdxs[clusterIdx]) {
+      for (uint32_t varIdx : hybridGroupAllWriteVarIdxs[clusterIdx]) {
         if (varIdx < nvars) gpuProducedVarMask[varIdx] = 1;
       }
     }
