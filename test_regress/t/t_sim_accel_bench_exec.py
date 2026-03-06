@@ -8,6 +8,7 @@
 # SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 import os
+import shutil
 
 import vltest_bootstrap
 
@@ -35,6 +36,9 @@ kernel_cu = bench_dir_hit + "/t.sim_accel.kernel.cu"
 kernel_vars = kernel_cu + ".vars.tsv"
 kernel_deps = kernel_cu + ".deps.tsv"
 kernel_comm = kernel_cu + ".comm.tsv"
+
+for path in [cache_dir, bench_dir_miss, bench_dir_hit]:
+    shutil.rmtree(path, ignore_errors=True)
 
 bench_cmd = (
     os.environ["VERILATOR_ROOT"] + "/bin/verilator --sim-accel-bench"
@@ -67,7 +71,9 @@ if os.path.exists(kernel_comm):
     test.file_grep(kernel_comm, r"direction\tslot\tvar_idx\tname\twidth\tis_cpu_visible")
 
 test.file_grep(bench_dir_miss + "/bench_run.log", r"nvcc_cache_mode=miss")
+test.file_grep(bench_dir_miss + "/bench_run.log", r"verilator_artifact_cache_mode=miss")
 test.file_grep(bench_run_log, r"nvcc_cache_mode=hit")
+test.file_grep(bench_run_log, r"verilator_artifact_cache_mode=hit")
 test.file_grep(bench_run_log, r"mismatch=0")
 test.file_grep(bench_run_log, r"compact_mismatch=0")
 test.file_grep(bench_run_log, r"speedup_gpu_over_cpu=")
@@ -82,8 +88,10 @@ test.file_grep(bench_run_log, r"comm_verify_full_d2h_bytes=")
 test.file_grep(bench_run_log, r"cuda_assignw_offload_scope=post_lowering_assignw_nodes")
 test.file_grep(bench_run_log, r"cuda_assignw_offload_basis=supported_assignw_div_total_assignw")
 test.file_grep(bench_run_log, r"compile_cache_dir=")
+test.file_grep(bench_run_log, r"verilator_artifact_cache_key=")
 test.file_grep(bench_run_log, r"nvcc_cache_key=")
-test.file_grep(bench_run_log, r"verilator_codegen_s=")
+test.file_grep(bench_run_log, r"verilator_codegen_s=0\.000000")
+test.file_grep(bench_run_log, r"verilator_codegen_cold_s=")
 test.file_grep(bench_run_log, r"nvcc_compile_s=")
 test.file_grep(bench_run_log, r"nvcc_cold_compile_s=")
 test.file_grep(bench_run_log, r"bench_run_s=")

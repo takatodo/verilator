@@ -61,6 +61,7 @@ ASSIGNS_PER_KERNEL=0
 COMPILE_CACHE_DIR="${SIM_ACCEL_COMPILE_CACHE_DIR:-/tmp/verilator-sim-accel-compile-cache}"
 COMPILE_CACHE_ENABLED=1
 declare -a SOURCES=()
+INVOCATION_CWD="$(pwd)"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -154,6 +155,120 @@ sha256_one() {
   sha256sum "$1" | awk '{print $1}'
 }
 
+canonicalize_path() {
+  local path="$1"
+  local base="${2:-$INVOCATION_CWD}"
+  if [[ "$path" == /* ]]; then
+    realpath -m -- "$path"
+  else
+    realpath -m -- "$base/$path"
+  fi
+}
+
+resolve_executable_path() {
+  local exe="$1"
+  if [[ "$exe" == */* ]]; then
+    canonicalize_path "$exe" "$INVOCATION_CWD"
+  else
+    command -v -- "$exe"
+  fi
+}
+
+emit_verilator_input_fingerprint() {
+  local arg="$1"
+  local base="$2"
+  printf 'arg=%s\n' "$arg"
+  case "$arg" in
+    ""|--*|-*|+*)
+      return 0
+      ;;
+  esac
+  local abs
+  abs="$(canonicalize_path "$arg" "$base")"
+  printf 'file=%s\n' "$abs"
+  if [[ -f "$abs" ]]; then
+    printf 'file_sha=%s\n' "$(sha256_one "$abs")"
+  else
+    printf 'file_missing=1\n'
+  fi
+}
+
+emit_filelist_fingerprint() {
+  local filelist="$1"
+  local base="$2"
+  local abs
+  abs="$(canonicalize_path "$filelist" "$base")"
+  printf 'filelist=%s\n' "$abs"
+  if [[ ! -f "$abs" ]]; then
+    printf 'filelist_missing=1\n'
+    return 0
+  fi
+  printf 'filelist_sha=%s\n' "$(sha256_one "$abs")"
+  local list_base
+  list_base="$(dirname "$abs")"
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    local line="${raw%%#*}"
+    line="${line%%//*}"
+    local -a toks=()
+    read -r -a toks <<< "$line"
+    local i=0
+    while (( i < ${#toks[@]} )); do
+      local tok="${toks[i]}"
+      case "$tok" in
+        -f|-F)
+          printf 'arg=%s\n' "$tok"
+          i=$((i + 1))
+          if (( i < ${#toks[@]} )); then
+            emit_filelist_fingerprint "${toks[i]}" "$list_base"
+          fi
+          ;;
+        *)
+          emit_verilator_input_fingerprint "$tok" "$list_base"
+          ;;
+      esac
+      i=$((i + 1))
+    done
+  done < "$abs"
+}
+
+compute_artifact_cache_key() {
+  local verilator_path verilator_version sibling_verilator_bin
+  verilator_path="$(resolve_executable_path "$VERILATOR_BIN")"
+  verilator_version="$("$VERILATOR_BIN" --version | tr '\n' '|')"
+  sibling_verilator_bin="$(dirname "$verilator_path")/verilator_bin"
+  {
+    printf 'verilator_path=%s\n' "$verilator_path"
+    if [[ -f "$verilator_path" ]]; then
+      printf 'verilator_sha=%s\n' "$(sha256_one "$verilator_path")"
+    fi
+    if [[ -f "$sibling_verilator_bin" && "$sibling_verilator_bin" != "$verilator_path" ]]; then
+      printf 'verilator_bin_path=%s\n' "$sibling_verilator_bin"
+      printf 'verilator_bin_sha=%s\n' "$(sha256_one "$sibling_verilator_bin")"
+    fi
+    printf 'verilator_version=%s\n' "$verilator_version"
+    printf 'top_module=%s\n' "$TOP_MODULE"
+    printf 'sim_accel_assigns_per_kernel=%s\n' "$ASSIGNS_PER_KERNEL"
+    printf 'invocation_cwd=%s\n' "$INVOCATION_CWD"
+    local i=0
+    while (( i < ${#SOURCES[@]} )); do
+      local arg="${SOURCES[i]}"
+      case "$arg" in
+        -f|-F)
+          printf 'arg=%s\n' "$arg"
+          i=$((i + 1))
+          if (( i < ${#SOURCES[@]} )); then
+            emit_filelist_fingerprint "${SOURCES[i]}" "$INVOCATION_CWD"
+          fi
+          ;;
+        *)
+          emit_verilator_input_fingerprint "$arg" "$INVOCATION_CWD"
+          ;;
+      esac
+      i=$((i + 1))
+    done
+  } | sha256sum | awk '{print $1}'
+}
+
 compute_compile_cache_key() {
   local nvcc_version bench_sha kernel_sha
   nvcc_version="$(nvcc --version | tr '\n' '|')"
@@ -183,16 +298,84 @@ if [[ "$ASSIGNS_PER_KERNEL" -gt 0 ]]; then
   VERILATOR_SIM_ACCEL_ARGS+=(--sim-accel-assigns-per-kernel "$ASSIGNS_PER_KERNEL")
 fi
 
+VERILATOR_ARTIFACT_CACHE_MODE="disabled"
+VERILATOR_ARTIFACT_CACHE_KEY=""
+VERILATOR_COLD_GEN_S=""
+
 echo "[1/4] Generating CUDA kernel with --sim-accel-only..."
-/usr/bin/time -f "%e" -o "$TIME_VERILATOR" \
-  env CCACHE_DISABLE=1 "$VERILATOR_BIN" \
-    --Wno-fatal --no-skip-identical \
-    --top-module "$TOP_MODULE" \
-    --sim-accel-only \
-    --sim-accel-output "$KERNEL_CU" \
-    "${VERILATOR_SIM_ACCEL_ARGS[@]}" \
-    "${SOURCES[@]}" \
-    >"$LOG" 2>&1
+if [[ "$COMPILE_CACHE_ENABLED" -eq 1 ]]; then
+  VERILATOR_ARTIFACT_CACHE_KEY="$(compute_artifact_cache_key)"
+  ARTIFACT_CACHE_ENTRY="$COMPILE_CACHE_DIR/artifacts/$VERILATOR_ARTIFACT_CACHE_KEY"
+  CACHE_GEN_CU="$ARTIFACT_CACHE_ENTRY/${TOP_MODULE}.sim_accel.kernel.cu"
+  CACHE_GEN_VARS="$CACHE_GEN_CU.vars.tsv"
+  CACHE_GEN_DEPS="$CACHE_GEN_CU.deps.tsv"
+  CACHE_GEN_COMM="$CACHE_GEN_CU.comm.tsv"
+  CACHE_GEN_LOG="$ARTIFACT_CACHE_ENTRY/verilator_cuda.log"
+  CACHE_GEN_TIME="$ARTIFACT_CACHE_ENTRY/codegen_s.txt"
+  if [[ -s "$CACHE_GEN_CU" && -s "$CACHE_GEN_VARS" && -f "$CACHE_GEN_LOG" && -f "$CACHE_GEN_TIME" ]]; then
+    echo "[1/4] Reusing cached sim-accel artifacts..."
+    cp "$CACHE_GEN_CU" "$KERNEL_CU"
+    cp "$CACHE_GEN_VARS" "$KERNEL_VARS"
+    rm -f "$KERNEL_DEPS" "$KERNEL_COMM"
+    if [[ -f "$CACHE_GEN_DEPS" ]]; then
+      cp "$CACHE_GEN_DEPS" "$KERNEL_DEPS"
+    fi
+    if [[ -f "$CACHE_GEN_COMM" ]]; then
+      cp "$CACHE_GEN_COMM" "$KERNEL_COMM"
+    fi
+    cp "$CACHE_GEN_LOG" "$LOG"
+    VERILATOR_COLD_GEN_S="$(cat "$CACHE_GEN_TIME")"
+    printf '0.000000\n' > "$TIME_VERILATOR"
+    VERILATOR_ARTIFACT_CACHE_MODE="hit"
+  else
+    /usr/bin/time -f "%e" -o "$TIME_VERILATOR" \
+      env CCACHE_DISABLE=1 "$VERILATOR_BIN" \
+        --Wno-fatal --no-skip-identical \
+        --top-module "$TOP_MODULE" \
+        --sim-accel-only \
+        --sim-accel-output "$KERNEL_CU" \
+        "${VERILATOR_SIM_ACCEL_ARGS[@]}" \
+        "${SOURCES[@]}" \
+        >"$LOG" 2>&1
+    VERILATOR_ARTIFACT_CACHE_MODE="miss"
+    VERILATOR_COLD_GEN_S="$(cat "$TIME_VERILATOR" 2>/dev/null || true)"
+    TMP_ARTIFACT_CACHE_ENTRY="$COMPILE_CACHE_DIR/.tmp.artifacts.$VERILATOR_ARTIFACT_CACHE_KEY.$$"
+    rm -rf "$TMP_ARTIFACT_CACHE_ENTRY"
+    mkdir -p "$TMP_ARTIFACT_CACHE_ENTRY"
+    cp "$KERNEL_CU" "$TMP_ARTIFACT_CACHE_ENTRY/${TOP_MODULE}.sim_accel.kernel.cu"
+    cp "$KERNEL_VARS" "$TMP_ARTIFACT_CACHE_ENTRY/${TOP_MODULE}.sim_accel.kernel.cu.vars.tsv"
+    if [[ -f "$KERNEL_DEPS" ]]; then
+      cp "$KERNEL_DEPS" "$TMP_ARTIFACT_CACHE_ENTRY/${TOP_MODULE}.sim_accel.kernel.cu.deps.tsv"
+    fi
+    if [[ -f "$KERNEL_COMM" ]]; then
+      cp "$KERNEL_COMM" "$TMP_ARTIFACT_CACHE_ENTRY/${TOP_MODULE}.sim_accel.kernel.cu.comm.tsv"
+    fi
+    cp "$LOG" "$TMP_ARTIFACT_CACHE_ENTRY/verilator_cuda.log"
+    printf '%s\n' "$VERILATOR_COLD_GEN_S" > "$TMP_ARTIFACT_CACHE_ENTRY/codegen_s.txt"
+    {
+      echo "cache_key=$VERILATOR_ARTIFACT_CACHE_KEY"
+      echo "verilator_path=$(resolve_executable_path "$VERILATOR_BIN")"
+      echo "verilator_version=$("$VERILATOR_BIN" --version | tr '\n' '|')"
+      echo "top_module=$TOP_MODULE"
+      echo "sim_accel_assigns_per_kernel=$ASSIGNS_PER_KERNEL"
+      echo "kernel_generated_sha=$(sha256_one "$KERNEL_CU")"
+    } > "$TMP_ARTIFACT_CACHE_ENTRY/meta.txt"
+    mkdir -p "$COMPILE_CACHE_DIR/artifacts"
+    if ! mv "$TMP_ARTIFACT_CACHE_ENTRY" "$ARTIFACT_CACHE_ENTRY" 2>/dev/null; then
+      rm -rf "$TMP_ARTIFACT_CACHE_ENTRY"
+    fi
+  fi
+else
+  /usr/bin/time -f "%e" -o "$TIME_VERILATOR" \
+    env CCACHE_DISABLE=1 "$VERILATOR_BIN" \
+      --Wno-fatal --no-skip-identical \
+      --top-module "$TOP_MODULE" \
+      --sim-accel-only \
+      --sim-accel-output "$KERNEL_CU" \
+      "${VERILATOR_SIM_ACCEL_ARGS[@]}" \
+      "${SOURCES[@]}" \
+      >"$LOG" 2>&1
+fi
 
 if [[ ! -s "$KERNEL_CU" || ! -s "$KERNEL_VARS" ]]; then
   echo "Kernel generation failed: expected $KERNEL_CU and $KERNEL_VARS" >&2
@@ -916,14 +1099,20 @@ fi
 VERILATOR_GEN_S="$(cat "$TIME_VERILATOR" 2>/dev/null || true)"
 NVCC_COMPILE_S="$(cat "$TIME_NVCC" 2>/dev/null || true)"
 BENCH_RUN_S="$(cat "$TIME_RUN" 2>/dev/null || true)"
+if [[ -z "$VERILATOR_COLD_GEN_S" ]]; then
+  VERILATOR_COLD_GEN_S="$VERILATOR_GEN_S"
+fi
 if [[ -z "$NVCC_COLD_COMPILE_S" ]]; then
   NVCC_COLD_COMPILE_S="$NVCC_COMPILE_S"
 fi
-if [[ -n "$VERILATOR_GEN_S" && -n "$NVCC_COMPILE_S" && -n "$BENCH_RUN_S" && -n "$NVCC_COLD_COMPILE_S" ]]; then
+if [[ -n "$VERILATOR_GEN_S" && -n "$NVCC_COMPILE_S" && -n "$BENCH_RUN_S" && -n "$NVCC_COLD_COMPILE_S" && -n "$VERILATOR_COLD_GEN_S" ]]; then
   TOTAL_S="$(awk -v a="$VERILATOR_GEN_S" -v b="$NVCC_COMPILE_S" -v c="$BENCH_RUN_S" 'BEGIN { printf "%.6f", a + b + c }')"
-  TOTAL_COLD_S="$(awk -v a="$VERILATOR_GEN_S" -v b="$NVCC_COLD_COMPILE_S" -v c="$BENCH_RUN_S" 'BEGIN { printf "%.6f", a + b + c }')"
+  TOTAL_COLD_S="$(awk -v a="$VERILATOR_COLD_GEN_S" -v b="$NVCC_COLD_COMPILE_S" -v c="$BENCH_RUN_S" 'BEGIN { printf "%.6f", a + b + c }')"
   {
     echo "verilator_codegen_s=$VERILATOR_GEN_S"
+    echo "verilator_codegen_cold_s=$VERILATOR_COLD_GEN_S"
+    echo "verilator_artifact_cache_mode=$VERILATOR_ARTIFACT_CACHE_MODE"
+    echo "verilator_artifact_cache_key=$VERILATOR_ARTIFACT_CACHE_KEY"
     echo "nvcc_compile_s=$NVCC_COMPILE_S"
     echo "nvcc_cold_compile_s=$NVCC_COLD_COMPILE_S"
     echo "nvcc_cache_mode=$NVCC_CACHE_MODE"
