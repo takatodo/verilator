@@ -20,6 +20,9 @@ Options:
   --init-mode MODE     Initial state mode: random|zero|ones|counter (default: random)
   --init-seed N        Seed for random init mode (default: 1)
   --init-file PATH     Optional init override file (index/name based)
+  --compile-cache-dir DIR  Reuse compiled bench binaries across runs
+                           (default: /tmp/verilator-sim-accel-compile-cache)
+  --no-compile-cache   Disable compiled bench cache reuse
 
 Init file format:
   - Comment lines start with '#'
@@ -53,6 +56,8 @@ INIT_MODE="random"
 INIT_SEED=1
 INIT_FILE=""
 INIT_FILE_ABS=""
+COMPILE_CACHE_DIR="${SIM_ACCEL_COMPILE_CACHE_DIR:-/tmp/verilator-sim-accel-compile-cache}"
+COMPILE_CACHE_ENABLED=1
 declare -a SOURCES=()
 
 while [[ $# -gt 0 ]]; do
@@ -79,6 +84,10 @@ while [[ $# -gt 0 ]]; do
       INIT_SEED="$2"; shift 2 ;;
     --init-file)
       INIT_FILE="$2"; shift 2 ;;
+    --compile-cache-dir)
+      COMPILE_CACHE_DIR="$2"; shift 2 ;;
+    --no-compile-cache)
+      COMPILE_CACHE_ENABLED=0; shift ;;
     --help|-h)
       usage; exit 0 ;;
     --)
@@ -127,6 +136,30 @@ if [[ -n "$INIT_FILE" ]]; then
   fi
   INIT_FILE_ABS="$(cd "$(dirname "$INIT_FILE")" && pwd)/$(basename "$INIT_FILE")"
 fi
+
+if [[ "$COMPILE_CACHE_ENABLED" -eq 1 ]]; then
+  mkdir -p "$COMPILE_CACHE_DIR"
+  COMPILE_CACHE_DIR="$(cd "$COMPILE_CACHE_DIR" && pwd)"
+fi
+
+sha256_one() {
+  sha256sum "$1" | awk '{print $1}'
+}
+
+compute_compile_cache_key() {
+  local nvcc_version bench_sha kernel_sha cpu_sha
+  nvcc_version="$(nvcc --version | tr '\n' '|')"
+  bench_sha="$(sha256_one "$OUTDIR/bench_kernel.cu")"
+  kernel_sha="$(sha256_one "$OUTDIR/kernel_generated.cu")"
+  cpu_sha="$(sha256_one "$OUTDIR/cpu_body.inc")"
+  {
+    printf 'nvcc_version=%s\n' "$nvcc_version"
+    printf 'nvcc_flags=-O3 -std=c++17 -DSIM_ACCEL_PARTIAL_WRITE=1\n'
+    printf 'bench_kernel_sha=%s\n' "$bench_sha"
+    printf 'kernel_generated_sha=%s\n' "$kernel_sha"
+    printf 'cpu_body_sha=%s\n' "$cpu_sha"
+  } | sha256sum | awk '{print $1}'
+}
 
 mkdir -p "$OUTDIR"
 OUTDIR="$(cd "$OUTDIR" && pwd)"
@@ -751,13 +784,64 @@ if [[ -s "$KERNEL_COMM" ]]; then
   cp "$KERNEL_COMM" "$OUTDIR/kernel_generated.comm.tsv"
 fi
 
+NVCC_CACHE_MODE="disabled"
+NVCC_CACHE_KEY=""
+NVCC_COLD_COMPILE_S=""
 
-echo "[3/4] Building C++-direct CUDA benchmark..."
-(
-  cd "$OUTDIR"
-  /usr/bin/time -f "%e" -o "$TIME_NVCC" \
-    nvcc -O3 -std=c++17 -DSIM_ACCEL_PARTIAL_WRITE=1 bench_kernel.cu -o bench_kernel > build_nvcc.log 2>&1
-)
+if [[ "$COMPILE_CACHE_ENABLED" -eq 1 ]]; then
+  NVCC_CACHE_KEY="$(compute_compile_cache_key)"
+  CACHE_ENTRY="$COMPILE_CACHE_DIR/$NVCC_CACHE_KEY"
+  CACHE_BIN="$CACHE_ENTRY/bench_kernel"
+  CACHE_LOG="$CACHE_ENTRY/build_nvcc.log"
+  CACHE_TIME="$CACHE_ENTRY/compile_s.txt"
+  if [[ -x "$CACHE_BIN" ]]; then
+    echo "[3/4] Reusing cached CUDA benchmark..."
+    cp "$CACHE_BIN" "$OUTDIR/bench_kernel"
+    chmod +x "$OUTDIR/bench_kernel"
+    if [[ -f "$CACHE_LOG" ]]; then
+      cp "$CACHE_LOG" "$OUTDIR/build_nvcc.log"
+    else
+      : > "$OUTDIR/build_nvcc.log"
+    fi
+    if [[ -f "$CACHE_TIME" ]]; then
+      NVCC_COLD_COMPILE_S="$(cat "$CACHE_TIME")"
+    fi
+    printf '0.000000\n' > "$TIME_NVCC"
+    NVCC_CACHE_MODE="hit"
+  else
+    echo "[3/4] Building C++-direct CUDA benchmark..."
+    (
+      cd "$OUTDIR"
+      /usr/bin/time -f "%e" -o "$TIME_NVCC" \
+        nvcc -O3 -std=c++17 -DSIM_ACCEL_PARTIAL_WRITE=1 bench_kernel.cu -o bench_kernel > build_nvcc.log 2>&1
+    )
+    NVCC_CACHE_MODE="miss"
+    NVCC_COLD_COMPILE_S="$(cat "$TIME_NVCC" 2>/dev/null || true)"
+    TMP_CACHE_ENTRY="$COMPILE_CACHE_DIR/.tmp.$NVCC_CACHE_KEY.$$"
+    rm -rf "$TMP_CACHE_ENTRY"
+    mkdir -p "$TMP_CACHE_ENTRY"
+    cp "$OUTDIR/bench_kernel" "$TMP_CACHE_ENTRY/bench_kernel"
+    cp "$OUTDIR/build_nvcc.log" "$TMP_CACHE_ENTRY/build_nvcc.log"
+    printf '%s\n' "$NVCC_COLD_COMPILE_S" > "$TMP_CACHE_ENTRY/compile_s.txt"
+    {
+      echo "cache_key=$NVCC_CACHE_KEY"
+      echo "nvcc_version=$(nvcc --version | tr '\n' '|')"
+      echo "kernel_generated_sha=$(sha256_one "$OUTDIR/kernel_generated.cu")"
+      echo "bench_kernel_sha=$(sha256_one "$OUTDIR/bench_kernel.cu")"
+      echo "cpu_body_sha=$(sha256_one "$OUTDIR/cpu_body.inc")"
+    } > "$TMP_CACHE_ENTRY/meta.txt"
+    if ! mv "$TMP_CACHE_ENTRY" "$CACHE_ENTRY" 2>/dev/null; then
+      rm -rf "$TMP_CACHE_ENTRY"
+    fi
+  fi
+else
+  echo "[3/4] Building C++-direct CUDA benchmark..."
+  (
+    cd "$OUTDIR"
+    /usr/bin/time -f "%e" -o "$TIME_NVCC" \
+      nvcc -O3 -std=c++17 -DSIM_ACCEL_PARTIAL_WRITE=1 bench_kernel.cu -o bench_kernel > build_nvcc.log 2>&1
+  )
+fi
 
 echo "[4/4] Running benchmark..."
 (
@@ -816,13 +900,24 @@ fi
 VERILATOR_GEN_S="$(cat "$TIME_VERILATOR" 2>/dev/null || true)"
 NVCC_COMPILE_S="$(cat "$TIME_NVCC" 2>/dev/null || true)"
 BENCH_RUN_S="$(cat "$TIME_RUN" 2>/dev/null || true)"
-if [[ -n "$VERILATOR_GEN_S" && -n "$NVCC_COMPILE_S" && -n "$BENCH_RUN_S" ]]; then
+if [[ -z "$NVCC_COLD_COMPILE_S" ]]; then
+  NVCC_COLD_COMPILE_S="$NVCC_COMPILE_S"
+fi
+if [[ -n "$VERILATOR_GEN_S" && -n "$NVCC_COMPILE_S" && -n "$BENCH_RUN_S" && -n "$NVCC_COLD_COMPILE_S" ]]; then
   TOTAL_S="$(awk -v a="$VERILATOR_GEN_S" -v b="$NVCC_COMPILE_S" -v c="$BENCH_RUN_S" 'BEGIN { printf "%.6f", a + b + c }')"
+  TOTAL_COLD_S="$(awk -v a="$VERILATOR_GEN_S" -v b="$NVCC_COLD_COMPILE_S" -v c="$BENCH_RUN_S" 'BEGIN { printf "%.6f", a + b + c }')"
   {
     echo "verilator_codegen_s=$VERILATOR_GEN_S"
     echo "nvcc_compile_s=$NVCC_COMPILE_S"
+    echo "nvcc_cold_compile_s=$NVCC_COLD_COMPILE_S"
+    echo "nvcc_cache_mode=$NVCC_CACHE_MODE"
+    echo "nvcc_cache_key=$NVCC_CACHE_KEY"
+    if [[ "$COMPILE_CACHE_ENABLED" -eq 1 ]]; then
+      echo "compile_cache_dir=$COMPILE_CACHE_DIR"
+    fi
     echo "bench_run_s=$BENCH_RUN_S"
     echo "total_elapsed_s=$TOTAL_S"
+    echo "total_elapsed_cold_s=$TOTAL_COLD_S"
   } >> "$OUTDIR/bench_run.log"
 fi
 

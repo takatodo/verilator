@@ -26,23 +26,28 @@ if not test.run_capture("nvcc --version", check=False):
 if not test.run_capture("nvidia-smi -L", check=False):
     require_or_skip("No visible NVIDIA GPU")
 
-bench_dir = test.obj_dir + "/sim_accel_bench"
-bench_run_log = bench_dir + "/bench_run.log"
-kernel_log = bench_dir + "/verilator_cuda.log"
-kernel_cu = bench_dir + "/t.sim_accel.kernel.cu"
+cache_dir = test.obj_dir + "/sim_accel_cache"
+bench_dir_miss = test.obj_dir + "/sim_accel_bench_miss"
+bench_dir_hit = test.obj_dir + "/sim_accel_bench_hit"
+bench_run_log = bench_dir_hit + "/bench_run.log"
+kernel_log = bench_dir_hit + "/verilator_cuda.log"
+kernel_cu = bench_dir_hit + "/t.sim_accel.kernel.cu"
 kernel_vars = kernel_cu + ".vars.tsv"
 kernel_deps = kernel_cu + ".deps.tsv"
 kernel_comm = kernel_cu + ".comm.tsv"
 
-test.run_capture(
+bench_cmd = (
     os.environ["VERILATOR_ROOT"] + "/bin/verilator --sim-accel-bench"
     + " --top-module t"
-    + " --outdir " + bench_dir
     + " --nstates 8192"
     + " --gpu-reps 16"
     + " --cpu-reps 4"
+    + " --compile-cache-dir " + cache_dir
     + " -- "
     + test.t_dir + "/t_sim_accel_bench_exec.v")
+
+test.run_capture(bench_cmd.replace("-- ", "--outdir " + bench_dir_miss + " -- ", 1))
+test.run_capture(bench_cmd.replace("-- ", "--outdir " + bench_dir_hit + " -- ", 1))
 
 for filename in [bench_run_log, kernel_log, kernel_cu, kernel_vars]:
     if not os.path.exists(filename):
@@ -50,6 +55,8 @@ for filename in [bench_run_log, kernel_log, kernel_cu, kernel_vars]:
 if os.path.exists(kernel_comm):
     test.file_grep(kernel_comm, r"direction\tslot\tvar_idx\tname\twidth\tis_cpu_visible")
 
+test.file_grep(bench_dir_miss + "/bench_run.log", r"nvcc_cache_mode=miss")
+test.file_grep(bench_run_log, r"nvcc_cache_mode=hit")
 test.file_grep(bench_run_log, r"mismatch=0")
 test.file_grep(bench_run_log, r"compact_mismatch=0")
 test.file_grep(bench_run_log, r"speedup_gpu_over_cpu=")
@@ -62,10 +69,14 @@ test.file_grep(bench_run_log, r"comm_roundtrip_ratio_pct=")
 test.file_grep(bench_run_log, r"comm_verify_full_d2h_bytes=")
 test.file_grep(bench_run_log, r"cuda_assignw_offload_scope=post_lowering_assignw_nodes")
 test.file_grep(bench_run_log, r"cuda_assignw_offload_basis=supported_assignw_div_total_assignw")
+test.file_grep(bench_run_log, r"compile_cache_dir=")
+test.file_grep(bench_run_log, r"nvcc_cache_key=")
 test.file_grep(bench_run_log, r"verilator_codegen_s=")
 test.file_grep(bench_run_log, r"nvcc_compile_s=")
+test.file_grep(bench_run_log, r"nvcc_cold_compile_s=")
 test.file_grep(bench_run_log, r"bench_run_s=")
 test.file_grep(bench_run_log, r"total_elapsed_s=")
+test.file_grep(bench_run_log, r"total_elapsed_cold_s=")
 if os.path.exists(kernel_deps):
     test.file_grep(bench_run_log, r"cuda_deps_rows=")
 
