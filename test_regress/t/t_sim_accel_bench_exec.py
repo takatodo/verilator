@@ -46,9 +46,19 @@ bench_cmd = (
     + " --compile-cache-dir " + cache_dir
     + " -- "
     + test.t_dir + "/t_sim_accel_bench_exec.v")
+bench_cmd_hit = (
+    os.environ["VERILATOR_ROOT"] + "/bin/verilator --sim-accel-bench"
+    + " --top-module t"
+    + " --nstates 8192"
+    + " --gpu-reps 8"
+    + " --cpu-reps 2"
+    + " --assigns-per-kernel 2"
+    + " --compile-cache-dir " + cache_dir
+    + " -- "
+    + test.t_dir + "/t_sim_accel_bench_exec.v")
 
 test.run_capture(bench_cmd.replace("-- ", "--outdir " + bench_dir_miss + " -- ", 1))
-test.run_capture(bench_cmd.replace("-- ", "--outdir " + bench_dir_hit + " -- ", 1))
+test.run_capture(bench_cmd_hit.replace("-- ", "--outdir " + bench_dir_hit + " -- ", 1))
 
 for filename in [bench_run_log, kernel_log, kernel_cu, kernel_vars]:
     if not os.path.exists(filename):

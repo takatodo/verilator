@@ -505,7 +505,8 @@ static std::vector<uint32_t> unchunkToVarMajor(const std::vector<uint32_t>& chun
 
 static void printUsageAndExit(const char* argv0) {
   std::cerr << "Usage: " << argv0
-            << " [--init-mode random|zero|ones|counter] [--init-seed N] [--init-file PATH]"
+              << " [--init-mode random|zero|ones|counter] [--init-seed N] [--init-file PATH]"
+            << " --nstates N --gpu-reps N --cpu-reps N"
             << " [--state-chunk N] [--block-size N]\n";
   std::exit(2);
 }
@@ -514,8 +515,11 @@ int main(int argc, char** argv) {
   std::string initMode = "random";
   uint32_t initSeed = 1;
   std::string initFile;
+  uint32_t nstates = 0;
+  int gpu_reps = 0;
+  int cpu_reps = 0;
   uint32_t stateChunk = 0;
-  uint32_t blockSize = BLOCK_SIZE_VALUE;
+  uint32_t blockSize = 256;
 
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -530,6 +534,21 @@ int main(int argc, char** argv) {
     } else if (a == "--init-file") {
       if (i + 1 >= argc) printUsageAndExit(argv[0]);
       initFile = argv[++i];
+    } else if (a == "--nstates") {
+      if (i + 1 >= argc) printUsageAndExit(argv[0]);
+      uint64_t raw = 0;
+      if (!parseU64(argv[++i], &raw) || raw == 0 || raw > 0xffffffffULL) printUsageAndExit(argv[0]);
+      nstates = static_cast<uint32_t>(raw);
+    } else if (a == "--gpu-reps") {
+      if (i + 1 >= argc) printUsageAndExit(argv[0]);
+      uint64_t raw = 0;
+      if (!parseU64(argv[++i], &raw) || raw == 0 || raw > 0x7fffffffULL) printUsageAndExit(argv[0]);
+      gpu_reps = static_cast<int>(raw);
+    } else if (a == "--cpu-reps") {
+      if (i + 1 >= argc) printUsageAndExit(argv[0]);
+      uint64_t raw = 0;
+      if (!parseU64(argv[++i], &raw) || raw == 0 || raw > 0x7fffffffULL) printUsageAndExit(argv[0]);
+      cpu_reps = static_cast<int>(raw);
     } else if (a == "--state-chunk") {
       if (i + 1 >= argc) printUsageAndExit(argv[0]);
       uint64_t chunk = 0;
@@ -549,6 +568,7 @@ int main(int argc, char** argv) {
     std::cerr << "Invalid --init-mode: " << initMode << "\n";
     return 2;
   }
+  if (nstates == 0 || gpu_reps <= 0 || cpu_reps <= 0) printUsageAndExit(argv[0]);
 
   const uint32_t nvars = sim_accel_eval_var_count();
   const uint32_t partitionCount = sim_accel_eval_partition_count();
@@ -556,9 +576,6 @@ int main(int argc, char** argv) {
       = loadCommVarIdxs(sim_accel_eval_input_count, sim_accel_eval_input_var_index);
   const std::vector<uint32_t> outputVarIdxs
       = loadCommVarIdxs(sim_accel_eval_output_count, sim_accel_eval_output_var_index);
-  const uint32_t nstates = NSTATES_VALUE;
-  const int gpu_reps = GPU_REPS_VALUE;
-  const int cpu_reps = CPU_REPS_VALUE;
   if (stateChunk > nstates) stateChunk = nstates;
   const bool useChunkLayout = (stateChunk > 0 && stateChunk < nstates);
   const uint32_t nchunks = useChunkLayout ? ((nstates + stateChunk - 1) / stateChunk) : 1;
@@ -776,11 +793,6 @@ int main(int argc, char** argv) {
 }
 CU
 
-sed -i "s/NSTATES_VALUE/${NSTATES}/g" "$OUTDIR/bench_kernel.cu"
-sed -i "s/GPU_REPS_VALUE/${GPU_REPS}/g" "$OUTDIR/bench_kernel.cu"
-sed -i "s/CPU_REPS_VALUE/${CPU_REPS}/g" "$OUTDIR/bench_kernel.cu"
-sed -i "s/BLOCK_SIZE_VALUE/${BLOCK_SIZE}/g" "$OUTDIR/bench_kernel.cu"
-
 cp "$KERNEL_CU" "$OUTDIR/kernel_generated.cu"
 cp "$KERNEL_VARS" "$OUTDIR/kernel_generated.vars.tsv"
 if [[ -s "$KERNEL_COMM" ]]; then
@@ -848,7 +860,9 @@ fi
 echo "[4/4] Running benchmark..."
 (
   cd "$OUTDIR"
-  BENCH_CMD=(./bench_kernel --init-mode "$INIT_MODE" --init-seed "$INIT_SEED" --state-chunk "$STATE_CHUNK" --block-size "$BLOCK_SIZE")
+  BENCH_CMD=(./bench_kernel --nstates "$NSTATES" --gpu-reps "$GPU_REPS" --cpu-reps "$CPU_REPS"
+             --init-mode "$INIT_MODE" --init-seed "$INIT_SEED"
+             --state-chunk "$STATE_CHUNK" --block-size "$BLOCK_SIZE")
   if [[ -n "$INIT_FILE_ABS" ]]; then
     BENCH_CMD+=(--init-file "$INIT_FILE_ABS")
   fi
