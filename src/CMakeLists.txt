@@ -92,6 +92,7 @@ set(HEADERS
     V3EmitCFunc.h
     V3EmitCMain.h
     V3EmitGem.h
+    V3EmitSimAccel.h
     V3EmitMk.h
     V3EmitMkJson.h
     V3EmitV.h
@@ -170,6 +171,8 @@ set(HEADERS
     V3Scoreboard.h
     V3SenExprBuilder.h
     V3SenTree.h
+    V3SimAccelBackendCuda.h
+    V3SimAccelStrategyAssignwBool32.h
     V3Simulate.h
     V3Slice.h
     V3Split.h
@@ -269,6 +272,7 @@ set(COMMON_SOURCES
     V3EmitCPch.cpp
     V3EmitCSyms.cpp
     V3EmitGem.cpp
+    V3EmitSimAccel.cpp
     V3EmitMk.cpp
     V3EmitMkJson.cpp
     V3EmitV.cpp
@@ -335,6 +339,8 @@ set(COMMON_SOURCES
     V3Reorder.cpp
     V3Sampled.cpp
     V3Sched.cpp
+    V3SimAccelBackendCuda.cpp
+    V3SimAccelStrategyAssignwBool32.cpp
     V3SchedAcyclic.cpp
     V3SchedPartition.cpp
     V3SchedReplicate.cpp

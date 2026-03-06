@@ -1,4 +1,6 @@
-// DESCRIPTION: Verilator: GEM Compatibility Wrapper
+// DESCRIPTION: Verilator: Sim-Accel Emitter Front Door
+//
+// Routes sim-accel emission through the selected backend.
 //
 // Code available from: https://verilator.org
 //
@@ -10,13 +12,20 @@
 //
 //=============================================================================
 
-#include "V3EmitGem.h"
-#include "V3EmitSimAccel.h"
+#ifndef VERILATOR_V3EMITSIMACCEL_H_
+#define VERILATOR_V3EMITSIMACCEL_H_
 
-void V3EmitGem::emitGemIr() VL_MT_DISABLED {
-    V3EmitSimAccel::emitIr();
-}
+#include "config_build.h"
+#include "verilatedos.h"
 
-void V3EmitGem::emitGemCuda() VL_MT_DISABLED {
-    V3EmitSimAccel::emitCuda();
-}
+class V3EmitSimAccel final {
+public:
+    static void emitIr();
+    static void emitCuda();
+
+private:
+    V3EmitSimAccel() = default;
+    ~V3EmitSimAccel() = default;
+};
+
+#endif  // Guard

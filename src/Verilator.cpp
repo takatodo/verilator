@@ -49,6 +49,7 @@
 #include "V3EmitCMain.h"
 #include "V3EmitMk.h"
 #include "V3EmitMkJson.h"
+#include "V3EmitSimAccel.h"
 #include "V3EmitV.h"
 #include "V3ExecGraph.h"
 #include "V3Expand.h"
@@ -118,8 +119,6 @@
 #include "V3WidthCommit.h"
 
 #include <ctime>
-
-#include "V3EmitGem.h"
 
 VL_DEFINE_DEBUG_FUNCTIONS;
 
@@ -651,16 +650,16 @@ static void process() {
     if (v3Global.opt.serializeOnly()) {
         emitSerialized();
     } else if (v3Global.opt.gemCudaOnly()) {
-        V3EmitGem::emitGemCuda();
+        V3EmitSimAccel::emitCuda();
     } else if (v3Global.opt.gemIrOnly()) {
-        V3EmitGem::emitGemIr();
+        V3EmitSimAccel::emitIr();
     } else {
         if (v3Global.opt.simAccelSidecar() && !v3Global.opt.lintOnly()
             && !v3Global.opt.dpiHdrOnly()) {
-            V3EmitGem::emitGemCuda();
+            V3EmitSimAccel::emitCuda();
         }
         if (v3Global.opt.debugCheck() && !v3Global.opt.lintOnly() && !v3Global.opt.dpiHdrOnly()) {
-        // Check JSON when debugging to make sure no missing node types
+            // Check JSON when debugging to make sure no missing node types
             emitJson();
         }
     }

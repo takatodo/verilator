@@ -1,4 +1,6 @@
-// DESCRIPTION: Verilator: GEM Compatibility Wrapper
+// DESCRIPTION: Verilator: Sim-Accel assignw-bool32 Strategy
+//
+// Emits the current ASSIGNW-based bool32 sim-accel kernel subset.
 //
 // Code available from: https://verilator.org
 //
@@ -10,22 +12,20 @@
 //
 //=============================================================================
 
-#ifndef VERILATOR_V3EMITGEM_H_
-#define VERILATOR_V3EMITGEM_H_
+#ifndef VERILATOR_V3SIMACCELSTRATEGYASSIGNWBOOL32_H_
+#define VERILATOR_V3SIMACCELSTRATEGYASSIGNWBOOL32_H_
 
 #include "config_build.h"
 #include "verilatedos.h"
 
-//=============================================================================
-
-class V3EmitGem final {
+class V3SimAccelStrategyAssignwBool32 final {
 public:
-    static void emitGemIr();
-    static void emitGemCuda();
+    static void emitIr();
+    static void emitCuda();
 
 private:
-    V3EmitGem() = default;
-    ~V3EmitGem() = default;
+    V3SimAccelStrategyAssignwBool32() = default;
+    ~V3SimAccelStrategyAssignwBool32() = default;
 };
 
 #endif  // Guard

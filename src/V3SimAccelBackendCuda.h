@@ -1,4 +1,6 @@
-// DESCRIPTION: Verilator: GEM Compatibility Wrapper
+// DESCRIPTION: Verilator: Sim-Accel CUDA Backend
+//
+// Selects the active CUDA lowering strategy and emits backend-specific output.
 //
 // Code available from: https://verilator.org
 //
@@ -10,22 +12,20 @@
 //
 //=============================================================================
 
-#ifndef VERILATOR_V3EMITGEM_H_
-#define VERILATOR_V3EMITGEM_H_
+#ifndef VERILATOR_V3SIMACCELBACKENDCUDA_H_
+#define VERILATOR_V3SIMACCELBACKENDCUDA_H_
 
 #include "config_build.h"
 #include "verilatedos.h"
 
-//=============================================================================
-
-class V3EmitGem final {
+class V3SimAccelBackendCuda final {
 public:
-    static void emitGemIr();
-    static void emitGemCuda();
+    static void emitIr();
+    static void emitCuda();
 
 private:
-    V3EmitGem() = default;
-    ~V3EmitGem() = default;
+    V3SimAccelBackendCuda() = default;
+    ~V3SimAccelBackendCuda() = default;
 };
 
 #endif  // Guard
