@@ -40,6 +40,13 @@ def expect_failure(extra_args, expected_text):
 expect_failure(["--hybrid-mode", "single-partition"],
                "--hybrid-partition-index is required with --hybrid-mode single-partition")
 expect_failure(["--hybrid-mode", "single-cluster"],
-               "--hybrid-cluster-index is required with --hybrid-mode single-cluster")
+               "--hybrid-cluster-index or --hybrid-cluster-auto is required with --hybrid-mode single-cluster")
+expect_failure(["--hybrid-mode", "single-cluster", "--hybrid-cluster-index", "0",
+                "--hybrid-cluster-auto"],
+               "--hybrid-cluster-index and --hybrid-cluster-auto are mutually exclusive")
+expect_failure(["--hybrid-cluster-auto"],
+               "--hybrid-cluster-auto requires --hybrid-mode single-cluster")
+expect_failure(["--hybrid-mode", "single-cluster", "--hybrid-cluster-auto"],
+               "No suitable hybrid cluster found for auto-selection")
 
 test.passes()

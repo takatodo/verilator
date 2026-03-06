@@ -24,6 +24,9 @@ Options:
   --hybrid-mode MODE   Runtime path: off|single-partition|single-cluster (default: off)
   --hybrid-partition-index N  Selected partition for --hybrid-mode single-partition
   --hybrid-cluster-index N  Selected cluster for --hybrid-mode single-cluster
+  --hybrid-cluster-auto  Auto-select cluster for --hybrid-mode single-cluster
+  --hybrid-cluster-auto-max-input-bits N
+                         Max input-signature bits for auto-selected cluster (default: 128)
   --compile-cache-dir DIR  Reuse compiled bench binaries across runs
                            (default: /tmp/verilator-sim-accel-compile-cache)
   --no-compile-cache   Disable compiled bench cache reuse
@@ -64,6 +67,8 @@ ASSIGNS_PER_KERNEL=0
 HYBRID_MODE="off"
 HYBRID_PARTITION_INDEX=""
 HYBRID_CLUSTER_INDEX=""
+HYBRID_CLUSTER_AUTO=0
+HYBRID_CLUSTER_AUTO_MAX_INPUT_BITS=128
 COMPILE_CACHE_DIR="${SIM_ACCEL_COMPILE_CACHE_DIR:-/tmp/verilator-sim-accel-compile-cache}"
 COMPILE_CACHE_ENABLED=1
 declare -a SOURCES=()
@@ -101,6 +106,10 @@ while [[ $# -gt 0 ]]; do
       HYBRID_PARTITION_INDEX="$2"; shift 2 ;;
     --hybrid-cluster-index)
       HYBRID_CLUSTER_INDEX="$2"; shift 2 ;;
+    --hybrid-cluster-auto)
+      HYBRID_CLUSTER_AUTO=1; shift ;;
+    --hybrid-cluster-auto-max-input-bits)
+      HYBRID_CLUSTER_AUTO_MAX_INPUT_BITS="$2"; shift 2 ;;
     --compile-cache-dir)
       COMPILE_CACHE_DIR="$2"; shift 2 ;;
     --no-compile-cache)
@@ -142,6 +151,10 @@ if ! [[ "$ASSIGNS_PER_KERNEL" =~ ^[0-9]+$ ]]; then
   echo "Invalid --assigns-per-kernel: $ASSIGNS_PER_KERNEL (expected integer >= 0)" >&2
   exit 2
 fi
+if ! [[ "$HYBRID_CLUSTER_AUTO_MAX_INPUT_BITS" =~ ^[0-9]+$ ]]; then
+  echo "Invalid --hybrid-cluster-auto-max-input-bits: $HYBRID_CLUSTER_AUTO_MAX_INPUT_BITS (expected integer >= 0)" >&2
+  exit 2
+fi
 case "$HYBRID_MODE" in
   off|single-partition|single-cluster) ;;
   *)
@@ -162,11 +175,15 @@ if [[ "$HYBRID_MODE" == "single-partition" ]]; then
     exit 2
   fi
 elif [[ "$HYBRID_MODE" == "single-cluster" ]]; then
-  if [[ -z "$HYBRID_CLUSTER_INDEX" ]]; then
-    echo "--hybrid-cluster-index is required with --hybrid-mode single-cluster" >&2
+  if [[ -n "$HYBRID_CLUSTER_INDEX" && "$HYBRID_CLUSTER_AUTO" -eq 1 ]]; then
+    echo "--hybrid-cluster-index and --hybrid-cluster-auto are mutually exclusive" >&2
     exit 2
   fi
-  if ! [[ "$HYBRID_CLUSTER_INDEX" =~ ^[0-9]+$ ]]; then
+  if [[ -z "$HYBRID_CLUSTER_INDEX" && "$HYBRID_CLUSTER_AUTO" -eq 0 ]]; then
+    echo "--hybrid-cluster-index or --hybrid-cluster-auto is required with --hybrid-mode single-cluster" >&2
+    exit 2
+  fi
+  if [[ -n "$HYBRID_CLUSTER_INDEX" ]] && ! [[ "$HYBRID_CLUSTER_INDEX" =~ ^[0-9]+$ ]]; then
     echo "Invalid --hybrid-cluster-index: $HYBRID_CLUSTER_INDEX (expected integer >= 0)" >&2
     exit 2
   fi
@@ -183,6 +200,14 @@ else
     echo "--hybrid-cluster-index requires --hybrid-mode single-cluster" >&2
     exit 2
   fi
+  if [[ "$HYBRID_CLUSTER_AUTO" -ne 0 ]]; then
+    echo "--hybrid-cluster-auto requires --hybrid-mode single-cluster" >&2
+    exit 2
+  fi
+fi
+if [[ "$HYBRID_CLUSTER_AUTO" -eq 0 && "$HYBRID_CLUSTER_AUTO_MAX_INPUT_BITS" != "128" ]]; then
+  echo "--hybrid-cluster-auto-max-input-bits requires --hybrid-cluster-auto" >&2
+  exit 2
 fi
 
 case "$INIT_MODE" in
@@ -995,8 +1020,41 @@ static void printUsageAndExit(const char* argv0) {
             << " --nstates N --gpu-reps N --cpu-reps N"
             << " [--state-chunk N] [--block-size N]"
             << " [--hybrid-mode off|single-partition|single-cluster]"
-            << " [--hybrid-partition-index N] [--hybrid-cluster-index N]\n";
+            << " [--hybrid-partition-index N] [--hybrid-cluster-index N]"
+            << " [--hybrid-cluster-auto] [--hybrid-cluster-auto-max-input-bits N]\n";
   std::exit(2);
+}
+
+static bool selectAutoHybridCluster(uint32_t clusterCount, uint64_t maxInputBits,
+                                    uint32_t* selectedClusterp,
+                                    uint32_t* candidateCountp) {
+  bool found = false;
+  uint32_t bestCluster = 0;
+  uint32_t bestAssignCount = 0;
+  uint64_t bestInputBits = 0;
+  uint32_t candidateCount = 0;
+  for (uint32_t clusterIdx = 0; clusterIdx < clusterCount; ++clusterIdx) {
+    const std::string ownerHint = sim_accel_eval_cluster_owner_hint(clusterIdx);
+    const uint64_t inputBits = sim_accel_eval_cluster_input_signature_bits(clusterIdx);
+    const uint32_t assignCount = sim_accel_eval_cluster_assign_count(clusterIdx);
+    if (ownerHint != "gpu_candidate") continue;
+    if (inputBits > maxInputBits) continue;
+    if (assignCount == 0) continue;
+    ++candidateCount;
+    if (!found || assignCount > bestAssignCount
+        || (assignCount == bestAssignCount && inputBits < bestInputBits)
+        || (assignCount == bestAssignCount && inputBits == bestInputBits
+            && clusterIdx < bestCluster)) {
+      found = true;
+      bestCluster = clusterIdx;
+      bestAssignCount = assignCount;
+      bestInputBits = inputBits;
+    }
+  }
+  if (candidateCountp) *candidateCountp = candidateCount;
+  if (!found) return false;
+  *selectedClusterp = bestCluster;
+  return true;
 }
 
 int main(int argc, char** argv) {
@@ -1013,6 +1071,8 @@ int main(int argc, char** argv) {
   uint32_t hybridPartitionIndex = 0;
   bool hybridClusterIndexSet = false;
   uint32_t hybridClusterIndex = 0;
+  bool hybridClusterAuto = false;
+  uint64_t hybridClusterAutoMaxInputBits = 128;
 
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -1067,6 +1127,13 @@ int main(int argc, char** argv) {
       if (!parseU64(argv[++i], &raw) || raw > 0xffffffffULL) printUsageAndExit(argv[0]);
       hybridClusterIndex = static_cast<uint32_t>(raw);
       hybridClusterIndexSet = true;
+    } else if (a == "--hybrid-cluster-auto") {
+      hybridClusterAuto = true;
+    } else if (a == "--hybrid-cluster-auto-max-input-bits") {
+      if (i + 1 >= argc) printUsageAndExit(argv[0]);
+      uint64_t raw = 0;
+      if (!parseU64(argv[++i], &raw)) printUsageAndExit(argv[0]);
+      hybridClusterAutoMaxInputBits = raw;
     } else {
       printUsageAndExit(argv[0]);
     }
@@ -1085,8 +1152,12 @@ int main(int argc, char** argv) {
     std::cerr << "--hybrid-partition-index is required with --hybrid-mode single-partition\n";
     return 2;
   }
-  if (hybridMode == "single-cluster" && !hybridClusterIndexSet) {
-    std::cerr << "--hybrid-cluster-index is required with --hybrid-mode single-cluster\n";
+  if (hybridMode == "single-cluster" && hybridClusterIndexSet && hybridClusterAuto) {
+    std::cerr << "--hybrid-cluster-index and --hybrid-cluster-auto are mutually exclusive\n";
+    return 2;
+  }
+  if (hybridMode == "single-cluster" && !hybridClusterIndexSet && !hybridClusterAuto) {
+    std::cerr << "--hybrid-cluster-index or --hybrid-cluster-auto is required with --hybrid-mode single-cluster\n";
     return 2;
   }
   if (hybridMode != "single-partition" && hybridPartitionIndexSet) {
@@ -1097,10 +1168,28 @@ int main(int argc, char** argv) {
     std::cerr << "--hybrid-cluster-index requires --hybrid-mode single-cluster\n";
     return 2;
   }
+  if (hybridMode != "single-cluster" && hybridClusterAuto) {
+    std::cerr << "--hybrid-cluster-auto requires --hybrid-mode single-cluster\n";
+    return 2;
+  }
+  if (!hybridClusterAuto && hybridClusterAutoMaxInputBits != 128) {
+    std::cerr << "--hybrid-cluster-auto-max-input-bits requires --hybrid-cluster-auto\n";
+    return 2;
+  }
 
   const uint32_t nvars = sim_accel_eval_var_count();
   const uint32_t partitionCount = sim_accel_eval_partition_count();
   const uint32_t clusterCount = sim_accel_eval_cluster_count();
+  uint32_t hybridClusterAutoCandidateCount = 0;
+  if (hybridMode == "single-cluster" && hybridClusterAuto) {
+    if (!selectAutoHybridCluster(clusterCount, hybridClusterAutoMaxInputBits, &hybridClusterIndex,
+                                 &hybridClusterAutoCandidateCount)) {
+      std::cerr << "No suitable hybrid cluster found for auto-selection"
+                << " (max_input_bits=" << hybridClusterAutoMaxInputBits << ")\n";
+      return 2;
+    }
+    hybridClusterIndexSet = true;
+  }
   if (hybridMode == "single-partition" && hybridPartitionIndex >= partitionCount) {
     std::cerr << "Invalid --hybrid-partition-index: " << hybridPartitionIndex
               << " (partition_count=" << partitionCount << ")\n";
@@ -1578,6 +1667,9 @@ int main(int argc, char** argv) {
     std::cout << "hybrid_mismatch=" << hybridMismatch << "\n";
   } else {
     std::cout << "hybrid_cluster_index=" << hybridClusterIndex << "\n";
+    std::cout << "hybrid_cluster_auto=" << (hybridClusterAuto ? 1 : 0) << "\n";
+    std::cout << "hybrid_cluster_auto_max_input_bits=" << hybridClusterAutoMaxInputBits << "\n";
+    std::cout << "hybrid_cluster_auto_candidate_count=" << hybridClusterAutoCandidateCount << "\n";
     std::cout << "hybrid_cluster_assign_count="
               << sim_accel_eval_cluster_assign_count(hybridClusterIndex) << "\n";
     std::cout << "hybrid_cluster_input_signature_bits="
@@ -1813,7 +1905,13 @@ echo "[4/4] Running benchmark..."
   if [[ "$HYBRID_MODE" == "single-partition" ]]; then
     BENCH_CMD+=(--hybrid-mode "$HYBRID_MODE" --hybrid-partition-index "$HYBRID_PARTITION_INDEX")
   elif [[ "$HYBRID_MODE" == "single-cluster" ]]; then
-    BENCH_CMD+=(--hybrid-mode "$HYBRID_MODE" --hybrid-cluster-index "$HYBRID_CLUSTER_INDEX")
+    BENCH_CMD+=(--hybrid-mode "$HYBRID_MODE")
+    if [[ "$HYBRID_CLUSTER_AUTO" -eq 1 ]]; then
+      BENCH_CMD+=(--hybrid-cluster-auto
+                  --hybrid-cluster-auto-max-input-bits "$HYBRID_CLUSTER_AUTO_MAX_INPUT_BITS")
+    else
+      BENCH_CMD+=(--hybrid-cluster-index "$HYBRID_CLUSTER_INDEX")
+    fi
   fi
   if [[ -n "$INIT_FILE_ABS" ]]; then
     BENCH_CMD+=(--init-file "$INIT_FILE_ABS")
