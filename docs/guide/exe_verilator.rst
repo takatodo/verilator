@@ -1700,13 +1700,14 @@ Summary:
 
    Create sim-accel IR output only, do not create any C++ model output.
 
-   Generates a JSON AST output intended for sim-accel downstream tooling.
-   The default filename is ``<prefix>.sim_accel.tree.json`` in :vlopt:`--Mdir`.
+   Generates a backend-neutral sim-accel program JSON file intended for
+   sim-accel downstream tooling.
+   The default filename is ``<prefix>.sim_accel.program.json`` in :vlopt:`--Mdir`.
    Alias: :vlopt:`--gpu-ir-only`.
 
 .. option:: --sim-accel-ir-output <filename>
 
-   Specifies the filename for the sim-accel IR output file (``.sim_accel.tree.json``) of
+   Specifies the filename for the sim-accel IR output file (``.sim_accel.program.json``) of
    :vlopt:`--sim-accel-ir-only`. Using this option automatically sets
    :vlopt:`--sim-accel-ir-only`.
    Alias: :vlopt:`--gpu-ir-output`.

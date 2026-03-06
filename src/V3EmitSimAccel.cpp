@@ -16,13 +16,22 @@
 #include "V3Global.h"
 #include "V3Options.h"
 #include "V3SimAccelBackendCuda.h"
+#include "V3SimAccelLowerAssignwBool32.h"
+#include "V3SimAccelProgram.h"
+#include "V3SimAccelProgramJson.h"
 
 void V3EmitSimAccel::emitIr() VL_MT_DISABLED {
     const string filename = (v3Global.opt.simAccelIrOutput().empty()
                                  ? v3Global.opt.makeDir() + "/" + v3Global.opt.prefix()
-                                       + ".sim_accel.tree.json"
+                                       + ".sim_accel.program.json"
                                  : v3Global.opt.simAccelIrOutput());
-    v3Global.rootp()->dumpTreeJsonFile(filename);
+    const string strategy = v3Global.opt.simAccelStrategy();
+    if (strategy == "assignw-bool32") {
+        const V3SimAccelProgram program = V3SimAccelLowerAssignwBool32::build();
+        V3SimAccelProgramJson::write(filename, program, strategy);
+        return;
+    }
+    v3fatal("Unsupported sim-accel IR strategy: " + strategy);  // LCOV_EXCL_LINE
 }
 
 void V3EmitSimAccel::emitCuda() VL_MT_DISABLED {
