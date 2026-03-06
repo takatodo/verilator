@@ -49,6 +49,7 @@ public:
 };
 
 struct TempCluster final {
+    std::vector<size_t> m_assignIdxs;
     std::unordered_set<size_t> m_readVars;
     std::unordered_set<size_t> m_writtenVars;
     std::unordered_map<string, size_t> m_hierarchyCounts;
@@ -63,11 +64,12 @@ uint64_t sumVarWidths(const V3SimAccelProgram& program, const std::unordered_set
 
 }  // namespace
 
-V3SimAccelProgramAnalysis::ApproxRegCutSummary
+V3SimAccelProgramAnalysis::ApproxRegCutAnalysis
 V3SimAccelProgramAnalysis::analyzeApproxRegCut(const V3SimAccelProgram& program) {
-    ApproxRegCutSummary summary;
+    ApproxRegCutAnalysis analysis;
+    ApproxRegCutSummary& summary = analysis.m_summary;
     summary.m_assignCount = program.m_assigns.size();
-    if (program.m_assigns.empty()) return summary;
+    if (program.m_assigns.empty()) return analysis;
 
     DisjointSets dsu{program.m_assigns.size()};
     std::unordered_map<size_t, std::vector<size_t>> writersByVar;
@@ -108,6 +110,7 @@ V3SimAccelProgramAnalysis::analyzeApproxRegCut(const V3SimAccelProgram& program)
         TempCluster& cluster = clusters.at(clusterIdx);
         const V3SimAccelProgram::Assign& assign = program.m_assigns.at(assignIdx);
         const V3SimAccelProgram::Var& lhsVar = program.m_vars.at(assign.m_lhsIdx);
+        cluster.m_assignIdxs.push_back(assignIdx);
         ++cluster.m_assignCount;
         cluster.m_writtenVars.emplace(assign.m_lhsIdx);
         cluster.m_hierarchyCounts[lhsVar.m_hierarchy.empty() ? string{"<top>"} : lhsVar.m_hierarchy] += 1;
@@ -130,6 +133,7 @@ V3SimAccelProgramAnalysis::analyzeApproxRegCut(const V3SimAccelProgram& program)
     std::unordered_set<size_t> uniqueInternalVars;
 
     summary.m_clusterCount = clusters.size();
+    analysis.m_clusters.reserve(clusters.size());
     for (size_t clusterIdx = 0; clusterIdx < clusters.size(); ++clusterIdx) {
         const TempCluster& cluster = clusters.at(clusterIdx);
         std::unordered_set<size_t> boundaryInputs;
@@ -163,6 +167,7 @@ V3SimAccelProgramAnalysis::analyzeApproxRegCut(const V3SimAccelProgram& program)
         }
 
         ApproxRegCutCluster clusterSummary;
+        clusterSummary.m_clusterIdx = clusterIdx;
         clusterSummary.m_assignCount = cluster.m_assignCount;
         clusterSummary.m_boundaryInputVarCount = boundaryInputs.size();
         clusterSummary.m_boundaryOutputVarCount = boundaryOutputs.size();
@@ -170,6 +175,14 @@ V3SimAccelProgramAnalysis::analyzeApproxRegCut(const V3SimAccelProgram& program)
         clusterSummary.m_boundaryInputBitCount = sumVarWidths(program, boundaryInputs);
         clusterSummary.m_boundaryOutputBitCount = sumVarWidths(program, boundaryOutputs);
         clusterSummary.m_internalBitCount = sumVarWidths(program, internalVars);
+        clusterSummary.m_boundaryInputVarIdxs.assign(boundaryInputs.begin(), boundaryInputs.end());
+        clusterSummary.m_boundaryOutputVarIdxs.assign(boundaryOutputs.begin(), boundaryOutputs.end());
+        clusterSummary.m_internalVarIdxs.assign(internalVars.begin(), internalVars.end());
+        std::sort(clusterSummary.m_boundaryInputVarIdxs.begin(),
+                  clusterSummary.m_boundaryInputVarIdxs.end());
+        std::sort(clusterSummary.m_boundaryOutputVarIdxs.begin(),
+                  clusterSummary.m_boundaryOutputVarIdxs.end());
+        std::sort(clusterSummary.m_internalVarIdxs.begin(), clusterSummary.m_internalVarIdxs.end());
         for (const size_t varIdx : boundaryInputs) {
             if (program.m_vars.at(varIdx).m_isActivator) ++clusterSummary.m_activatorInputVarCount;
         }
@@ -181,6 +194,7 @@ V3SimAccelProgramAnalysis::analyzeApproxRegCut(const V3SimAccelProgram& program)
                 clusterSummary.m_dominantHierarchy = it.first;
             }
         }
+        clusterSummary.m_assignIdxs = cluster.m_assignIdxs;
 
         summary.m_boundaryInputVarCount += clusterSummary.m_boundaryInputVarCount;
         summary.m_boundaryOutputVarCount += clusterSummary.m_boundaryOutputVarCount;
@@ -200,10 +214,11 @@ V3SimAccelProgramAnalysis::analyzeApproxRegCut(const V3SimAccelProgram& program)
         uniqueBoundaryInputs.insert(boundaryInputs.begin(), boundaryInputs.end());
         uniqueBoundaryOutputs.insert(boundaryOutputs.begin(), boundaryOutputs.end());
         uniqueInternalVars.insert(internalVars.begin(), internalVars.end());
+        analysis.m_clusters.push_back(std::move(clusterSummary));
     }
 
     summary.m_uniqueBoundaryInputVarCount = uniqueBoundaryInputs.size();
     summary.m_uniqueBoundaryOutputVarCount = uniqueBoundaryOutputs.size();
     summary.m_uniqueInternalVarCount = uniqueInternalVars.size();
-    return summary;
+    return analysis;
 }

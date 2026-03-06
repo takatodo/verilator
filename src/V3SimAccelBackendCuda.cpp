@@ -27,8 +27,10 @@ namespace {
 
 void emitStats(const V3SimAccelProgram& program, size_t emittedUniqueAssignw,
                size_t partitionCount) {
-    const V3SimAccelProgramAnalysis::ApproxRegCutSummary approxRegCut
+    const V3SimAccelProgramAnalysis::ApproxRegCutAnalysis approxRegCut
         = V3SimAccelProgramAnalysis::analyzeApproxRegCut(program);
+    const V3SimAccelProgramAnalysis::ApproxRegCutSummary& approxRegCutSummary
+        = approxRegCut.m_summary;
     const size_t supportedAssignw = program.m_stats.m_assignwSupported;
     const size_t totalAssignw = program.m_stats.m_assignwTotal;
     const size_t skipped = program.m_stats.m_assignwIgnored;
@@ -50,18 +52,20 @@ void emitStats(const V3SimAccelProgram& program, size_t emittedUniqueAssignw,
            << "kernel_partitions=" << partitionCount << " "
            << "assignw_offload_pct=" << offloadStr.str());
     v3info("--sim-accel-only approx_regcut "
-           << "cluster_count=" << approxRegCut.m_clusterCount << " "
-           << "assign_count=" << approxRegCut.m_assignCount << " "
-           << "boundary_input_vars=" << approxRegCut.m_boundaryInputVarCount << " "
-           << "boundary_output_vars=" << approxRegCut.m_boundaryOutputVarCount << " "
-           << "internal_vars=" << approxRegCut.m_internalVarCount << " "
-           << "unique_boundary_input_vars=" << approxRegCut.m_uniqueBoundaryInputVarCount << " "
-           << "unique_boundary_output_vars=" << approxRegCut.m_uniqueBoundaryOutputVarCount
+           << "cluster_count=" << approxRegCutSummary.m_clusterCount << " "
+           << "assign_count=" << approxRegCutSummary.m_assignCount << " "
+           << "boundary_input_vars=" << approxRegCutSummary.m_boundaryInputVarCount << " "
+           << "boundary_output_vars=" << approxRegCutSummary.m_boundaryOutputVarCount << " "
+           << "internal_vars=" << approxRegCutSummary.m_internalVarCount << " "
+           << "unique_boundary_input_vars=" << approxRegCutSummary.m_uniqueBoundaryInputVarCount
            << " "
-           << "activator_input_vars=" << approxRegCut.m_activatorInputVarCount << " "
-           << "max_assigns=" << approxRegCut.m_maxAssignCount << " "
-           << "max_boundary_input_vars=" << approxRegCut.m_maxBoundaryInputVarCount << " "
-           << "max_boundary_output_vars=" << approxRegCut.m_maxBoundaryOutputVarCount);
+           << "unique_boundary_output_vars=" << approxRegCutSummary.m_uniqueBoundaryOutputVarCount
+           << " "
+           << "activator_input_vars=" << approxRegCutSummary.m_activatorInputVarCount << " "
+           << "max_assigns=" << approxRegCutSummary.m_maxAssignCount << " "
+           << "max_boundary_input_vars=" << approxRegCutSummary.m_maxBoundaryInputVarCount
+           << " "
+           << "max_boundary_output_vars=" << approxRegCutSummary.m_maxBoundaryOutputVarCount);
 }
 
 }  // namespace

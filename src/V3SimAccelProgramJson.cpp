@@ -88,8 +88,10 @@ void writeVarIndexList(std::ofstream& of, const std::vector<size_t>& values, con
 
 void V3SimAccelProgramJson::write(const string& filename, const V3SimAccelProgram& program,
                                   const string& strategy) {
-    const V3SimAccelProgramAnalysis::ApproxRegCutSummary approxRegCut
+    const V3SimAccelProgramAnalysis::ApproxRegCutAnalysis approxRegCut
         = V3SimAccelProgramAnalysis::analyzeApproxRegCut(program);
+    const V3SimAccelProgramAnalysis::ApproxRegCutSummary& approxRegCutSummary
+        = approxRegCut.m_summary;
     std::ofstream of{filename};
     if (!of.is_open()) v3fatal("Cannot open output file: " + filename);  // LCOV_EXCL_LINE
 
@@ -187,26 +189,71 @@ void V3SimAccelProgramJson::write(const string& filename, const V3SimAccelProgra
     of << "  },\n";
 
     of << "  \"approx_regcut_analysis\": {\n";
-    of << "    \"cluster_count\": " << approxRegCut.m_clusterCount << ",\n";
-    of << "    \"assign_count\": " << approxRegCut.m_assignCount << ",\n";
-    of << "    \"boundary_input_var_count\": " << approxRegCut.m_boundaryInputVarCount << ",\n";
-    of << "    \"boundary_output_var_count\": " << approxRegCut.m_boundaryOutputVarCount << ",\n";
-    of << "    \"internal_var_count\": " << approxRegCut.m_internalVarCount << ",\n";
-    of << "    \"unique_boundary_input_var_count\": " << approxRegCut.m_uniqueBoundaryInputVarCount
+    of << "    \"cluster_count\": " << approxRegCutSummary.m_clusterCount << ",\n";
+    of << "    \"assign_count\": " << approxRegCutSummary.m_assignCount << ",\n";
+    of << "    \"boundary_input_var_count\": " << approxRegCutSummary.m_boundaryInputVarCount
        << ",\n";
+    of << "    \"boundary_output_var_count\": " << approxRegCutSummary.m_boundaryOutputVarCount
+       << ",\n";
+    of << "    \"internal_var_count\": " << approxRegCutSummary.m_internalVarCount << ",\n";
+    of << "    \"unique_boundary_input_var_count\": "
+       << approxRegCutSummary.m_uniqueBoundaryInputVarCount << ",\n";
     of << "    \"unique_boundary_output_var_count\": "
-       << approxRegCut.m_uniqueBoundaryOutputVarCount << ",\n";
-    of << "    \"unique_internal_var_count\": " << approxRegCut.m_uniqueInternalVarCount << ",\n";
-    of << "    \"boundary_input_bit_count\": " << approxRegCut.m_boundaryInputBitCount << ",\n";
-    of << "    \"boundary_output_bit_count\": " << approxRegCut.m_boundaryOutputBitCount << ",\n";
-    of << "    \"internal_bit_count\": " << approxRegCut.m_internalBitCount << ",\n";
-    of << "    \"activator_input_var_count\": " << approxRegCut.m_activatorInputVarCount << ",\n";
-    of << "    \"max_assign_count\": " << approxRegCut.m_maxAssignCount << ",\n";
-    of << "    \"max_boundary_input_var_count\": " << approxRegCut.m_maxBoundaryInputVarCount
+       << approxRegCutSummary.m_uniqueBoundaryOutputVarCount << ",\n";
+    of << "    \"unique_internal_var_count\": " << approxRegCutSummary.m_uniqueInternalVarCount
        << ",\n";
-    of << "    \"max_boundary_output_var_count\": " << approxRegCut.m_maxBoundaryOutputVarCount
+    of << "    \"boundary_input_bit_count\": " << approxRegCutSummary.m_boundaryInputBitCount
        << ",\n";
-    of << "    \"max_internal_var_count\": " << approxRegCut.m_maxInternalVarCount << "\n";
-    of << "  }\n";
+    of << "    \"boundary_output_bit_count\": " << approxRegCutSummary.m_boundaryOutputBitCount
+       << ",\n";
+    of << "    \"internal_bit_count\": " << approxRegCutSummary.m_internalBitCount << ",\n";
+    of << "    \"activator_input_var_count\": " << approxRegCutSummary.m_activatorInputVarCount
+       << ",\n";
+    of << "    \"max_assign_count\": " << approxRegCutSummary.m_maxAssignCount << ",\n";
+    of << "    \"max_boundary_input_var_count\": "
+       << approxRegCutSummary.m_maxBoundaryInputVarCount << ",\n";
+    of << "    \"max_boundary_output_var_count\": "
+       << approxRegCutSummary.m_maxBoundaryOutputVarCount << ",\n";
+    of << "    \"max_internal_var_count\": " << approxRegCutSummary.m_maxInternalVarCount
+       << "\n";
+    of << "  },\n";
+
+    of << "  \"approx_regcut_clusters\": [\n";
+    for (size_t i = 0; i < approxRegCut.m_clusters.size(); ++i) {
+        const V3SimAccelProgramAnalysis::ApproxRegCutCluster& cluster
+            = approxRegCut.m_clusters.at(i);
+        of << "    {\n";
+        of << "      \"cluster_idx\": " << cluster.m_clusterIdx << ",\n";
+        of << "      \"assign_count\": " << cluster.m_assignCount << ",\n";
+        of << "      \"boundary_input_var_count\": " << cluster.m_boundaryInputVarCount << ",\n";
+        of << "      \"boundary_output_var_count\": " << cluster.m_boundaryOutputVarCount
+           << ",\n";
+        of << "      \"internal_var_count\": " << cluster.m_internalVarCount << ",\n";
+        of << "      \"boundary_input_bit_count\": " << cluster.m_boundaryInputBitCount << ",\n";
+        of << "      \"boundary_output_bit_count\": " << cluster.m_boundaryOutputBitCount
+           << ",\n";
+        of << "      \"internal_bit_count\": " << cluster.m_internalBitCount << ",\n";
+        of << "      \"activator_input_var_count\": " << cluster.m_activatorInputVarCount
+           << ",\n";
+        of << "      \"dominant_hierarchy\": \"" << jsonEscape(cluster.m_dominantHierarchy)
+           << "\",\n";
+        of << "      \"unique_hierarchy_count\": " << cluster.m_uniqueHierarchyCount << ",\n";
+        of << "      \"assign_idxs\": ";
+        writeVarIndexList(of, cluster.m_assignIdxs, "        ");
+        of << ",\n";
+        of << "      \"boundary_input_var_idxs\": ";
+        writeVarIndexList(of, cluster.m_boundaryInputVarIdxs, "        ");
+        of << ",\n";
+        of << "      \"boundary_output_var_idxs\": ";
+        writeVarIndexList(of, cluster.m_boundaryOutputVarIdxs, "        ");
+        of << ",\n";
+        of << "      \"internal_var_idxs\": ";
+        writeVarIndexList(of, cluster.m_internalVarIdxs, "        ");
+        of << "\n";
+        of << "    }";
+        if (i + 1 != approxRegCut.m_clusters.size()) of << ",";
+        of << "\n";
+    }
+    of << "  ]\n";
     of << "}\n";
 }

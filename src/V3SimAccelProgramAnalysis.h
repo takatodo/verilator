@@ -24,6 +24,11 @@
 class V3SimAccelProgramAnalysis final {
 public:
     struct ApproxRegCutCluster final {
+        size_t m_clusterIdx = 0;
+        std::vector<size_t> m_assignIdxs;
+        std::vector<size_t> m_boundaryInputVarIdxs;
+        std::vector<size_t> m_boundaryOutputVarIdxs;
+        std::vector<size_t> m_internalVarIdxs;
         size_t m_assignCount = 0;
         size_t m_boundaryInputVarCount = 0;
         size_t m_boundaryOutputVarCount = 0;
@@ -55,7 +60,12 @@ public:
         size_t m_maxInternalVarCount = 0;
     };
 
-    static ApproxRegCutSummary analyzeApproxRegCut(const V3SimAccelProgram& program);
+    struct ApproxRegCutAnalysis final {
+        ApproxRegCutSummary m_summary;
+        std::vector<ApproxRegCutCluster> m_clusters;
+    };
+
+    static ApproxRegCutAnalysis analyzeApproxRegCut(const V3SimAccelProgram& program);
 };
 
 #endif  // Guard
