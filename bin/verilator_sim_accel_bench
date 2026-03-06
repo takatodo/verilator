@@ -301,13 +301,21 @@ OBJECT_CACHE_MISSES=0
 
 partition_object_namespace() {
   local src="$1"
-  local base part_idx namespace
+  local base part_idx hierarchy_ns canonical_hash
   base="$(basename "$src")"
   if [[ "$base" =~ \.part([0-9]+)\.cu$ && -f "$KERNEL_PARTITIONS" ]]; then
     part_idx="${BASH_REMATCH[1]}"
-    namespace="$(awk -F '\t' -v idx="$part_idx" 'NR > 1 && $1 == idx { print $6; exit }' "$KERNEL_PARTITIONS")"
-    if [[ -n "$namespace" ]]; then
-      printf '%s\n' "$namespace"
+    hierarchy_ns="$(awk -F '\t' -v idx="$part_idx" 'NR > 1 && $1 == idx { print $6; exit }' "$KERNEL_PARTITIONS")"
+    canonical_hash="$(awk -F '\t' -v idx="$part_idx" 'NR > 1 && $1 == idx { print $9; exit }' "$KERNEL_PARTITIONS")"
+    if [[ -n "$hierarchy_ns" || -n "$canonical_hash" ]]; then
+      if [[ -z "$hierarchy_ns" ]]; then
+        hierarchy_ns="shared"
+      fi
+      if [[ -z "$canonical_hash" ]]; then
+        printf '%s\n' "$hierarchy_ns"
+      else
+        printf '%s/%s\n' "$hierarchy_ns" "$canonical_hash"
+      fi
       return 0
     fi
   fi
@@ -317,6 +325,39 @@ partition_object_namespace() {
     kernel_generated.link.cu) printf 'link\n' ;;
     *) printf 'shared\n' ;;
   esac
+}
+
+append_partition_canonical_stats() {
+  local partitions_tsv="$1"
+  local out_log="$2"
+  [[ -f "$partitions_tsv" ]] || return 0
+
+  local stats
+  stats="$(awk -F '\t' '
+    NR == 1 { next }
+    NF >= 9 {
+      total += 1
+      count[$9] += 1
+    }
+    END {
+      unique = 0
+      dup = 0
+      max_count = 0
+      for (k in count) {
+        unique += 1
+        if (count[k] > 1) dup += count[k] - 1
+        if (count[k] > max_count) max_count = count[k]
+      }
+      printf "%d %d %d %d\n", total, unique, dup, max_count
+    }' "$partitions_tsv")"
+  local total unique dup max_count
+  read -r total unique dup max_count <<<"$stats"
+  {
+    echo "partition_canonical_total=$total"
+    echo "partition_canonical_unique=$unique"
+    echo "partition_canonical_duplicates=$dup"
+    echo "partition_canonical_max_reuse=$max_count"
+  } >> "$out_log"
 }
 
 compute_object_cache_key() {
@@ -1348,6 +1389,8 @@ if [[ -s "$KERNEL_DEPS" ]]; then
   DEPS_ROWS="$(( $(wc -l < "$KERNEL_DEPS") - 1 ))"
   echo "cuda_deps_rows=$DEPS_ROWS" >> "$OUTDIR/bench_run.log"
 fi
+
+append_partition_canonical_stats "$KERNEL_PARTITIONS" "$OUTDIR/bench_run.log"
 
 echo "== C++ direct benchmark complete =="
 echo "outdir: $OUTDIR"

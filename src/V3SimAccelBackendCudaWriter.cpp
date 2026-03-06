@@ -14,9 +14,11 @@
 
 #include "V3Error.h"
 #include "V3SimAccelBackendCudaExprEmitter.h"
+#include "V3String.h"
 
 #include <algorithm>
 #include <cctype>
+#include <functional>
 #include <fstream>
 #include <unordered_map>
 #include <sstream>
@@ -63,6 +65,8 @@ struct AssignPartition final {
     string m_dominantHierarchyKey;
     size_t m_dominantHierarchyAssignCount = 0;
     size_t m_uniqueHierarchyCount = 0;
+    string m_canonicalHash;
+    size_t m_canonicalVarCount = 0;
 };
 
 std::vector<size_t> toSortedVector(const std::unordered_set<size_t>& in) {
@@ -89,6 +93,72 @@ string simAccelSanitizeHierarchyKey(const string& label) {
     while (!out.empty() && out.back() == '_') out.pop_back();
     if (out.empty()) return "top";
     return out;
+}
+
+string simAccelCanonicalizeExpr(
+    const string& expr, const std::function<string(size_t)>& canonicalVarToken) {
+    string out;
+    out.reserve(expr.size() + 16);
+    for (size_t i = 0; i < expr.size();) {
+        if (expr.compare(i, 2, "v_") == 0) {
+            size_t j = i + 2;
+            while (j < expr.size() && std::isdigit(static_cast<unsigned char>(expr[j]))) ++j;
+            if (j > i + 2) {
+                const size_t absIdx = static_cast<size_t>(std::stoul(expr.substr(i + 2, j - (i + 2))));
+                out += canonicalVarToken(absIdx);
+                i = j;
+                continue;
+            }
+        }
+        out += expr[i++];
+    }
+    return out;
+}
+
+void finalizePartitionCanonicalInfo(const V3SimAccelProgram& program, AssignPartition& partition) {
+    std::unordered_map<size_t, size_t> canonicalVarNums;
+    auto canonicalVarNumber = [&](size_t absIdx) {
+        const auto it = canonicalVarNums.find(absIdx);
+        if (it != canonicalVarNums.end()) return it->second;
+        const size_t next = canonicalVarNums.size();
+        canonicalVarNums.emplace(absIdx, next);
+        return next;
+    };
+    auto canonicalVarToken = [&](size_t absIdx) {
+        return "v_" + cvtToStr(canonicalVarNumber(absIdx));
+    };
+
+    std::ostringstream canonical;
+    canonical << "assigns=" << partition.m_assigns.size() << '\n';
+    for (const EmittedAssign& assign : partition.m_assigns) {
+        const V3SimAccelProgram::Var& lhsVar = program.m_vars.at(assign.m_lhsIdx);
+        canonical << "lhs=" << canonicalVarToken(assign.m_lhsIdx) << ":w" << lhsVar.m_width
+                  << ";expr=" << simAccelCanonicalizeExpr(assign.m_expr, canonicalVarToken)
+                  << ";rhs=";
+        bool first = true;
+        for (const size_t rhsIdx : assign.m_rhsIdxs) {
+            if (!first) canonical << ',';
+            first = false;
+            canonical << canonicalVarToken(rhsIdx) << ":w" << program.m_vars.at(rhsIdx).m_width;
+        }
+        canonical << '\n';
+    }
+    canonical << "reads=";
+    for (const size_t readIdx : partition.m_readVarIdxs) {
+        canonical << canonicalVarToken(readIdx) << ":w" << program.m_vars.at(readIdx).m_width
+                  << ':' << (partition.m_writtenBeforeIdxs.find(readIdx) != partition.m_writtenBeforeIdxs.end()
+                                 ? "out"
+                                 : "in")
+                  << ';';
+    }
+    canonical << "\nwrites=";
+    for (const size_t writeIdx : partition.m_writtenVarIdxs) {
+        canonical << canonicalVarToken(writeIdx) << ":w" << program.m_vars.at(writeIdx).m_width
+                  << ';';
+    }
+    VHashSha256 hash{canonical.str()};
+    partition.m_canonicalHash = hash.digestSymbol();
+    partition.m_canonicalVarCount = canonicalVarNums.size();
 }
 
 std::vector<AssignPartition> buildPartitions(const V3SimAccelProgram& program,
@@ -127,6 +197,7 @@ std::vector<AssignPartition> buildPartitions(const V3SimAccelProgram& program,
         partition.m_uniqueHierarchyCount = hierarchyCounts.size();
         partition.m_dominantHierarchyKey
             = simAccelSanitizeHierarchyKey(partition.m_dominantHierarchy);
+        finalizePartitionCanonicalInfo(program, partition);
         for (const size_t writtenIdx : partition.m_writtenVarIdxs) writtenBeforeIdxs.emplace(writtenIdx);
         partitions.push_back(std::move(partition));
     }
@@ -364,7 +435,8 @@ void emitPartitionedAuxFiles(const string& filename, const V3SimAccelProgram& pr
         if (partMeta.is_open()) {
             partMeta << "index\tassign_count\tread_var_count\twritten_var_count"
                         "\tdominant_hierarchy\tdominant_hierarchy_key"
-                        "\tdominant_hierarchy_assign_count\tunique_hierarchy_count\n";
+                        "\tdominant_hierarchy_assign_count\tunique_hierarchy_count"
+                        "\tcanonical_hash\tcanonical_var_count\n";
             for (size_t i = 0; i < partitions.size(); ++i) {
                 const AssignPartition& partition = partitions.at(i);
                 partMeta << i << '\t' << partition.m_assigns.size() << '\t'
@@ -373,7 +445,9 @@ void emitPartitionedAuxFiles(const string& filename, const V3SimAccelProgram& pr
                          << partition.m_dominantHierarchy << '\t'
                          << partition.m_dominantHierarchyKey << '\t'
                          << partition.m_dominantHierarchyAssignCount << '\t'
-                         << partition.m_uniqueHierarchyCount << '\n';
+                         << partition.m_uniqueHierarchyCount << '\t'
+                         << partition.m_canonicalHash << '\t'
+                         << partition.m_canonicalVarCount << '\n';
             }
         }
     }
