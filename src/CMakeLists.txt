@@ -172,6 +172,7 @@ set(HEADERS
     V3SenTree.h
     V3SimAccelBackendCuda.h
     V3SimAccelLowerAssignwBool32.h
+    V3SimAccelLowerAssignwBool32Visitor.h
     V3SimAccelProgram.h
     V3SimAccelProgramJson.h
     V3Simulate.h
@@ -341,6 +342,7 @@ set(COMMON_SOURCES
     V3Sched.cpp
     V3SimAccelBackendCuda.cpp
     V3SimAccelLowerAssignwBool32.cpp
+    V3SimAccelLowerAssignwBool32Visitor.cpp
     V3SimAccelProgramJson.cpp
     V3SchedAcyclic.cpp
     V3SchedPartition.cpp
