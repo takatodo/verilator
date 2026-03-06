@@ -17,6 +17,8 @@ test.scenarios('vlt')
 kernel_filename = test.obj_dir + "/renamed-" + test.name + ".sim_accel.kernel.cu"
 vars_filename = kernel_filename + ".vars.tsv"
 comm_filename = kernel_filename + ".comm.tsv"
+kernel_api = kernel_filename + ".api.h"
+kernel_cpu = kernel_filename + ".cpu.cpp"
 
 test.compile(verilator_flags2=[
     "--no-std",
@@ -38,8 +40,11 @@ test.file_grep(comm_filename, r"direction\tslot\tvar_idx\tname\twidth\tis_cpu_vi
 test.file_grep(comm_filename, r"cpu_to_gpu\t0\t[0-9]+\ta\t1\t1")
 test.file_grep(comm_filename, r"cpu_to_gpu\t1\t[0-9]+\tb\t1\t1")
 test.file_grep(comm_filename, r"gpu_to_cpu\t[0-9]+\t[0-9]+\ty\t1\t1")
+test.file_grep_not(comm_filename, r"gpu_to_cpu\t[0-9]+\t[0-9]+\ttmp\t1\t0")
 
 for filename in glob.glob(test.obj_dir + "/*"):
+    if filename in [kernel_api, kernel_cpu]:
+        continue
     if re.search(r'\.(cpp|cc|cxx|h|hpp)$', filename):
         test.error("%Error: Created '" + filename
                    + "', but --sim-accel-only shouldn't create C++ model files")

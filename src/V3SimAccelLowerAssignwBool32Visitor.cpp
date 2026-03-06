@@ -31,6 +31,29 @@ bool simAccelWidthSupported(const AstNode* nodep) {
     return nodep && nodep->widthMin() > 0 && nodep->widthMin() <= 32;
 }
 
+class SimAccelVarRefCollector final : public VNVisitorConst {
+private:
+    std::unordered_set<const AstVar*>& m_varps;
+
+public:
+    explicit SimAccelVarRefCollector(std::unordered_set<const AstVar*>& varps)
+        : m_varps{varps} {}
+
+    void visit(AstNode* nodep) override { iterateChildrenConst(nodep); }
+    void visit(AstVarRef* nodep) override {
+        const AstVar* const varp = nodep->varp();
+        if (varp && !simAccelIsInternalVar(varp) && simAccelWidthSupported(varp)) {
+            m_varps.emplace(varp);
+        }
+    }
+};
+
+void simAccelCollectNodeVars(const AstNode* nodep, std::unordered_set<const AstVar*>& varps) {
+    if (!nodep) return;
+    SimAccelVarRefCollector collector{varps};
+    collector.iterateConst(const_cast<AstNode*>(nodep));
+}
+
 uint32_t simAccelMaskValue(int width) {
     if (width <= 0) return 0U;
     if (width >= 32) return 0xffffffffU;
@@ -73,8 +96,10 @@ class SimAccelAssignwBool32Lowerer final : public VNVisitorConst {
 private:
     V3SimAccelProgram m_program;
     std::unordered_map<const AstVar*, size_t> m_varToIndex;
+    std::vector<const AstVar*> m_indexToVar;
     std::unordered_set<size_t> m_gpuReadVarIdxs;
     std::unordered_set<size_t> m_gpuWrittenVarIdxs;
+    std::unordered_set<const AstVar*> m_externalTouchedVarps;
     size_t m_skippedUnsupported = 0;
     size_t m_skippedInternal = 0;
     size_t m_skippedNonVarLhs = 0;
@@ -96,7 +121,12 @@ private:
         var.m_isCpuVisible = var.m_isPrimaryIo;
         m_program.m_vars.push_back(std::move(var));
         m_varToIndex.emplace(varp, idx);
+        m_indexToVar.push_back(varp);
         return idx;
+    }
+
+    void markExternalTouched(const AstNode* nodep) {
+        simAccelCollectNodeVars(nodep, m_externalTouchedVarps);
     }
 
     void finalizeCommPlan() {
@@ -104,10 +134,15 @@ private:
             V3SimAccelProgram::Var& var = m_program.m_vars.at(idx);
             const bool isGpuRead = (m_gpuReadVarIdxs.find(idx) != m_gpuReadVarIdxs.end());
             const bool isGpuWritten = (m_gpuWrittenVarIdxs.find(idx) != m_gpuWrittenVarIdxs.end());
-            // Boundary inputs exclude GPU-local temporaries; outputs stay conservative until
-            // we have whole-design usage analysis for hybrid scheduling.
+            const bool escapesExternally
+                = var.m_isCpuVisible
+                  || (idx < m_indexToVar.size()
+                      && m_externalTouchedVarps.find(m_indexToVar.at(idx))
+                             != m_externalTouchedVarps.end());
+            // Boundary inputs exclude GPU-local temporaries. Outputs require an external
+            // consumer outside the supported GPU subset or a CPU-visible/public boundary.
             var.m_isGpuInput = isGpuRead && !isGpuWritten;
-            var.m_isGpuOutput = isGpuWritten;
+            var.m_isGpuOutput = isGpuWritten && escapesExternally;
 
             if (var.m_isGpuInput) {
                 var.m_inputSlot = m_program.m_commPlan.m_cpuToGpuVarIdxs.size();
@@ -466,23 +501,31 @@ public:
     explicit SimAccelAssignwBool32Lowerer(AstNetlist* rootp) { iterateConst(rootp); }
 
     void visit(AstNode* nodep) override { iterateChildrenConst(nodep); }
+    void visit(AstVarRef* nodep) override { markExternalTouched(nodep); }
 
     void visit(AstAssignW* nodep) override {
         if (nodep->timingControlp()) {
+            markExternalTouched(nodep->lhsp());
+            markExternalTouched(nodep->rhsp());
             ++m_skippedTiming;
             return;
         }
         AstVarRef* const lhsRefp = VN_CAST(nodep->lhsp(), VarRef);
         if (!lhsRefp) {
+            markExternalTouched(nodep->lhsp());
+            markExternalTouched(nodep->rhsp());
             ++m_skippedNonVarLhs;
             return;
         }
         AstVar* const lhsVarp = lhsRefp->varp();
         if (!lhsVarp || simAccelIsInternalVar(lhsVarp)) {
+            markExternalTouched(nodep->rhsp());
             ++m_skippedInternal;
             return;
         }
         if (!simAccelWidthSupported(lhsVarp) || !isSupportedExpr(nodep->rhsp())) {
+            markExternalTouched(nodep->lhsp());
+            markExternalTouched(nodep->rhsp());
             ++m_skippedUnsupported;
             return;
         }
