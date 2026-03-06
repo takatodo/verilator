@@ -72,6 +72,14 @@ void writeIndexOrNull(std::ofstream& of, size_t value) {
     }
 }
 
+void writePreferredValue(std::ofstream& of, int8_t value) {
+    if (value < 0) {
+        of << "null";
+    } else {
+        of << static_cast<int>(value);
+    }
+}
+
 void writeVarIndexList(std::ofstream& of, const std::vector<size_t>& values, const char* indent) {
     of << "[";
     if (!values.empty()) of << "\n";
@@ -92,6 +100,8 @@ void V3SimAccelProgramJson::write(const string& filename, const V3SimAccelProgra
         = V3SimAccelProgramAnalysis::analyzeApproxRegCut(program);
     const V3SimAccelProgramAnalysis::ApproxRegCutSummary& approxRegCutSummary
         = approxRegCut.m_summary;
+    const V3SimAccelProgramAnalysis::SpecFrontierSummary& specFrontierSummary
+        = approxRegCut.m_specFrontierSummary;
     std::ofstream of{filename};
     if (!of.is_open()) v3fatal("Cannot open output file: " + filename);  // LCOV_EXCL_LINE
 
@@ -218,6 +228,22 @@ void V3SimAccelProgramJson::write(const string& filename, const V3SimAccelProgra
        << "\n";
     of << "  },\n";
 
+    of << "  \"spec_frontier_analysis\": {\n";
+    of << "    \"candidate_count\": " << specFrontierSummary.m_candidateCount << ",\n";
+    of << "    \"clusters_with_candidates\": " << specFrontierSummary.m_clustersWithCandidates
+       << ",\n";
+    of << "    \"preferred_zero_candidate_count\": "
+       << specFrontierSummary.m_preferredZeroCandidateCount << ",\n";
+    of << "    \"preferred_one_candidate_count\": "
+       << specFrontierSummary.m_preferredOneCandidateCount << ",\n";
+    of << "    \"unknown_preference_candidate_count\": "
+       << specFrontierSummary.m_unknownPreferenceCandidateCount << ",\n";
+    of << "    \"activator_candidate_count\": " << specFrontierSummary.m_activatorCandidateCount
+       << ",\n";
+    of << "    \"max_candidate_count\": " << specFrontierSummary.m_maxCandidateCount << ",\n";
+    of << "    \"max_spec_score\": " << specFrontierSummary.m_maxSpecScore << "\n";
+    of << "  },\n";
+
     of << "  \"approx_regcut_clusters\": [\n";
     for (size_t i = 0; i < approxRegCut.m_clusters.size(); ++i) {
         const V3SimAccelProgramAnalysis::ApproxRegCutCluster& cluster
@@ -229,10 +255,19 @@ void V3SimAccelProgramJson::write(const string& filename, const V3SimAccelProgra
         of << "      \"boundary_output_var_count\": " << cluster.m_boundaryOutputVarCount
            << ",\n";
         of << "      \"internal_var_count\": " << cluster.m_internalVarCount << ",\n";
+        of << "      \"spec_frontier_candidate_count\": " << cluster.m_specFrontierCandidateCount
+           << ",\n";
+        of << "      \"spec_frontier_preferred_zero_count\": "
+           << cluster.m_specFrontierPreferredZeroCount << ",\n";
+        of << "      \"spec_frontier_preferred_one_count\": "
+           << cluster.m_specFrontierPreferredOneCount << ",\n";
+        of << "      \"spec_frontier_unknown_preference_count\": "
+           << cluster.m_specFrontierUnknownPreferenceCount << ",\n";
         of << "      \"boundary_input_bit_count\": " << cluster.m_boundaryInputBitCount << ",\n";
         of << "      \"boundary_output_bit_count\": " << cluster.m_boundaryOutputBitCount
            << ",\n";
         of << "      \"internal_bit_count\": " << cluster.m_internalBitCount << ",\n";
+        of << "      \"spec_frontier_max_score\": " << cluster.m_specFrontierMaxScore << ",\n";
         of << "      \"activator_input_var_count\": " << cluster.m_activatorInputVarCount
            << ",\n";
         of << "      \"dominant_hierarchy\": \"" << jsonEscape(cluster.m_dominantHierarchy)
@@ -249,6 +284,31 @@ void V3SimAccelProgramJson::write(const string& filename, const V3SimAccelProgra
         of << ",\n";
         of << "      \"internal_var_idxs\": ";
         writeVarIndexList(of, cluster.m_internalVarIdxs, "        ");
+        of << ",\n";
+        of << "      \"spec_frontier_candidates\": [";
+        if (!cluster.m_specFrontierCandidates.empty()) of << "\n";
+        for (size_t j = 0; j < cluster.m_specFrontierCandidates.size(); ++j) {
+            const auto& candidate = cluster.m_specFrontierCandidates.at(j);
+            const V3SimAccelProgram::Var& var = program.m_vars.at(candidate.m_varIdx);
+            of << "        {\n";
+            of << "          \"var_idx\": " << candidate.m_varIdx << ",\n";
+            of << "          \"var_name\": \"" << jsonEscape(var.m_name) << "\",\n";
+            of << "          \"width\": " << var.m_width << ",\n";
+            of << "          \"assign_use_count\": " << candidate.m_assignUseCount << ",\n";
+            of << "          \"zero_bias_count\": " << candidate.m_zeroBiasCount << ",\n";
+            of << "          \"one_bias_count\": " << candidate.m_oneBiasCount << ",\n";
+            of << "          \"is_activator\": "
+               << (candidate.m_isActivator ? "true" : "false") << ",\n";
+            of << "          \"preferred_value\": ";
+            writePreferredValue(of, candidate.m_preferredValue);
+            of << ",\n";
+            of << "          \"spec_score\": " << candidate.m_specScore << "\n";
+            of << "        }";
+            if (j + 1 != cluster.m_specFrontierCandidates.size()) of << ",";
+            of << "\n";
+        }
+        if (!cluster.m_specFrontierCandidates.empty()) of << "      ";
+        of << "]";
         of << "\n";
         of << "    }";
         if (i + 1 != approxRegCut.m_clusters.size()) of << ",";

@@ -13,6 +13,7 @@
 #include "V3SimAccelProgramAnalysis.h"
 
 #include <algorithm>
+#include <array>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -56,10 +57,88 @@ struct TempCluster final {
     size_t m_assignCount = 0;
 };
 
+struct TempSpecCandidate final {
+    size_t m_varIdx = 0;
+    size_t m_assignUseCount = 0;
+    size_t m_zeroBiasCount = 0;
+    size_t m_oneBiasCount = 0;
+    bool m_isActivator = false;
+};
+
+enum class SpecBias : uint8_t { NONE, ZERO, ONE };
+
 uint64_t sumVarWidths(const V3SimAccelProgram& program, const std::unordered_set<size_t>& varIdxs) {
     uint64_t total = 0;
     for (const size_t varIdx : varIdxs) total += program.m_vars.at(varIdx).m_width;
     return total;
+}
+
+void accumulateSpecBias(const V3SimAccelProgram& program, size_t exprIdx,
+                        const std::unordered_set<size_t>& frontierVarIdxs,
+                        std::unordered_map<size_t, TempSpecCandidate>& candidates,
+                        SpecBias inheritedBias = SpecBias::NONE) {
+    if (exprIdx == V3SimAccelProgram::INVALID_SLOT) return;
+    const V3SimAccelProgram::Expr& expr = program.m_exprs.at(exprIdx);
+    switch (expr.m_kind) {
+    case V3SimAccelProgram::ExprKind::VAR: {
+        if (expr.m_varIdx == V3SimAccelProgram::INVALID_SLOT) return;
+        if (frontierVarIdxs.find(expr.m_varIdx) == frontierVarIdxs.end()) return;
+        TempSpecCandidate& candidate = candidates[expr.m_varIdx];
+        candidate.m_varIdx = expr.m_varIdx;
+        if (inheritedBias == SpecBias::ZERO) {
+            ++candidate.m_zeroBiasCount;
+        } else if (inheritedBias == SpecBias::ONE) {
+            ++candidate.m_oneBiasCount;
+        }
+        return;
+    }
+    case V3SimAccelProgram::ExprKind::CONST: return;
+    case V3SimAccelProgram::ExprKind::AND:
+    case V3SimAccelProgram::ExprKind::LOGAND:
+        accumulateSpecBias(program, expr.m_lhs, frontierVarIdxs, candidates, SpecBias::ZERO);
+        accumulateSpecBias(program, expr.m_rhs, frontierVarIdxs, candidates, SpecBias::ZERO);
+        return;
+    case V3SimAccelProgram::ExprKind::OR:
+    case V3SimAccelProgram::ExprKind::LOGOR:
+        accumulateSpecBias(program, expr.m_lhs, frontierVarIdxs, candidates, SpecBias::ONE);
+        accumulateSpecBias(program, expr.m_rhs, frontierVarIdxs, candidates, SpecBias::ONE);
+        return;
+    case V3SimAccelProgram::ExprKind::COND:
+        // A true/active condition is usually the speculation-friendly side to precompute first.
+        accumulateSpecBias(program, expr.m_lhs, frontierVarIdxs, candidates, SpecBias::ONE);
+        accumulateSpecBias(program, expr.m_rhs, frontierVarIdxs, candidates, SpecBias::NONE);
+        accumulateSpecBias(program, expr.m_third, frontierVarIdxs, candidates, SpecBias::NONE);
+        return;
+    case V3SimAccelProgram::ExprKind::CCAST:
+    case V3SimAccelProgram::ExprKind::EXTEND:
+    case V3SimAccelProgram::ExprKind::EXTENDS:
+        accumulateSpecBias(program, expr.m_lhs, frontierVarIdxs, candidates, inheritedBias);
+        return;
+    case V3SimAccelProgram::ExprKind::XOR:
+    case V3SimAccelProgram::ExprKind::ADD:
+    case V3SimAccelProgram::ExprKind::SUB:
+    case V3SimAccelProgram::ExprKind::EQ:
+    case V3SimAccelProgram::ExprKind::NEQ:
+    case V3SimAccelProgram::ExprKind::CONCAT:
+    case V3SimAccelProgram::ExprKind::SEL:
+    case V3SimAccelProgram::ExprKind::SHIFTL:
+    case V3SimAccelProgram::ExprKind::SHIFTLOVR:
+    case V3SimAccelProgram::ExprKind::SHIFTR:
+    case V3SimAccelProgram::ExprKind::SHIFTROVR:
+    case V3SimAccelProgram::ExprKind::NOT:
+    case V3SimAccelProgram::ExprKind::LOGNOT:
+        accumulateSpecBias(program, expr.m_lhs, frontierVarIdxs, candidates, SpecBias::NONE);
+        accumulateSpecBias(program, expr.m_rhs, frontierVarIdxs, candidates, SpecBias::NONE);
+        accumulateSpecBias(program, expr.m_third, frontierVarIdxs, candidates, SpecBias::NONE);
+        return;
+    }
+}
+
+uint64_t computeSpecScore(const TempSpecCandidate& candidate) {
+    const uint64_t biasCount
+        = std::max(candidate.m_zeroBiasCount, candidate.m_oneBiasCount);
+    return static_cast<uint64_t>(candidate.m_assignUseCount) * 4ULL + biasCount * 16ULL
+           + (candidate.m_isActivator ? 32ULL : 0ULL);
 }
 
 }  // namespace
@@ -68,6 +147,8 @@ V3SimAccelProgramAnalysis::ApproxRegCutAnalysis
 V3SimAccelProgramAnalysis::analyzeApproxRegCut(const V3SimAccelProgram& program) {
     ApproxRegCutAnalysis analysis;
     ApproxRegCutSummary& summary = analysis.m_summary;
+    V3SimAccelProgramAnalysis::SpecFrontierSummary& frontierSummary
+        = analysis.m_specFrontierSummary;
     summary.m_assignCount = program.m_assigns.size();
     if (program.m_assigns.empty()) return analysis;
 
@@ -195,6 +276,85 @@ V3SimAccelProgramAnalysis::analyzeApproxRegCut(const V3SimAccelProgram& program)
             }
         }
         clusterSummary.m_assignIdxs = cluster.m_assignIdxs;
+
+        std::unordered_set<size_t> frontierVarIdxs{boundaryInputs.begin(), boundaryInputs.end()};
+        std::unordered_map<size_t, TempSpecCandidate> tempCandidates;
+        tempCandidates.reserve(frontierVarIdxs.size());
+        for (const size_t varIdx : frontierVarIdxs) {
+            TempSpecCandidate& candidate = tempCandidates[varIdx];
+            candidate.m_varIdx = varIdx;
+            candidate.m_isActivator = program.m_vars.at(varIdx).m_isActivator;
+        }
+        for (const size_t assignIdx : cluster.m_assignIdxs) {
+            const V3SimAccelProgram::Assign& assign = program.m_assigns.at(assignIdx);
+            for (const size_t rhsIdx : assign.m_rhsIdxs) {
+                const auto it = tempCandidates.find(rhsIdx);
+                if (it != tempCandidates.end()) ++it->second.m_assignUseCount;
+            }
+            accumulateSpecBias(program, assign.m_exprIdx, frontierVarIdxs, tempCandidates);
+        }
+
+        std::vector<V3SimAccelProgramAnalysis::SpecFrontierCandidate> specCandidates;
+        specCandidates.reserve(tempCandidates.size());
+        for (const auto& it : tempCandidates) {
+            const TempSpecCandidate& temp = it.second;
+            V3SimAccelProgramAnalysis::SpecFrontierCandidate candidate;
+            candidate.m_varIdx = temp.m_varIdx;
+            candidate.m_assignUseCount = temp.m_assignUseCount;
+            candidate.m_zeroBiasCount = temp.m_zeroBiasCount;
+            candidate.m_oneBiasCount = temp.m_oneBiasCount;
+            candidate.m_isActivator = temp.m_isActivator;
+            candidate.m_specScore = computeSpecScore(temp);
+            if (temp.m_zeroBiasCount > temp.m_oneBiasCount) {
+                candidate.m_preferredValue = 0;
+            } else if (temp.m_oneBiasCount > temp.m_zeroBiasCount) {
+                candidate.m_preferredValue = 1;
+            } else if (temp.m_isActivator) {
+                candidate.m_preferredValue = 1;
+            } else {
+                candidate.m_preferredValue = -1;
+            }
+            specCandidates.push_back(std::move(candidate));
+        }
+        std::sort(specCandidates.begin(), specCandidates.end(),
+                  [](const V3SimAccelProgramAnalysis::SpecFrontierCandidate& lhs,
+                     const V3SimAccelProgramAnalysis::SpecFrontierCandidate& rhs) {
+                      if (lhs.m_specScore != rhs.m_specScore) {
+                          return lhs.m_specScore > rhs.m_specScore;
+                      }
+                      if (lhs.m_preferredValue != rhs.m_preferredValue) {
+                          return lhs.m_preferredValue > rhs.m_preferredValue;
+                      }
+                      if (lhs.m_assignUseCount != rhs.m_assignUseCount) {
+                          return lhs.m_assignUseCount > rhs.m_assignUseCount;
+                      }
+                      return lhs.m_varIdx < rhs.m_varIdx;
+                  });
+        clusterSummary.m_specFrontierCandidates = std::move(specCandidates);
+        clusterSummary.m_specFrontierCandidateCount = clusterSummary.m_specFrontierCandidates.size();
+        for (const V3SimAccelProgramAnalysis::SpecFrontierCandidate& candidate :
+             clusterSummary.m_specFrontierCandidates) {
+            frontierSummary.m_maxSpecScore
+                = std::max(frontierSummary.m_maxSpecScore, candidate.m_specScore);
+            clusterSummary.m_specFrontierMaxScore
+                = std::max(clusterSummary.m_specFrontierMaxScore, candidate.m_specScore);
+            if (candidate.m_isActivator) ++frontierSummary.m_activatorCandidateCount;
+            if (candidate.m_preferredValue == 0) {
+                ++clusterSummary.m_specFrontierPreferredZeroCount;
+                ++frontierSummary.m_preferredZeroCandidateCount;
+            } else if (candidate.m_preferredValue == 1) {
+                ++clusterSummary.m_specFrontierPreferredOneCount;
+                ++frontierSummary.m_preferredOneCandidateCount;
+            } else {
+                ++clusterSummary.m_specFrontierUnknownPreferenceCount;
+                ++frontierSummary.m_unknownPreferenceCandidateCount;
+            }
+        }
+        frontierSummary.m_candidateCount += clusterSummary.m_specFrontierCandidateCount;
+        if (clusterSummary.m_specFrontierCandidateCount) ++frontierSummary.m_clustersWithCandidates;
+        frontierSummary.m_maxCandidateCount
+            = std::max(frontierSummary.m_maxCandidateCount,
+                       clusterSummary.m_specFrontierCandidateCount);
 
         summary.m_boundaryInputVarCount += clusterSummary.m_boundaryInputVarCount;
         summary.m_boundaryOutputVarCount += clusterSummary.m_boundaryOutputVarCount;

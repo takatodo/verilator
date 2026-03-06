@@ -31,6 +31,8 @@ void emitStats(const V3SimAccelProgram& program, size_t emittedUniqueAssignw,
         = V3SimAccelProgramAnalysis::analyzeApproxRegCut(program);
     const V3SimAccelProgramAnalysis::ApproxRegCutSummary& approxRegCutSummary
         = approxRegCut.m_summary;
+    const V3SimAccelProgramAnalysis::SpecFrontierSummary& specFrontierSummary
+        = approxRegCut.m_specFrontierSummary;
     const size_t supportedAssignw = program.m_stats.m_assignwSupported;
     const size_t totalAssignw = program.m_stats.m_assignwTotal;
     const size_t skipped = program.m_stats.m_assignwIgnored;
@@ -66,6 +68,18 @@ void emitStats(const V3SimAccelProgram& program, size_t emittedUniqueAssignw,
            << "max_boundary_input_vars=" << approxRegCutSummary.m_maxBoundaryInputVarCount
            << " "
            << "max_boundary_output_vars=" << approxRegCutSummary.m_maxBoundaryOutputVarCount);
+    v3info("--sim-accel-only spec_frontier "
+           << "candidate_count=" << specFrontierSummary.m_candidateCount << " "
+           << "clusters_with_candidates=" << specFrontierSummary.m_clustersWithCandidates << " "
+           << "preferred_zero_candidates="
+           << specFrontierSummary.m_preferredZeroCandidateCount << " "
+           << "preferred_one_candidates=" << specFrontierSummary.m_preferredOneCandidateCount
+           << " "
+           << "unknown_preference_candidates="
+           << specFrontierSummary.m_unknownPreferenceCandidateCount << " "
+           << "activator_candidates=" << specFrontierSummary.m_activatorCandidateCount << " "
+           << "max_candidate_count=" << specFrontierSummary.m_maxCandidateCount << " "
+           << "max_spec_score=" << specFrontierSummary.m_maxSpecScore);
 }
 
 }  // namespace
