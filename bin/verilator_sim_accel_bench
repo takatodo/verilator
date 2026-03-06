@@ -1388,6 +1388,8 @@ int main(int argc, char** argv) {
   std::vector<uint32_t> hybridWriteVarIdxs;
   size_t hybridBoundaryInputBytes = 0;
   size_t hybridBoundaryOutputBytes = 0;
+  size_t hybridStaticH2dBytes = 0;
+  size_t hybridDynamicH2dBytes = 0;
   size_t hybridActualH2dBytes = 0;
   size_t hybridActualD2hBytes = 0;
   if (hybridMode == "single-partition") {
@@ -1405,7 +1407,9 @@ int main(int argc, char** argv) {
                                               sim_accel_eval_partition_write_var_index);
     hybridBoundaryInputBytes = logicalBytesPerBatch(hybridReadVarIdxs, widths, nstates);
     hybridBoundaryOutputBytes = logicalBytesPerBatch(hybridWriteVarIdxs, widths, nstates);
-    hybridActualH2dBytes = compactTransferBytes(hybridReadFromOutputVarIdxs, nstates);
+    hybridStaticH2dBytes = compactTransferBytes(hybridReadInputVarIdxs, nstates);
+    hybridDynamicH2dBytes = compactTransferBytes(hybridReadFromOutputVarIdxs, nstates);
+    hybridActualH2dBytes = hybridStaticH2dBytes + hybridDynamicH2dBytes;
     hybridActualD2hBytes = compactTransferBytes(hybridWriteVarIdxs, nstates);
   } else if (hybridMode == "single-cluster") {
     hybridReadVarIdxs = loadPartitionVarIdxs(hybridClusterIndex, sim_accel_eval_cluster_read_count,
@@ -1421,7 +1425,9 @@ int main(int argc, char** argv) {
                                               sim_accel_eval_cluster_write_var_index);
     hybridBoundaryInputBytes = logicalBytesPerBatch(hybridReadVarIdxs, widths, nstates);
     hybridBoundaryOutputBytes = logicalBytesPerBatch(hybridWriteVarIdxs, widths, nstates);
-    hybridActualH2dBytes = compactTransferBytes(hybridReadFromOutputVarIdxs, nstates);
+    hybridStaticH2dBytes = compactTransferBytes(hybridReadInputVarIdxs, nstates);
+    hybridDynamicH2dBytes = compactTransferBytes(hybridReadFromOutputVarIdxs, nstates);
+    hybridActualH2dBytes = hybridStaticH2dBytes + hybridDynamicH2dBytes;
     hybridActualD2hBytes = compactTransferBytes(hybridWriteVarIdxs, nstates);
   }
   for (uint32_t idx = 0; idx < nvars; ++idx) {
@@ -1798,6 +1804,8 @@ int main(int argc, char** argv) {
     std::cout << "hybrid_partition_write_vars=" << hybridWriteVarIdxs.size() << "\n";
     std::cout << "hybrid_partition_input_bytes_per_batch=" << hybridBoundaryInputBytes << "\n";
     std::cout << "hybrid_partition_output_bytes_per_batch=" << hybridBoundaryOutputBytes << "\n";
+    std::cout << "hybrid_static_h2d_bytes_per_batch=" << hybridStaticH2dBytes << "\n";
+    std::cout << "hybrid_dynamic_h2d_bytes_per_batch=" << hybridDynamicH2dBytes << "\n";
     std::cout << "hybrid_actual_h2d_bytes_per_batch=" << hybridActualH2dBytes << "\n";
     std::cout << "hybrid_actual_d2h_bytes_per_batch=" << hybridActualD2hBytes << "\n";
     std::cout << "hybrid_gpu_ms_per_rep=" << hybrid_ms_per_rep << "\n";
@@ -1822,6 +1830,8 @@ int main(int argc, char** argv) {
     std::cout << "hybrid_cluster_write_vars=" << hybridWriteVarIdxs.size() << "\n";
     std::cout << "hybrid_cluster_input_bytes_per_batch=" << hybridBoundaryInputBytes << "\n";
     std::cout << "hybrid_cluster_output_bytes_per_batch=" << hybridBoundaryOutputBytes << "\n";
+    std::cout << "hybrid_static_h2d_bytes_per_batch=" << hybridStaticH2dBytes << "\n";
+    std::cout << "hybrid_dynamic_h2d_bytes_per_batch=" << hybridDynamicH2dBytes << "\n";
     std::cout << "hybrid_actual_h2d_bytes_per_batch=" << hybridActualH2dBytes << "\n";
     std::cout << "hybrid_actual_d2h_bytes_per_batch=" << hybridActualD2hBytes << "\n";
     std::cout << "hybrid_gpu_ms_per_rep=" << hybrid_ms_per_rep << "\n";
