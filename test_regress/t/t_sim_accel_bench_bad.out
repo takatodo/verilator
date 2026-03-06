@@ -1,0 +1,3 @@
+%Error: verilator: --sim-accel-bench needs benchmark arguments.
+%Error: Example:
+%Error:   verilator --sim-accel-bench --top-module <TOP> --outdir <DIR> -- <rtl files...>

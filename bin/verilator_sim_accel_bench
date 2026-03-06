@@ -1,0 +1,295 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  verilator_sim_accel_bench --top-module TOP --outdir DIR [options] -- <rtl files...>
+
+Options:
+  --verilator PATH   Verilator binary (default: ./bin/verilator)
+  --top-module TOP   Top module name
+  --outdir DIR       Output directory
+  --nstates N        Number of parallel states (default: 131072)
+  --gpu-reps N       GPU repetitions for timing (default: 200)
+  --cpu-reps N       CPU repetitions for timing (default: 20)
+
+Example:
+  verilator_sim_accel_bench \
+    --verilator ./bin/verilator \
+    --top-module axi_interconnect \
+    --outdir /tmp/sim_accel_bench \
+    -- /path/to/priority_encoder.v /path/to/arbiter.v /path/to/axi_interconnect.v
+EOF
+}
+
+VERILATOR_BIN="./bin/verilator"
+TOP_MODULE=""
+OUTDIR=""
+NSTATES=131072
+GPU_REPS=200
+CPU_REPS=20
+declare -a SOURCES=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --verilator)
+      VERILATOR_BIN="$2"; shift 2 ;;
+    --top-module)
+      TOP_MODULE="$2"; shift 2 ;;
+    --outdir)
+      OUTDIR="$2"; shift 2 ;;
+    --nstates)
+      NSTATES="$2"; shift 2 ;;
+    --gpu-reps)
+      GPU_REPS="$2"; shift 2 ;;
+    --cpu-reps)
+      CPU_REPS="$2"; shift 2 ;;
+    --help|-h)
+      usage; exit 0 ;;
+    --)
+      shift
+      SOURCES=("$@")
+      break ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 2 ;;
+  esac
+done
+
+if [[ -z "$TOP_MODULE" || -z "$OUTDIR" || ${#SOURCES[@]} -eq 0 ]]; then
+  usage >&2
+  exit 2
+fi
+
+mkdir -p "$OUTDIR"
+OUTDIR="$(cd "$OUTDIR" && pwd)"
+KERNEL_CU="$OUTDIR/${TOP_MODULE}.sim_accel.kernel.cu"
+KERNEL_VARS="$KERNEL_CU.vars.tsv"
+KERNEL_DEPS="$KERNEL_CU.deps.tsv"
+LOG="$OUTDIR/verilator_cuda.log"
+TIME_VERILATOR="$OUTDIR/time_verilator_codegen_sec.txt"
+TIME_NVCC="$OUTDIR/time_nvcc_compile_sec.txt"
+TIME_RUN="$OUTDIR/time_bench_run_sec.txt"
+
+echo "[1/4] Generating CUDA kernel with --sim-accel-only..."
+/usr/bin/time -f "%e" -o "$TIME_VERILATOR" \
+  env CCACHE_DISABLE=1 "$VERILATOR_BIN" \
+    --Wno-fatal --no-skip-identical \
+    --top-module "$TOP_MODULE" \
+    --sim-accel-only \
+    --sim-accel-output "$KERNEL_CU" \
+    "${SOURCES[@]}" \
+    >"$LOG" 2>&1
+
+if [[ ! -s "$KERNEL_CU" || ! -s "$KERNEL_VARS" ]]; then
+  echo "Kernel generation failed: expected $KERNEL_CU and $KERNEL_VARS" >&2
+  exit 1
+fi
+
+echo "[2/4] Extracting CPU fallback body..."
+awk '
+  /if \(tid >= nstates\) return;/ {cap=1; next}
+  cap && /^}/ {cap=0; exit}
+  cap {print}
+' "$KERNEL_CU" > "$OUTDIR/cpu_body.inc"
+
+cat > "$OUTDIR/bench_kernel.cu" <<'CU'
+#include <cuda_runtime.h>
+
+#include <chrono>
+#include <cstdint>
+#include <cstdlib>
+#include <iomanip>
+#include <iostream>
+#include <random>
+#include <vector>
+
+#include "kernel_generated.cu"
+
+static void checkCuda(cudaError_t st, const char* msg) {
+  if (st != cudaSuccess) {
+    std::cerr << "CUDA error at " << msg << ": " << cudaGetErrorString(st) << "\n";
+    std::exit(2);
+  }
+}
+
+static void sim_accel_eval_assignw_cpu(const uint32_t* state_in, uint32_t* state_out,
+                                       uint32_t nstates) {
+  for (uint32_t tid = 0; tid < nstates; ++tid) {
+#include "cpu_body.inc"
+  }
+}
+
+int main() {
+  const uint32_t nvars = sim_accel_eval_var_count();
+  const uint32_t nstates = NSTATES_VALUE;
+  const int gpu_reps = GPU_REPS_VALUE;
+  const int cpu_reps = CPU_REPS_VALUE;
+
+  const size_t elems = static_cast<size_t>(nvars) * nstates;
+  const size_t bytes = elems * sizeof(uint32_t);
+
+  std::vector<uint32_t> h_in(elems);
+  std::vector<uint32_t> h_out_gpu(elems);
+  std::vector<uint32_t> h_out_cpu(elems);
+
+  std::mt19937 rng(1);
+  std::uniform_int_distribution<uint32_t> dist(0, 0xffffffffu);
+  for (size_t i = 0; i < elems; ++i) h_in[i] = dist(rng);
+
+  uint32_t* d_in = nullptr;
+  uint32_t* d_out = nullptr;
+  checkCuda(cudaMalloc(&d_in, bytes), "cudaMalloc d_in");
+  checkCuda(cudaMalloc(&d_out, bytes), "cudaMalloc d_out");
+  checkCuda(cudaMemcpy(d_in, h_in.data(), bytes, cudaMemcpyHostToDevice), "H2D in");
+
+  const int block = 256;
+  const int grid = static_cast<int>((nstates + block - 1) / block);
+
+  for (int i = 0; i < 10; ++i) sim_accel_eval_assignw_u32<<<grid, block>>>(d_in, d_out, nstates);
+  checkCuda(cudaDeviceSynchronize(), "warmup sync");
+
+  cudaEvent_t evStart, evStop;
+  checkCuda(cudaEventCreate(&evStart), "event create start");
+  checkCuda(cudaEventCreate(&evStop), "event create stop");
+  checkCuda(cudaEventRecord(evStart), "event record start");
+  for (int i = 0; i < gpu_reps; ++i) sim_accel_eval_assignw_u32<<<grid, block>>>(d_in, d_out, nstates);
+  checkCuda(cudaEventRecord(evStop), "event record stop");
+  checkCuda(cudaEventSynchronize(evStop), "event sync stop");
+
+  float gpu_ms = 0.0f;
+  checkCuda(cudaEventElapsedTime(&gpu_ms, evStart, evStop), "elapsed");
+  checkCuda(cudaMemcpy(h_out_gpu.data(), d_out, bytes, cudaMemcpyDeviceToHost), "D2H out");
+
+  auto cpu_t0 = std::chrono::high_resolution_clock::now();
+  for (int i = 0; i < cpu_reps; ++i) {
+    sim_accel_eval_assignw_cpu(h_in.data(), h_out_cpu.data(), nstates);
+  }
+  auto cpu_t1 = std::chrono::high_resolution_clock::now();
+  const double cpu_ms = std::chrono::duration<double, std::milli>(cpu_t1 - cpu_t0).count();
+
+  sim_accel_eval_assignw_cpu(h_in.data(), h_out_cpu.data(), nstates);
+  size_t mismatch = 0;
+  for (size_t i = 0; i < elems; ++i) {
+    if (h_out_cpu[i] != h_out_gpu[i]) ++mismatch;
+  }
+
+  const double gpu_ms_per_rep = gpu_ms / gpu_reps;
+  const double cpu_ms_per_rep = cpu_ms / cpu_reps;
+  const double speedup = cpu_ms_per_rep / gpu_ms_per_rep;
+  const double eps = 0.05;  // 5% deadband for stable auto-judgement
+
+  std::cout << std::fixed << std::setprecision(6);
+  std::cout << "nvars=" << nvars << " nstates=" << nstates << " elems=" << elems << "\n";
+  std::cout << "gpu_ms_per_rep=" << gpu_ms_per_rep << "\n";
+  std::cout << "cpu_ms_per_rep=" << cpu_ms_per_rep << "\n";
+  std::cout << "speedup_cpu_over_gpu=" << speedup << "x\n";
+  std::cout << "mismatch=" << mismatch << "\n";
+  if (speedup > (1.0 + eps)) {
+    std::cout << "auto_parallel_judgement=parallel\n";
+    std::cout << "auto_engine_recommendation=gpu\n";
+  } else if (speedup < (1.0 - eps)) {
+    std::cout << "auto_parallel_judgement=non_parallel\n";
+    std::cout << "auto_engine_recommendation=cpu\n";
+  } else {
+    std::cout << "auto_parallel_judgement=borderline\n";
+    std::cout << "auto_engine_recommendation=tie\n";
+  }
+
+  cudaFree(d_in);
+  cudaFree(d_out);
+  cudaEventDestroy(evStart);
+  cudaEventDestroy(evStop);
+  return mismatch == 0 ? 0 : 1;
+}
+CU
+
+sed -i "s/NSTATES_VALUE/${NSTATES}/g" "$OUTDIR/bench_kernel.cu"
+sed -i "s/GPU_REPS_VALUE/${GPU_REPS}/g" "$OUTDIR/bench_kernel.cu"
+sed -i "s/CPU_REPS_VALUE/${CPU_REPS}/g" "$OUTDIR/bench_kernel.cu"
+
+cp "$KERNEL_CU" "$OUTDIR/kernel_generated.cu"
+
+echo "[3/4] Building C++-direct CUDA benchmark..."
+(
+  cd "$OUTDIR"
+  /usr/bin/time -f "%e" -o "$TIME_NVCC" \
+    nvcc -O3 -std=c++17 bench_kernel.cu -o bench_kernel > build_nvcc.log 2>&1
+)
+
+echo "[4/4] Running benchmark..."
+(
+  cd "$OUTDIR"
+  if ! /usr/bin/time -f "%e" -o "$TIME_RUN" ./bench_kernel > bench_run.log 2>&1; then
+    echo "Benchmark execution failed. Last lines from bench_run.log:" >&2
+    tail -n 40 bench_run.log >&2 || true
+    if rg -q "OS call failed or operation not supported on this OS" bench_run.log; then
+      cat >&2 <<'EOF'
+Likely root cause: CUDA device calls are blocked in the current execution context.
+If this is running under a sandboxed agent/session, rerun the same command outside the sandbox
+or with elevated permissions that allow GPU device access.
+EOF
+    fi
+    exit 1
+  fi
+)
+
+ASSIGNW_SUPPORTED_RAW="$(rg -o 'assignw_supported=[0-9A-Fa-f]+' "$LOG" | tail -n1 | cut -d= -f2 || true)"
+ASSIGNW_TOTAL_RAW="$(rg -o 'assignw_total=[0-9A-Fa-f]+' "$LOG" | tail -n1 | cut -d= -f2 || true)"
+ASSIGNW_IGNORED_RAW="$(rg -o 'assignw_ignored=[0-9A-Fa-f]+' "$LOG" | tail -n1 | cut -d= -f2 || true)"
+ASSIGNW_COV_PCT="$(rg -o 'assignw_coverage_pct=[0-9]+\.[0-9]+' "$LOG" | tail -n1 | cut -d= -f2 || true)"
+
+to_dec() {
+  local v="${1:-}"
+  if [[ -z "$v" ]]; then
+    echo ""
+    return
+  fi
+  if [[ "$v" =~ [A-Fa-f] ]]; then
+    echo "$((16#$v))"
+  else
+    echo "$v"
+  fi
+}
+
+ASSIGNW_SUPPORTED="$(to_dec "$ASSIGNW_SUPPORTED_RAW")"
+ASSIGNW_TOTAL="$(to_dec "$ASSIGNW_TOTAL_RAW")"
+ASSIGNW_IGNORED="$(to_dec "$ASSIGNW_IGNORED_RAW")"
+
+if [[ -n "$ASSIGNW_SUPPORTED" && -n "$ASSIGNW_TOTAL" && -n "$ASSIGNW_COV_PCT" ]]; then
+  {
+    echo "cuda_assignw_supported=$ASSIGNW_SUPPORTED"
+    echo "cuda_assignw_total=$ASSIGNW_TOTAL"
+    echo "cuda_assignw_ignored=$ASSIGNW_IGNORED"
+    echo "cuda_assignw_coverage_pct=$ASSIGNW_COV_PCT"
+  } >> "$OUTDIR/bench_run.log"
+fi
+
+VERILATOR_GEN_S="$(cat "$TIME_VERILATOR" 2>/dev/null || true)"
+NVCC_COMPILE_S="$(cat "$TIME_NVCC" 2>/dev/null || true)"
+BENCH_RUN_S="$(cat "$TIME_RUN" 2>/dev/null || true)"
+if [[ -n "$VERILATOR_GEN_S" && -n "$NVCC_COMPILE_S" && -n "$BENCH_RUN_S" ]]; then
+  TOTAL_S="$(awk -v a="$VERILATOR_GEN_S" -v b="$NVCC_COMPILE_S" -v c="$BENCH_RUN_S" \
+                 'BEGIN { printf "%.6f", a + b + c }')"
+  {
+    echo "verilator_codegen_s=$VERILATOR_GEN_S"
+    echo "nvcc_compile_s=$NVCC_COMPILE_S"
+    echo "bench_run_s=$BENCH_RUN_S"
+    echo "total_elapsed_s=$TOTAL_S"
+  } >> "$OUTDIR/bench_run.log"
+fi
+
+if [[ -s "$KERNEL_DEPS" ]]; then
+  DEPS_ROWS="$(($(wc -l < "$KERNEL_DEPS") - 1))"
+  echo "cuda_deps_rows=$DEPS_ROWS" >> "$OUTDIR/bench_run.log"
+fi
+
+echo "== C++ direct benchmark complete =="
+echo "outdir: $OUTDIR"
+echo "kernel: $KERNEL_CU"
+echo "vars:   $KERNEL_VARS"
+echo "log:    $LOG"
+echo "run:    $OUTDIR/bench_run.log"
+cat "$OUTDIR/bench_run.log"
