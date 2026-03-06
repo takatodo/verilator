@@ -1323,6 +1323,17 @@ ASSIGNW_SUPPORTED_RAW="$(rg -o 'assignw_supported=[0-9A-Fa-f]+' "$LOG" | tail -n
 ASSIGNW_TOTAL_RAW="$(rg -o 'assignw_total=[0-9A-Fa-f]+' "$LOG" | tail -n1 | cut -d= -f2 || true)"
 ASSIGNW_IGNORED_RAW="$(rg -o 'assignw_ignored=[0-9A-Fa-f]+' "$LOG" | tail -n1 | cut -d= -f2 || true)"
 ASSIGNW_OFFLOAD_PCT="$(rg -o 'assignw_offload_pct=[0-9]+\.[0-9]+' "$LOG" | tail -n1 | cut -d= -f2 || true)"
+APPROX_REGCUT_CLUSTER_COUNT="$(rg -o 'cluster_count=[0-9]+' "$LOG" | tail -n1 | cut -d= -f2 || true)"
+APPROX_REGCUT_ASSIGN_COUNT="$(rg -o 'assign_count=[0-9]+' "$LOG" | tail -n1 | cut -d= -f2 || true)"
+APPROX_REGCUT_BOUNDARY_INPUT_VARS="$(rg -o 'boundary_input_vars=[0-9]+' "$LOG" | tail -n1 | cut -d= -f2 || true)"
+APPROX_REGCUT_BOUNDARY_OUTPUT_VARS="$(rg -o 'boundary_output_vars=[0-9]+' "$LOG" | tail -n1 | cut -d= -f2 || true)"
+APPROX_REGCUT_INTERNAL_VARS="$(rg -o 'internal_vars=[0-9]+' "$LOG" | tail -n1 | cut -d= -f2 || true)"
+APPROX_REGCUT_UNIQUE_BOUNDARY_INPUT_VARS="$(rg -o 'unique_boundary_input_vars=[0-9]+' "$LOG" | tail -n1 | cut -d= -f2 || true)"
+APPROX_REGCUT_UNIQUE_BOUNDARY_OUTPUT_VARS="$(rg -o 'unique_boundary_output_vars=[0-9]+' "$LOG" | tail -n1 | cut -d= -f2 || true)"
+APPROX_REGCUT_ACTIVATOR_INPUT_VARS="$(rg -o 'activator_input_vars=[0-9]+' "$LOG" | tail -n1 | cut -d= -f2 || true)"
+APPROX_REGCUT_MAX_ASSIGNS="$(rg -o 'max_assigns=[0-9]+' "$LOG" | tail -n1 | cut -d= -f2 || true)"
+APPROX_REGCUT_MAX_BOUNDARY_INPUT_VARS="$(rg -o 'max_boundary_input_vars=[0-9]+' "$LOG" | tail -n1 | cut -d= -f2 || true)"
+APPROX_REGCUT_MAX_BOUNDARY_OUTPUT_VARS="$(rg -o 'max_boundary_output_vars=[0-9]+' "$LOG" | tail -n1 | cut -d= -f2 || true)"
 
 to_dec() {
   local v="${1:-}"
@@ -1349,6 +1360,22 @@ if [[ -n "$ASSIGNW_SUPPORTED" && -n "$ASSIGNW_TOTAL" && -n "$ASSIGNW_OFFLOAD_PCT
     echo "cuda_assignw_offload_pct=$ASSIGNW_OFFLOAD_PCT"
     echo "cuda_assignw_offload_scope=post_lowering_assignw_nodes"
     echo "cuda_assignw_offload_basis=supported_assignw_div_total_assignw"
+  } >> "$OUTDIR/bench_run.log"
+fi
+
+if [[ -n "$APPROX_REGCUT_CLUSTER_COUNT" ]]; then
+  {
+    echo "approx_regcut_cluster_count=$APPROX_REGCUT_CLUSTER_COUNT"
+    echo "approx_regcut_assign_count=$APPROX_REGCUT_ASSIGN_COUNT"
+    echo "approx_regcut_boundary_input_vars=$APPROX_REGCUT_BOUNDARY_INPUT_VARS"
+    echo "approx_regcut_boundary_output_vars=$APPROX_REGCUT_BOUNDARY_OUTPUT_VARS"
+    echo "approx_regcut_internal_vars=$APPROX_REGCUT_INTERNAL_VARS"
+    echo "approx_regcut_unique_boundary_input_vars=$APPROX_REGCUT_UNIQUE_BOUNDARY_INPUT_VARS"
+    echo "approx_regcut_unique_boundary_output_vars=$APPROX_REGCUT_UNIQUE_BOUNDARY_OUTPUT_VARS"
+    echo "approx_regcut_activator_input_vars=$APPROX_REGCUT_ACTIVATOR_INPUT_VARS"
+    echo "approx_regcut_max_assigns=$APPROX_REGCUT_MAX_ASSIGNS"
+    echo "approx_regcut_max_boundary_input_vars=$APPROX_REGCUT_MAX_BOUNDARY_INPUT_VARS"
+    echo "approx_regcut_max_boundary_output_vars=$APPROX_REGCUT_MAX_BOUNDARY_OUTPUT_VARS"
   } >> "$OUTDIR/bench_run.log"
 fi
 

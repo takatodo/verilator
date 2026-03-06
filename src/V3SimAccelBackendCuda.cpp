@@ -18,6 +18,7 @@
 #include "V3SimAccelBackendCudaWriter.h"
 #include "V3SimAccelLowerAssignwBool32.h"
 #include "V3SimAccelProgram.h"
+#include "V3SimAccelProgramAnalysis.h"
 
 #include <iomanip>
 #include <sstream>
@@ -26,6 +27,8 @@ namespace {
 
 void emitStats(const V3SimAccelProgram& program, size_t emittedUniqueAssignw,
                size_t partitionCount) {
+    const V3SimAccelProgramAnalysis::ApproxRegCutSummary approxRegCut
+        = V3SimAccelProgramAnalysis::analyzeApproxRegCut(program);
     const size_t supportedAssignw = program.m_stats.m_assignwSupported;
     const size_t totalAssignw = program.m_stats.m_assignwTotal;
     const size_t skipped = program.m_stats.m_assignwIgnored;
@@ -46,6 +49,19 @@ void emitStats(const V3SimAccelProgram& program, size_t emittedUniqueAssignw,
            << "assignw_emitted_unique=" << emittedUniqueAssignw << " "
            << "kernel_partitions=" << partitionCount << " "
            << "assignw_offload_pct=" << offloadStr.str());
+    v3info("--sim-accel-only approx_regcut "
+           << "cluster_count=" << approxRegCut.m_clusterCount << " "
+           << "assign_count=" << approxRegCut.m_assignCount << " "
+           << "boundary_input_vars=" << approxRegCut.m_boundaryInputVarCount << " "
+           << "boundary_output_vars=" << approxRegCut.m_boundaryOutputVarCount << " "
+           << "internal_vars=" << approxRegCut.m_internalVarCount << " "
+           << "unique_boundary_input_vars=" << approxRegCut.m_uniqueBoundaryInputVarCount << " "
+           << "unique_boundary_output_vars=" << approxRegCut.m_uniqueBoundaryOutputVarCount
+           << " "
+           << "activator_input_vars=" << approxRegCut.m_activatorInputVarCount << " "
+           << "max_assigns=" << approxRegCut.m_maxAssignCount << " "
+           << "max_boundary_input_vars=" << approxRegCut.m_maxBoundaryInputVarCount << " "
+           << "max_boundary_output_vars=" << approxRegCut.m_maxBoundaryOutputVarCount);
 }
 
 }  // namespace

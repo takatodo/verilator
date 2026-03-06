@@ -13,6 +13,7 @@
 #include "V3SimAccelProgramJson.h"
 
 #include "V3Error.h"
+#include "V3SimAccelProgramAnalysis.h"
 
 #include <fstream>
 
@@ -87,6 +88,8 @@ void writeVarIndexList(std::ofstream& of, const std::vector<size_t>& values, con
 
 void V3SimAccelProgramJson::write(const string& filename, const V3SimAccelProgram& program,
                                   const string& strategy) {
+    const V3SimAccelProgramAnalysis::ApproxRegCutSummary approxRegCut
+        = V3SimAccelProgramAnalysis::analyzeApproxRegCut(program);
     std::ofstream of{filename};
     if (!of.is_open()) v3fatal("Cannot open output file: " + filename);  // LCOV_EXCL_LINE
 
@@ -181,6 +184,29 @@ void V3SimAccelProgramJson::write(const string& filename, const V3SimAccelProgra
     of << "    \"cpu_visible_var_idxs\": ";
     writeVarIndexList(of, program.m_commPlan.m_cpuVisibleVarIdxs, "      ");
     of << "\n";
+    of << "  },\n";
+
+    of << "  \"approx_regcut_analysis\": {\n";
+    of << "    \"cluster_count\": " << approxRegCut.m_clusterCount << ",\n";
+    of << "    \"assign_count\": " << approxRegCut.m_assignCount << ",\n";
+    of << "    \"boundary_input_var_count\": " << approxRegCut.m_boundaryInputVarCount << ",\n";
+    of << "    \"boundary_output_var_count\": " << approxRegCut.m_boundaryOutputVarCount << ",\n";
+    of << "    \"internal_var_count\": " << approxRegCut.m_internalVarCount << ",\n";
+    of << "    \"unique_boundary_input_var_count\": " << approxRegCut.m_uniqueBoundaryInputVarCount
+       << ",\n";
+    of << "    \"unique_boundary_output_var_count\": "
+       << approxRegCut.m_uniqueBoundaryOutputVarCount << ",\n";
+    of << "    \"unique_internal_var_count\": " << approxRegCut.m_uniqueInternalVarCount << ",\n";
+    of << "    \"boundary_input_bit_count\": " << approxRegCut.m_boundaryInputBitCount << ",\n";
+    of << "    \"boundary_output_bit_count\": " << approxRegCut.m_boundaryOutputBitCount << ",\n";
+    of << "    \"internal_bit_count\": " << approxRegCut.m_internalBitCount << ",\n";
+    of << "    \"activator_input_var_count\": " << approxRegCut.m_activatorInputVarCount << ",\n";
+    of << "    \"max_assign_count\": " << approxRegCut.m_maxAssignCount << ",\n";
+    of << "    \"max_boundary_input_var_count\": " << approxRegCut.m_maxBoundaryInputVarCount
+       << ",\n";
+    of << "    \"max_boundary_output_var_count\": " << approxRegCut.m_maxBoundaryOutputVarCount
+       << ",\n";
+    of << "    \"max_internal_var_count\": " << approxRegCut.m_maxInternalVarCount << "\n";
     of << "  }\n";
     of << "}\n";
 }

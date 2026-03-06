@@ -230,6 +230,7 @@ RAW_OBJS_PCH_ASTMT = \
   V3SimAccelBackendCudaWriter.o \
   V3SimAccelLowerAssignwBool32.o \
   V3SimAccelLowerAssignwBool32Visitor.o \
+  V3SimAccelProgramAnalysis.o \
   V3SimAccelProgramJson.o \
   V3Stats.o \
   V3StatsReport.o \

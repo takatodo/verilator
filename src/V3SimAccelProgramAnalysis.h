@@ -1,0 +1,61 @@
+// DESCRIPTION: Verilator: Sim-Accel Program Analysis Helpers
+//
+// Code available from: https://verilator.org
+//
+// This program is free software; you can redistribute it and/or modify it
+// under the terms of either the GNU Lesser General Public License Version 3
+// or the Perl Artistic License Version 2.0.
+// SPDX-FileCopyrightText: 2026-2026 Wilson Snyder
+// SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
+//
+//=============================================================================
+
+#ifndef VERILATOR_V3SIMACCELPROGRAMANALYSIS_H_
+#define VERILATOR_V3SIMACCELPROGRAMANALYSIS_H_
+
+#include "config_build.h"
+#include "verilatedos.h"
+
+#include "V3SimAccelProgram.h"
+
+#include <cstddef>
+#include <cstdint>
+
+class V3SimAccelProgramAnalysis final {
+public:
+    struct ApproxRegCutCluster final {
+        size_t m_assignCount = 0;
+        size_t m_boundaryInputVarCount = 0;
+        size_t m_boundaryOutputVarCount = 0;
+        size_t m_internalVarCount = 0;
+        uint64_t m_boundaryInputBitCount = 0;
+        uint64_t m_boundaryOutputBitCount = 0;
+        uint64_t m_internalBitCount = 0;
+        size_t m_activatorInputVarCount = 0;
+        string m_dominantHierarchy;
+        size_t m_uniqueHierarchyCount = 0;
+    };
+
+    struct ApproxRegCutSummary final {
+        size_t m_clusterCount = 0;
+        size_t m_assignCount = 0;
+        size_t m_boundaryInputVarCount = 0;
+        size_t m_boundaryOutputVarCount = 0;
+        size_t m_internalVarCount = 0;
+        size_t m_uniqueBoundaryInputVarCount = 0;
+        size_t m_uniqueBoundaryOutputVarCount = 0;
+        size_t m_uniqueInternalVarCount = 0;
+        uint64_t m_boundaryInputBitCount = 0;
+        uint64_t m_boundaryOutputBitCount = 0;
+        uint64_t m_internalBitCount = 0;
+        size_t m_activatorInputVarCount = 0;
+        size_t m_maxAssignCount = 0;
+        size_t m_maxBoundaryInputVarCount = 0;
+        size_t m_maxBoundaryOutputVarCount = 0;
+        size_t m_maxInternalVarCount = 0;
+    };
+
+    static ApproxRegCutSummary analyzeApproxRegCut(const V3SimAccelProgram& program);
+};
+
+#endif  // Guard
