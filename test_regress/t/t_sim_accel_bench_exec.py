@@ -30,14 +30,20 @@ if not test.run_capture("nvidia-smi -L", check=False):
 cache_dir = test.obj_dir + "/sim_accel_cache"
 bench_dir_miss = test.obj_dir + "/sim_accel_bench_miss"
 bench_dir_hit = test.obj_dir + "/sim_accel_bench_hit"
+bench_dir_objhit = test.obj_dir + "/sim_accel_bench_object_hit"
 bench_run_log = bench_dir_hit + "/bench_run.log"
+bench_objhit_log = bench_dir_objhit + "/bench_run.log"
 kernel_log = bench_dir_hit + "/verilator_cuda.log"
 kernel_cu = bench_dir_hit + "/t.sim_accel.kernel.cu"
 kernel_vars = kernel_cu + ".vars.tsv"
 kernel_deps = kernel_cu + ".deps.tsv"
 kernel_comm = kernel_cu + ".comm.tsv"
+kernel_api = kernel_cu + ".api.h"
+kernel_cpu = kernel_cu + ".cpu.cpp"
+kernel_link = kernel_cu + ".link.cu"
+kernel_parts = kernel_cu + ".partitions.tsv"
 
-for path in [cache_dir, bench_dir_miss, bench_dir_hit]:
+for path in [cache_dir, bench_dir_miss, bench_dir_hit, bench_dir_objhit]:
     shutil.rmtree(path, ignore_errors=True)
 
 bench_cmd = (
@@ -60,11 +66,23 @@ bench_cmd_hit = (
     + " --compile-cache-dir " + cache_dir
     + " -- "
     + test.t_dir + "/t_sim_accel_bench_exec.v")
+bench_cmd_object_hit = (
+    os.environ["VERILATOR_ROOT"] + "/bin/verilator --sim-accel-bench"
+    + " --top-module t"
+    + " --nstates 4096"
+    + " --gpu-reps 4"
+    + " --cpu-reps 1"
+    + " --assigns-per-kernel 2"
+    + " --compile-cache-dir " + cache_dir
+    + " --no-compile-cache"
+    + " -- "
+    + test.t_dir + "/t_sim_accel_bench_exec.v")
 
 test.run_capture(bench_cmd.replace("-- ", "--outdir " + bench_dir_miss + " -- ", 1))
 test.run_capture(bench_cmd_hit.replace("-- ", "--outdir " + bench_dir_hit + " -- ", 1))
+test.run_capture(bench_cmd_object_hit.replace("-- ", "--outdir " + bench_dir_objhit + " -- ", 1))
 
-for filename in [bench_run_log, kernel_log, kernel_cu, kernel_vars]:
+for filename in [bench_run_log, kernel_log, kernel_cu, kernel_vars, kernel_api, kernel_cpu, kernel_link, kernel_parts]:
     if not os.path.exists(filename):
         test.error("Expected output file not found: " + filename)
 if os.path.exists(kernel_comm):
@@ -74,8 +92,12 @@ test.file_grep(bench_dir_miss + "/bench_run.log", r"nvcc_cache_mode=miss")
 test.file_grep(bench_dir_miss + "/bench_run.log", r"verilator_artifact_cache_mode=miss")
 test.file_grep(bench_run_log, r"nvcc_cache_mode=hit")
 test.file_grep(bench_run_log, r"verilator_artifact_cache_mode=hit")
+test.file_grep(bench_objhit_log, r"verilator_artifact_cache_mode=disabled")
+test.file_grep(bench_objhit_log, r"nvcc_cache_mode=disabled")
 test.file_grep(bench_run_log, r"mismatch=0")
 test.file_grep(bench_run_log, r"compact_mismatch=0")
+test.file_grep(bench_objhit_log, r"mismatch=0")
+test.file_grep(bench_objhit_log, r"compact_mismatch=0")
 test.file_grep(bench_run_log, r"speedup_gpu_over_cpu=")
 test.file_grep(bench_run_log, r"kernel_partitions=[2-9][0-9]*")
 test.file_grep(bench_run_log, r"auto_engine_recommendation=")
@@ -88,6 +110,12 @@ test.file_grep(bench_run_log, r"comm_verify_full_d2h_bytes=")
 test.file_grep(bench_run_log, r"cuda_assignw_offload_scope=post_lowering_assignw_nodes")
 test.file_grep(bench_run_log, r"cuda_assignw_offload_basis=supported_assignw_div_total_assignw")
 test.file_grep(bench_run_log, r"compile_cache_dir=")
+test.file_grep(bench_run_log, r"partition_object_build=1")
+test.file_grep(bench_run_log, r"object_cache_hits=")
+test.file_grep(bench_run_log, r"object_cache_misses=")
+test.file_grep(bench_objhit_log, r"partition_object_build=1")
+test.file_grep(bench_objhit_log, r"object_cache_hits=5")
+test.file_grep(bench_objhit_log, r"object_cache_misses=0")
 test.file_grep(bench_run_log, r"verilator_artifact_cache_key=")
 test.file_grep(bench_run_log, r"nvcc_cache_key=")
 test.file_grep(bench_run_log, r"verilator_codegen_s=0\.000000")

@@ -146,10 +146,8 @@ if [[ -n "$INIT_FILE" ]]; then
   INIT_FILE_ABS="$(cd "$(dirname "$INIT_FILE")" && pwd)/$(basename "$INIT_FILE")"
 fi
 
-if [[ "$COMPILE_CACHE_ENABLED" -eq 1 ]]; then
-  mkdir -p "$COMPILE_CACHE_DIR"
-  COMPILE_CACHE_DIR="$(cd "$COMPILE_CACHE_DIR" && pwd)"
-fi
+mkdir -p "$COMPILE_CACHE_DIR"
+COMPILE_CACHE_DIR="$(cd "$COMPILE_CACHE_DIR" && pwd)"
 
 sha256_one() {
   sha256sum "$1" | awk '{print $1}'
@@ -269,17 +267,92 @@ compute_artifact_cache_key() {
   } | sha256sum | awk '{print $1}'
 }
 
+compute_generated_compile_bundle_sha() {
+  {
+    local path
+    while IFS= read -r path; do
+      [[ -n "$path" ]] || continue
+      printf 'file=%s\n' "$(basename "$path")"
+      printf 'sha=%s\n' "$(sha256_one "$path")"
+    done < <(find "$OUTDIR" -maxdepth 1 -type f \
+      \( -name 'kernel_generated.cu' \
+         -o -name 'kernel_generated.api.h' \
+         -o -name 'kernel_generated.cpu.cpp' \
+         -o -name 'kernel_generated.link.cu' \
+         -o -name 'kernel_generated.part*.cu' \) | LC_ALL=C sort)
+  } | sha256sum | awk '{print $1}'
+}
+
 compute_compile_cache_key() {
-  local nvcc_version bench_sha kernel_sha
+  local nvcc_version bench_sha bundle_sha
   nvcc_version="$(nvcc --version | tr '\n' '|')"
   bench_sha="$(sha256_one "$OUTDIR/bench_kernel.cu")"
-  kernel_sha="$(sha256_one "$OUTDIR/kernel_generated.cu")"
+  bundle_sha="$(compute_generated_compile_bundle_sha)"
   {
     printf 'nvcc_version=%s\n' "$nvcc_version"
     printf 'nvcc_flags=-O3 -std=c++17 -DSIM_ACCEL_PARTIAL_WRITE=1\n'
     printf 'bench_kernel_sha=%s\n' "$bench_sha"
-    printf 'kernel_generated_sha=%s\n' "$kernel_sha"
+    printf 'generated_bundle_sha=%s\n' "$bundle_sha"
   } | sha256sum | awk '{print $1}'
+}
+
+OBJECT_CACHE_HITS=0
+OBJECT_CACHE_MISSES=0
+
+compute_object_cache_key() {
+  local compiler_id="$1"
+  local flags="$2"
+  local src="$3"
+  {
+    printf 'compiler=%s\n' "$compiler_id"
+    printf 'flags=%s\n' "$flags"
+    printf 'src=%s\n' "$(basename "$src")"
+    printf 'sha=%s\n' "$(sha256_one "$src")"
+  } | sha256sum | awk '{print $1}'
+}
+
+build_cached_cuda_object() {
+  local src="$1"
+  local out_obj="$2"
+  local key compiler_id cache_obj tmp_obj
+  compiler_id="$(nvcc --version | tr '\n' '|')"
+  key="$(compute_object_cache_key "$compiler_id" "-O3 -std=c++17 -c" "$src")"
+  cache_obj="$COMPILE_CACHE_DIR/object-cache/$key.o"
+  if [[ -f "$cache_obj" ]]; then
+    cp "$cache_obj" "$out_obj"
+    OBJECT_CACHE_HITS=$((OBJECT_CACHE_HITS + 1))
+    return 0
+  fi
+  nvcc -O3 -std=c++17 -c "$src" -o "$out_obj"
+  tmp_obj="$COMPILE_CACHE_DIR/.tmp.object.$key.$$"
+  mkdir -p "$(dirname "$cache_obj")"
+  cp "$out_obj" "$tmp_obj"
+  if ! mv "$tmp_obj" "$cache_obj" 2>/dev/null; then
+    rm -f "$tmp_obj"
+  fi
+  OBJECT_CACHE_MISSES=$((OBJECT_CACHE_MISSES + 1))
+}
+
+build_cached_cxx_object() {
+  local src="$1"
+  local out_obj="$2"
+  local key compiler_id cache_obj tmp_obj
+  compiler_id="$(g++ --version | tr '\n' '|')"
+  key="$(compute_object_cache_key "$compiler_id" "-O3 -std=c++17 -c" "$src")"
+  cache_obj="$COMPILE_CACHE_DIR/object-cache/$key.o"
+  if [[ -f "$cache_obj" ]]; then
+    cp "$cache_obj" "$out_obj"
+    OBJECT_CACHE_HITS=$((OBJECT_CACHE_HITS + 1))
+    return 0
+  fi
+  g++ -O3 -std=c++17 -c "$src" -o "$out_obj"
+  tmp_obj="$COMPILE_CACHE_DIR/.tmp.object.$key.$$"
+  mkdir -p "$(dirname "$cache_obj")"
+  cp "$out_obj" "$tmp_obj"
+  if ! mv "$tmp_obj" "$cache_obj" 2>/dev/null; then
+    rm -f "$tmp_obj"
+  fi
+  OBJECT_CACHE_MISSES=$((OBJECT_CACHE_MISSES + 1))
 }
 
 mkdir -p "$OUTDIR"
@@ -288,6 +361,10 @@ KERNEL_CU="$OUTDIR/${TOP_MODULE}.sim_accel.kernel.cu"
 KERNEL_VARS="$KERNEL_CU.vars.tsv"
 KERNEL_DEPS="$KERNEL_CU.deps.tsv"
 KERNEL_COMM="$KERNEL_CU.comm.tsv"
+KERNEL_API="$KERNEL_CU.api.h"
+KERNEL_CPU="$KERNEL_CU.cpu.cpp"
+KERNEL_LINK="$KERNEL_CU.link.cu"
+KERNEL_PARTITIONS="$KERNEL_CU.partitions.tsv"
 LOG="$OUTDIR/verilator_cuda.log"
 TIME_VERILATOR="$OUTDIR/time_verilator_codegen_sec.txt"
 TIME_NVCC="$OUTDIR/time_nvcc_compile_sec.txt"
@@ -310,19 +387,39 @@ if [[ "$COMPILE_CACHE_ENABLED" -eq 1 ]]; then
   CACHE_GEN_VARS="$CACHE_GEN_CU.vars.tsv"
   CACHE_GEN_DEPS="$CACHE_GEN_CU.deps.tsv"
   CACHE_GEN_COMM="$CACHE_GEN_CU.comm.tsv"
+  CACHE_GEN_API="$CACHE_GEN_CU.api.h"
+  CACHE_GEN_CPU="$CACHE_GEN_CU.cpu.cpp"
+  CACHE_GEN_LINK="$CACHE_GEN_CU.link.cu"
+  CACHE_GEN_PARTITIONS="$CACHE_GEN_CU.partitions.tsv"
   CACHE_GEN_LOG="$ARTIFACT_CACHE_ENTRY/verilator_cuda.log"
   CACHE_GEN_TIME="$ARTIFACT_CACHE_ENTRY/codegen_s.txt"
   if [[ -s "$CACHE_GEN_CU" && -s "$CACHE_GEN_VARS" && -f "$CACHE_GEN_LOG" && -f "$CACHE_GEN_TIME" ]]; then
     echo "[1/4] Reusing cached sim-accel artifacts..."
     cp "$CACHE_GEN_CU" "$KERNEL_CU"
     cp "$CACHE_GEN_VARS" "$KERNEL_VARS"
-    rm -f "$KERNEL_DEPS" "$KERNEL_COMM"
+    rm -f "$KERNEL_DEPS" "$KERNEL_COMM" "$KERNEL_API" "$KERNEL_CPU" "$KERNEL_LINK" "$KERNEL_PARTITIONS"
     if [[ -f "$CACHE_GEN_DEPS" ]]; then
       cp "$CACHE_GEN_DEPS" "$KERNEL_DEPS"
     fi
     if [[ -f "$CACHE_GEN_COMM" ]]; then
       cp "$CACHE_GEN_COMM" "$KERNEL_COMM"
     fi
+    if [[ -f "$CACHE_GEN_API" ]]; then
+      cp "$CACHE_GEN_API" "$KERNEL_API"
+    fi
+    if [[ -f "$CACHE_GEN_CPU" ]]; then
+      cp "$CACHE_GEN_CPU" "$KERNEL_CPU"
+    fi
+    if [[ -f "$CACHE_GEN_LINK" ]]; then
+      cp "$CACHE_GEN_LINK" "$KERNEL_LINK"
+    fi
+    if [[ -f "$CACHE_GEN_PARTITIONS" ]]; then
+      cp "$CACHE_GEN_PARTITIONS" "$KERNEL_PARTITIONS"
+    fi
+    rm -f "$KERNEL_CU".part*.cu
+    while IFS= read -r cached_part; do
+      cp "$cached_part" "$OUTDIR/$(basename "$cached_part")"
+    done < <(find "$ARTIFACT_CACHE_ENTRY" -maxdepth 1 -type f -name "$(basename "$KERNEL_CU").part*.cu" | LC_ALL=C sort)
     cp "$CACHE_GEN_LOG" "$LOG"
     VERILATOR_COLD_GEN_S="$(cat "$CACHE_GEN_TIME")"
     printf '0.000000\n' > "$TIME_VERILATOR"
@@ -350,6 +447,21 @@ if [[ "$COMPILE_CACHE_ENABLED" -eq 1 ]]; then
     if [[ -f "$KERNEL_COMM" ]]; then
       cp "$KERNEL_COMM" "$TMP_ARTIFACT_CACHE_ENTRY/${TOP_MODULE}.sim_accel.kernel.cu.comm.tsv"
     fi
+    if [[ -f "$KERNEL_API" ]]; then
+      cp "$KERNEL_API" "$TMP_ARTIFACT_CACHE_ENTRY/${TOP_MODULE}.sim_accel.kernel.cu.api.h"
+    fi
+    if [[ -f "$KERNEL_CPU" ]]; then
+      cp "$KERNEL_CPU" "$TMP_ARTIFACT_CACHE_ENTRY/${TOP_MODULE}.sim_accel.kernel.cu.cpu.cpp"
+    fi
+    if [[ -f "$KERNEL_LINK" ]]; then
+      cp "$KERNEL_LINK" "$TMP_ARTIFACT_CACHE_ENTRY/${TOP_MODULE}.sim_accel.kernel.cu.link.cu"
+    fi
+    if [[ -f "$KERNEL_PARTITIONS" ]]; then
+      cp "$KERNEL_PARTITIONS" "$TMP_ARTIFACT_CACHE_ENTRY/${TOP_MODULE}.sim_accel.kernel.cu.partitions.tsv"
+    fi
+    while IFS= read -r generated_part; do
+      cp "$generated_part" "$TMP_ARTIFACT_CACHE_ENTRY/$(basename "$generated_part")"
+    done < <(find "$OUTDIR" -maxdepth 1 -type f -name "$(basename "$KERNEL_CU").part*.cu" | LC_ALL=C sort)
     cp "$LOG" "$TMP_ARTIFACT_CACHE_ENTRY/verilator_cuda.log"
     printf '%s\n' "$VERILATOR_COLD_GEN_S" > "$TMP_ARTIFACT_CACHE_ENTRY/codegen_s.txt"
     {
@@ -401,7 +513,7 @@ cat > "$OUTDIR/bench_kernel.cu" <<'CU'
 #include <unordered_map>
 #include <vector>
 
-#include "kernel_generated.cu"
+#include "__SIM_ACCEL_GENERATED_INCLUDE__"
 
 #ifdef SIM_ACCEL_PARTIAL_WRITE
 #undef SIM_ACCEL_PARTIAL_WRITE
@@ -981,6 +1093,37 @@ cp "$KERNEL_VARS" "$OUTDIR/kernel_generated.vars.tsv"
 if [[ -s "$KERNEL_COMM" ]]; then
   cp "$KERNEL_COMM" "$OUTDIR/kernel_generated.comm.tsv"
 fi
+if [[ -f "$KERNEL_API" ]]; then
+  cp "$KERNEL_API" "$OUTDIR/kernel_generated.api.h"
+fi
+if [[ -f "$KERNEL_CPU" ]]; then
+  cp "$KERNEL_CPU" "$OUTDIR/kernel_generated.cpu.cpp"
+fi
+if [[ -f "$KERNEL_LINK" ]]; then
+  cp "$KERNEL_LINK" "$OUTDIR/kernel_generated.link.cu"
+fi
+if [[ -f "$KERNEL_PARTITIONS" ]]; then
+  cp "$KERNEL_PARTITIONS" "$OUTDIR/kernel_generated.partitions.tsv"
+fi
+rm -f "$OUTDIR"/kernel_generated.part*.cu
+while IFS= read -r generated_part; do
+  cp "$generated_part" "$OUTDIR/kernel_generated.${generated_part##*.kernel.cu.}"
+done < <(find "$OUTDIR" -maxdepth 1 -type f -name "$(basename "$KERNEL_CU").part*.cu" | LC_ALL=C sort)
+
+USE_PARTITION_OBJECTS=0
+declare -a PARTITION_SOURCES=()
+if [[ -f "$OUTDIR/kernel_generated.api.h" && -f "$OUTDIR/kernel_generated.cpu.cpp" && -f "$OUTDIR/kernel_generated.link.cu" ]]; then
+  mapfile -t PARTITION_SOURCES < <(find "$OUTDIR" -maxdepth 1 -type f -name 'kernel_generated.part*.cu' | LC_ALL=C sort)
+  if (( ${#PARTITION_SOURCES[@]} > 0 )); then
+    USE_PARTITION_OBJECTS=1
+  fi
+fi
+
+BENCH_GENERATED_INCLUDE="kernel_generated.cu"
+if [[ "$USE_PARTITION_OBJECTS" -eq 1 ]]; then
+  BENCH_GENERATED_INCLUDE="kernel_generated.api.h"
+fi
+sed -i "s#__SIM_ACCEL_GENERATED_INCLUDE__#${BENCH_GENERATED_INCLUDE}#" "$OUTDIR/bench_kernel.cu"
 
 NVCC_CACHE_MODE="disabled"
 NVCC_CACHE_KEY=""
@@ -1008,11 +1151,36 @@ if [[ "$COMPILE_CACHE_ENABLED" -eq 1 ]]; then
     NVCC_CACHE_MODE="hit"
   else
     echo "[3/4] Building C++-direct CUDA benchmark..."
-    (
+    if [[ "$USE_PARTITION_OBJECTS" -eq 1 ]]; then
+      BUILD_START="$(date +%s.%N)"
+      OLD_PWD_SIM_ACCEL="$PWD"
       cd "$OUTDIR"
-      /usr/bin/time -f "%e" -o "$TIME_NVCC" \
-        nvcc -O3 -std=c++17 -DSIM_ACCEL_PARTIAL_WRITE=1 bench_kernel.cu -o bench_kernel > build_nvcc.log 2>&1
-    )
+      OBJ_DIR=".sim_accel_obj"
+      rm -rf "$OBJ_DIR"
+      mkdir -p "$OBJ_DIR"
+      {
+        build_cached_cuda_object "bench_kernel.cu" "$OBJ_DIR/bench_kernel.o"
+        build_cached_cuda_object "kernel_generated.link.cu" "$OBJ_DIR/kernel_generated.link.o"
+        build_cached_cxx_object "kernel_generated.cpu.cpp" "$OBJ_DIR/kernel_generated.cpu.o"
+        declare -a PARTITION_OBJECTS=()
+        for src in "${PARTITION_SOURCES[@]}"; do
+          obj="$OBJ_DIR/$(basename "$src").o"
+          build_cached_cuda_object "$src" "$obj"
+          PARTITION_OBJECTS+=("$obj")
+        done
+        nvcc -O3 -std=c++17 "$OBJ_DIR/bench_kernel.o" "$OBJ_DIR/kernel_generated.link.o" \
+          "$OBJ_DIR/kernel_generated.cpu.o" "${PARTITION_OBJECTS[@]}" -o bench_kernel
+      } > build_nvcc.log 2>&1
+      cd "$OLD_PWD_SIM_ACCEL"
+      BUILD_END="$(date +%s.%N)"
+      awk -v s="$BUILD_START" -v e="$BUILD_END" 'BEGIN { printf "%.6f\n", e - s }' > "$TIME_NVCC"
+    else
+      (
+        cd "$OUTDIR"
+        /usr/bin/time -f "%e" -o "$TIME_NVCC" \
+          nvcc -O3 -std=c++17 -DSIM_ACCEL_PARTIAL_WRITE=1 bench_kernel.cu -o bench_kernel > build_nvcc.log 2>&1
+      )
+    fi
     NVCC_CACHE_MODE="miss"
     NVCC_COLD_COMPILE_S="$(cat "$TIME_NVCC" 2>/dev/null || true)"
     TMP_CACHE_ENTRY="$COMPILE_CACHE_DIR/.tmp.$NVCC_CACHE_KEY.$$"
@@ -1024,7 +1192,7 @@ if [[ "$COMPILE_CACHE_ENABLED" -eq 1 ]]; then
     {
       echo "cache_key=$NVCC_CACHE_KEY"
       echo "nvcc_version=$(nvcc --version | tr '\n' '|')"
-      echo "kernel_generated_sha=$(sha256_one "$OUTDIR/kernel_generated.cu")"
+      echo "generated_bundle_sha=$(compute_generated_compile_bundle_sha)"
       echo "bench_kernel_sha=$(sha256_one "$OUTDIR/bench_kernel.cu")"
     } > "$TMP_CACHE_ENTRY/meta.txt"
     if ! mv "$TMP_CACHE_ENTRY" "$CACHE_ENTRY" 2>/dev/null; then
@@ -1033,11 +1201,36 @@ if [[ "$COMPILE_CACHE_ENABLED" -eq 1 ]]; then
   fi
 else
   echo "[3/4] Building C++-direct CUDA benchmark..."
-  (
+  if [[ "$USE_PARTITION_OBJECTS" -eq 1 ]]; then
+    BUILD_START="$(date +%s.%N)"
+    OLD_PWD_SIM_ACCEL="$PWD"
     cd "$OUTDIR"
-    /usr/bin/time -f "%e" -o "$TIME_NVCC" \
-      nvcc -O3 -std=c++17 -DSIM_ACCEL_PARTIAL_WRITE=1 bench_kernel.cu -o bench_kernel > build_nvcc.log 2>&1
-  )
+    OBJ_DIR=".sim_accel_obj"
+    rm -rf "$OBJ_DIR"
+    mkdir -p "$OBJ_DIR"
+    {
+      build_cached_cuda_object "bench_kernel.cu" "$OBJ_DIR/bench_kernel.o"
+      build_cached_cuda_object "kernel_generated.link.cu" "$OBJ_DIR/kernel_generated.link.o"
+      build_cached_cxx_object "kernel_generated.cpu.cpp" "$OBJ_DIR/kernel_generated.cpu.o"
+      declare -a PARTITION_OBJECTS=()
+      for src in "${PARTITION_SOURCES[@]}"; do
+        obj="$OBJ_DIR/$(basename "$src").o"
+        build_cached_cuda_object "$src" "$obj"
+        PARTITION_OBJECTS+=("$obj")
+      done
+      nvcc -O3 -std=c++17 "$OBJ_DIR/bench_kernel.o" "$OBJ_DIR/kernel_generated.link.o" \
+        "$OBJ_DIR/kernel_generated.cpu.o" "${PARTITION_OBJECTS[@]}" -o bench_kernel
+    } > build_nvcc.log 2>&1
+    cd "$OLD_PWD_SIM_ACCEL"
+    BUILD_END="$(date +%s.%N)"
+    awk -v s="$BUILD_START" -v e="$BUILD_END" 'BEGIN { printf "%.6f\n", e - s }' > "$TIME_NVCC"
+  else
+    (
+      cd "$OUTDIR"
+      /usr/bin/time -f "%e" -o "$TIME_NVCC" \
+        nvcc -O3 -std=c++17 -DSIM_ACCEL_PARTIAL_WRITE=1 bench_kernel.cu -o bench_kernel > build_nvcc.log 2>&1
+    )
+  fi
 fi
 
 echo "[4/4] Running benchmark..."
@@ -1120,6 +1313,9 @@ if [[ -n "$VERILATOR_GEN_S" && -n "$NVCC_COMPILE_S" && -n "$BENCH_RUN_S" && -n "
     if [[ "$COMPILE_CACHE_ENABLED" -eq 1 ]]; then
       echo "compile_cache_dir=$COMPILE_CACHE_DIR"
     fi
+    echo "partition_object_build=$USE_PARTITION_OBJECTS"
+    echo "object_cache_hits=$OBJECT_CACHE_HITS"
+    echo "object_cache_misses=$OBJECT_CACHE_MISSES"
     echo "bench_run_s=$BENCH_RUN_S"
     echo "total_elapsed_s=$TOTAL_S"
     echo "total_elapsed_cold_s=$TOTAL_COLD_S"
