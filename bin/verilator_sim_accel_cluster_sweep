@@ -25,7 +25,7 @@ Options:
                         (default: /tmp/verilator-sim-accel-compile-cache)
   --cluster-limit N    Maximum clusters to benchmark (default: 10)
   --cluster-group-size N
-                        Benchmark group size: 1 or 2 (default: 1)
+                        Benchmark group size: 1..8 (default: 1)
   --cluster-max-input-bits N
                         Filter clusters by input-signature bits (default: 128)
   --cluster-min-assigns N
@@ -156,8 +156,8 @@ if [[ "$NSTATES" -eq 0 || "$BLOCK_SIZE" -eq 0 || "$CLUSTER_LIMIT" -eq 0 ]]; then
   echo "NSTATES, BLOCK_SIZE, and CLUSTER_LIMIT must be > 0" >&2
   exit 2
 fi
-if [[ "$CLUSTER_GROUP_SIZE" -ne 1 && "$CLUSTER_GROUP_SIZE" -ne 2 ]]; then
-  echo "CLUSTER_GROUP_SIZE must be 1 or 2" >&2
+if [[ "$CLUSTER_GROUP_SIZE" -lt 1 || "$CLUSTER_GROUP_SIZE" -gt 8 ]]; then
+  echo "CLUSTER_GROUP_SIZE must be in 1..8" >&2
   exit 2
 fi
 
@@ -197,6 +197,7 @@ echo "[2/3] Selecting clusters..."
 python3 - "$ANALYSIS_CLUSTERS" "$CLUSTER_LIMIT" "$CLUSTER_GROUP_SIZE" "$CLUSTER_MAX_INPUT_BITS" "$CLUSTER_MIN_ASSIGNS" \
   "$CLUSTER_OWNER_LIST" "$CLUSTER_INDICES" "$SUMMARY_JSON" <<'PY'
 import csv, json, sys
+from collections import Counter
 path, limit_s, group_size_s, max_bits_s, min_assigns_s, owner_list, indices_s, out_json = sys.argv[1:9]
 limit = int(limit_s)
 group_size = int(group_size_s)
@@ -206,11 +207,31 @@ owners = {x for x in owner_list.split(',') if x}
 explicit = None
 if indices_s:
     explicit = {int(x) for x in indices_s.split(',') if x}
+
+def parse_expr_kind_counts(raw):
+    counts = Counter()
+    if not raw or raw == '-':
+        return counts
+    for item in raw.split(';'):
+        if not item:
+            continue
+        key, sep, value = item.partition('=')
+        if not sep:
+            continue
+        counts[key] += int(value)
+    return counts
+
+def format_expr_kind_counts(counts):
+    if not counts:
+        return '-'
+    return ';'.join(f"{key}={counts[key]}" for key in sorted(counts))
+
 rows = []
 with open(path, newline='') as fh:
     for row in csv.DictReader(fh, delimiter='\t'):
         idx = int(row['index'])
         assigns = int(row['assign_count'])
+        operator_count = int(row.get('operator_count', '0'))
         bits = int(row['input_signature_bits'])
         owner = row['owner_hint']
         if explicit is not None and idx not in explicit:
@@ -223,9 +244,11 @@ with open(path, newline='') as fh:
             'index': idx,
             'topo_rank': int(row['topo_rank']),
             'assign_count': assigns,
+            'operator_count': operator_count,
             'input_signature_bits': bits,
             'owner_hint': owner,
             'dominant_hierarchy': row.get('dominant_hierarchy', ''),
+            'expr_kind_counts': parse_expr_kind_counts(row.get('expr_kind_counts', '-')),
         })
 rows.sort(key=lambda r: (-r['assign_count'], r['input_signature_bits'], r['index']))
 if group_size == 1:
@@ -233,41 +256,52 @@ if group_size == 1:
         'cluster_indices': [row['index']],
         'cluster_group_size': 1,
         'group_assign_count': row['assign_count'],
+        'group_operator_count': row['operator_count'],
         'group_input_signature_bits': row['input_signature_bits'],
         'owner_hint': row['owner_hint'],
         'topo_rank': row['topo_rank'],
         'topo_span': 0,
         'dominant_hierarchy': row['dominant_hierarchy'],
+        'group_expr_kind_counts': format_expr_kind_counts(row['expr_kind_counts']),
     } for row in rows[:limit]]
     candidate_count = len(rows)
 else:
     rows_by_topo = sorted(rows, key=lambda r: (r['topo_rank'], r['index']))
-    pairs = []
-    for a, b in zip(rows_by_topo, rows_by_topo[1:]):
-        pairs.append({
-            'cluster_indices': [a['index'], b['index']],
-            'cluster_group_size': 2,
-            'group_assign_count': a['assign_count'] + b['assign_count'],
-            'group_input_signature_bits': a['input_signature_bits'] + b['input_signature_bits'],
-            'owner_hint': a['owner_hint'] if a['owner_hint'] == b['owner_hint'] else f"{a['owner_hint']}+{b['owner_hint']}",
-            'topo_rank': min(a['topo_rank'], b['topo_rank']),
-            'topo_span': abs(a['topo_rank'] - b['topo_rank']),
-            'dominant_hierarchy': a['dominant_hierarchy'] if a['dominant_hierarchy'] == b['dominant_hierarchy'] else 'mixed',
+    groups = []
+    for start in range(0, len(rows_by_topo) - group_size + 1):
+        window = rows_by_topo[start:start + group_size]
+        topo_ranks = [row['topo_rank'] for row in window]
+        if any((b - a) != 1 for a, b in zip(topo_ranks, topo_ranks[1:])):
+            continue
+        owner_hints = {row['owner_hint'] for row in window}
+        dominant_hierarchies = {row['dominant_hierarchy'] for row in window}
+        groups.append({
+            'cluster_indices': [row['index'] for row in window],
+            'cluster_group_size': group_size,
+            'group_assign_count': sum(row['assign_count'] for row in window),
+            'group_operator_count': sum(row['operator_count'] for row in window),
+            'group_input_signature_bits': sum(row['input_signature_bits'] for row in window),
+            'owner_hint': next(iter(owner_hints)) if len(owner_hints) == 1 else '+'.join(sorted(owner_hints)),
+            'topo_rank': topo_ranks[0],
+            'topo_span': topo_ranks[-1] - topo_ranks[0],
+            'dominant_hierarchy': next(iter(dominant_hierarchies)) if len(dominant_hierarchies) == 1 else 'mixed',
+            'group_expr_kind_counts': format_expr_kind_counts(
+                sum((row['expr_kind_counts'] for row in window), Counter())),
         })
-    pairs.sort(key=lambda r: (-r['group_assign_count'], r['group_input_signature_bits'], r['topo_span'], r['cluster_indices']))
-    selected = pairs[:limit]
-    candidate_count = len(pairs)
+    groups.sort(key=lambda r: (-r['group_assign_count'], r['group_input_signature_bits'], r['topo_span'], r['cluster_indices']))
+    selected = groups[:limit]
+    candidate_count = len(groups)
 with open(out_json, 'w', encoding='utf-8') as fh:
     json.dump({'selected_clusters': selected, 'candidate_count': candidate_count}, fh, indent=2)
 for row in selected:
-    print(f"{','.join(str(x) for x in row['cluster_indices'])}\t{row['cluster_group_size']}\t{row['group_assign_count']}\t{row['group_input_signature_bits']}\t{row['owner_hint']}\t{row['topo_rank']}\t{row['topo_span']}\t{row['dominant_hierarchy']}")
+    print(f"{','.join(str(x) for x in row['cluster_indices'])}\t{row['cluster_group_size']}\t{row['group_assign_count']}\t{row['group_operator_count']}\t{row['group_input_signature_bits']}\t{row['owner_hint']}\t{row['topo_rank']}\t{row['topo_span']}\t{row['dominant_hierarchy']}\t{row['group_expr_kind_counts']}")
 PY
 
 mapfile -t SELECTED_LINES < <(python3 - <<'PY' "$SUMMARY_JSON"
 import json, sys
 j=json.load(open(sys.argv[1]))
 for row in j['selected_clusters']:
-    print(f"{','.join(str(x) for x in row['cluster_indices'])}\t{row['cluster_group_size']}\t{row['group_assign_count']}\t{row['group_input_signature_bits']}\t{row['owner_hint']}\t{row['topo_rank']}\t{row['topo_span']}\t{row['dominant_hierarchy']}")
+    print(f"{','.join(str(x) for x in row['cluster_indices'])}\t{row['cluster_group_size']}\t{row['group_assign_count']}\t{row['group_operator_count']}\t{row['group_input_signature_bits']}\t{row['owner_hint']}\t{row['topo_rank']}\t{row['topo_span']}\t{row['dominant_hierarchy']}\t{row['group_expr_kind_counts']}")
 PY
 )
 
@@ -276,11 +310,11 @@ if (( ${#SELECTED_LINES[@]} == 0 )); then
   exit 2
 fi
 
-printf 'cluster_indices\tcluster_group_size\tgroup_assign_count\tgroup_input_signature_bits\towner_hint\ttopo_rank\ttopo_span\tdominant_hierarchy\thybrid_gpu_ms_per_rep\thybrid_cpu_ms_per_rep\thybrid_speedup_gpu_over_cpu\thybrid_margin_ms\thybrid_setup_h2d_ms\thybrid_dynamic_h2d_ms_per_rep\thybrid_kernel_ms_per_rep\thybrid_d2h_ms_per_rep\thybrid_transfer_ms_per_rep\thybrid_cpu_dispatch_ms_per_rep\thybrid_static_h2d_bytes_per_batch\thybrid_dynamic_h2d_bytes_per_batch\thybrid_actual_h2d_bytes_per_batch\thybrid_actual_d2h_bytes_per_batch\thybrid_transfer_total_bytes_per_batch\tassigns_per_kib_transferred\toffload_score\toffload_worthy\thybrid_mismatch\tnvcc_compile_s\tbench_run_s\ttotal_elapsed_s\n' > "$SUMMARY_TSV"
+printf 'cluster_indices\tcluster_group_size\tgroup_assign_count\tgroup_operator_count\tgroup_input_signature_bits\towner_hint\ttopo_rank\ttopo_span\tdominant_hierarchy\tgroup_expr_kind_counts\thybrid_gpu_ms_per_rep\thybrid_cpu_ms_per_rep\thybrid_speedup_gpu_over_cpu\thybrid_margin_ms\thybrid_setup_h2d_ms\thybrid_dynamic_h2d_ms_per_rep\thybrid_kernel_ms_per_rep\thybrid_d2h_ms_per_rep\thybrid_transfer_ms_per_rep\thybrid_cpu_dispatch_ms_per_rep\thybrid_static_h2d_bytes_per_batch\thybrid_dynamic_h2d_bytes_per_batch\thybrid_actual_h2d_bytes_per_batch\thybrid_actual_d2h_bytes_per_batch\thybrid_transfer_total_bytes_per_batch\tassigns_per_kib_transferred\toffload_score\toffload_worthy\thybrid_mismatch\tnvcc_compile_s\tbench_run_s\ttotal_elapsed_s\n' > "$SUMMARY_TSV"
 
 echo "[3/3] Running cluster benches..."
 for line in "${SELECTED_LINES[@]}"; do
-  IFS=$'\t' read -r CLUSTER_INDICES GROUP_SIZE ASSIGN_COUNT INPUT_BITS OWNER_HINT TOPO_RANK TOPO_SPAN DOM_HIER <<<"$line"
+  IFS=$'\t' read -r CLUSTER_INDICES GROUP_SIZE ASSIGN_COUNT OPERATOR_COUNT INPUT_BITS OWNER_HINT TOPO_RANK TOPO_SPAN DOM_HIER EXPR_KIND_COUNTS <<<"$line"
   CLUSTER_OUTDIR="$OUTDIR/cluster_${CLUSTER_INDICES//,/__}"
   BENCH_CMD=("$VERILATOR_BIN" --sim-accel-bench \
     --top-module "$TOP_MODULE" \
@@ -302,11 +336,11 @@ for line in "${SELECTED_LINES[@]}"; do
     -- "${SOURCES[@]}")
   "${BENCH_CMD[@]}"
 
-  python3 - "$CLUSTER_OUTDIR/bench_run.log" "$SUMMARY_TSV" "$CLUSTER_INDICES" "$GROUP_SIZE" "$ASSIGN_COUNT" \
-    "$INPUT_BITS" "$OWNER_HINT" "$TOPO_RANK" "$TOPO_SPAN" "$DOM_HIER" "$WORTHY_MIN_SPEEDUP" \
+  python3 - "$CLUSTER_OUTDIR/bench_run.log" "$SUMMARY_TSV" "$CLUSTER_INDICES" "$GROUP_SIZE" "$ASSIGN_COUNT" "$OPERATOR_COUNT" \
+    "$INPUT_BITS" "$OWNER_HINT" "$TOPO_RANK" "$TOPO_SPAN" "$DOM_HIER" "$EXPR_KIND_COUNTS" "$WORTHY_MIN_SPEEDUP" \
     "$WORTHY_MIN_MARGIN_MS" <<'PY'
 import sys
-log_path, out_tsv, cluster_indices, group_size, assign_count, input_bits, owner_hint, topo_rank, topo_span, dom_hier, worthy_min_speedup, worthy_min_margin_ms = sys.argv[1:13]
+log_path, out_tsv, cluster_indices, group_size, assign_count, operator_count, input_bits, owner_hint, topo_rank, topo_span, dom_hier, expr_kind_counts, worthy_min_speedup, worthy_min_margin_ms = sys.argv[1:15]
 want = {
     'hybrid_gpu_ms_per_rep': '',
     'hybrid_cpu_ms_per_rep': '',
@@ -352,7 +386,7 @@ offload_worthy = (
 )
 with open(out_tsv, 'a', encoding='utf-8') as fh:
     fh.write('\t'.join([
-        cluster_indices, group_size, assign_count, input_bits, owner_hint, topo_rank, topo_span, dom_hier,
+        cluster_indices, group_size, assign_count, operator_count, input_bits, owner_hint, topo_rank, topo_span, dom_hier, expr_kind_counts,
         want['hybrid_gpu_ms_per_rep'], want['hybrid_cpu_ms_per_rep'],
         f"{speedup:.6f}", f"{margin_ms:.6f}",
         want['hybrid_setup_h2d_ms'], want['hybrid_dynamic_h2d_ms_per_rep'],
@@ -382,6 +416,7 @@ rows = list(csv.DictReader(open(tsv_path, newline=''), delimiter='\t'))
 for row in rows:
     row['cluster_group_size'] = int(row['cluster_group_size'])
     row['group_assign_count'] = int(row['group_assign_count'])
+    row['group_operator_count'] = int(row['group_operator_count'])
     row['group_input_signature_bits'] = int(row['group_input_signature_bits'])
     row['hybrid_gpu_ms_per_rep'] = float(row['hybrid_gpu_ms_per_rep'])
     row['hybrid_cpu_ms_per_rep'] = float(row['hybrid_cpu_ms_per_rep'])

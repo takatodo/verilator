@@ -57,7 +57,9 @@ public:
         std::vector<size_t> m_cpuBoundaryOutputVarIdxs;
         std::vector<size_t> m_gpuInternalOutputVarIdxs;
         std::vector<SpecFrontierCandidate> m_specFrontierCandidates;
+        std::vector<size_t> m_exprKindCounts;
         size_t m_assignCount = 0;
+        size_t m_operatorCount = 0;
         size_t m_inputSignatureVarCount = 0;
         size_t m_boundaryInputVarCount = 0;
         size_t m_boundaryOutputVarCount = 0;
@@ -81,6 +83,8 @@ public:
     struct ApproxRegCutSummary final {
         size_t m_clusterCount = 0;
         size_t m_assignCount = 0;
+        std::vector<size_t> m_exprKindCounts;
+        size_t m_operatorCount = 0;
         size_t m_inputSignatureVarCount = 0;
         size_t m_boundaryInputVarCount = 0;
         size_t m_boundaryOutputVarCount = 0;

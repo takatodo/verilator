@@ -75,6 +75,8 @@ struct AssignCluster final {
     size_t m_topoRank = 0;
     uint64_t m_inputSignatureBitCount = 0;
     string m_ownerHint;
+    std::vector<size_t> m_exprKindCounts;
+    size_t m_operatorCount = 0;
     std::vector<EmittedAssign> m_assigns;
     std::vector<size_t> m_readVarIdxs;
     std::vector<size_t> m_writtenVarIdxs;
@@ -137,6 +139,50 @@ string simAccelCanonicalizeExpr(
         out += expr[i++];
     }
     return out;
+}
+
+const char* simAccelExprKindName(V3SimAccelProgram::ExprKind kind) {
+    switch (kind) {
+    case V3SimAccelProgram::ExprKind::VAR: return "var";
+    case V3SimAccelProgram::ExprKind::CONST: return "const";
+    case V3SimAccelProgram::ExprKind::AND: return "and";
+    case V3SimAccelProgram::ExprKind::OR: return "or";
+    case V3SimAccelProgram::ExprKind::XOR: return "xor";
+    case V3SimAccelProgram::ExprKind::LOGAND: return "logand";
+    case V3SimAccelProgram::ExprKind::LOGOR: return "logor";
+    case V3SimAccelProgram::ExprKind::LOGNOT: return "lognot";
+    case V3SimAccelProgram::ExprKind::ADD: return "add";
+    case V3SimAccelProgram::ExprKind::SUB: return "sub";
+    case V3SimAccelProgram::ExprKind::EQ: return "eq";
+    case V3SimAccelProgram::ExprKind::NEQ: return "neq";
+    case V3SimAccelProgram::ExprKind::COND: return "cond";
+    case V3SimAccelProgram::ExprKind::CONCAT: return "concat";
+    case V3SimAccelProgram::ExprKind::SEL: return "sel";
+    case V3SimAccelProgram::ExprKind::SHIFTL: return "shiftl";
+    case V3SimAccelProgram::ExprKind::SHIFTLOVR: return "shiftlovr";
+    case V3SimAccelProgram::ExprKind::SHIFTR: return "shiftr";
+    case V3SimAccelProgram::ExprKind::SHIFTROVR: return "shiftrovr";
+    case V3SimAccelProgram::ExprKind::NOT: return "not";
+    case V3SimAccelProgram::ExprKind::CCAST: return "ccast";
+    case V3SimAccelProgram::ExprKind::EXTEND: return "extend";
+    case V3SimAccelProgram::ExprKind::EXTENDS: return "extends";
+    }
+    return "unknown";
+}
+
+string simAccelExprKindCountsSummary(const std::vector<size_t>& counts) {
+    std::ostringstream os;
+    bool first = true;
+    for (size_t kindIdx = 0; kindIdx < counts.size(); ++kindIdx) {
+        const size_t count = counts.at(kindIdx);
+        if (!count) continue;
+        if (!first) os << ';';
+        first = false;
+        os << simAccelExprKindName(static_cast<V3SimAccelProgram::ExprKind>(kindIdx)) << '='
+           << count;
+    }
+    if (first) return "-";
+    return os.str();
 }
 
 void finalizePartitionCanonicalInfo(const V3SimAccelProgram& program, AssignPartition& partition) {
@@ -241,6 +287,8 @@ std::vector<AssignCluster> buildClusters(
         cluster.m_topoRank = analysisCluster.m_topoRank;
         cluster.m_inputSignatureBitCount = analysisCluster.m_inputSignatureBitCount;
         cluster.m_ownerHint = analysisCluster.m_hybridOwnerHint;
+        cluster.m_exprKindCounts = analysisCluster.m_exprKindCounts;
+        cluster.m_operatorCount = analysisCluster.m_operatorCount;
 
         std::unordered_set<size_t> readVarIdxs;
         std::unordered_set<size_t> writtenVarIdxs;
@@ -958,14 +1006,16 @@ void emitPartitionedAuxFiles(const string& filename, const V3SimAccelProgram& pr
         if (clusterMeta.is_open()) {
             clusterMeta << "index\ttopo_rank\tassign_count\tread_var_count\twritten_var_count"
                            "\tinput_signature_bits\towner_hint\tdominant_hierarchy"
-                           "\tunique_hierarchy_count\n";
+                           "\tunique_hierarchy_count\toperator_count\texpr_kind_counts\n";
             for (const AssignCluster& cluster : clusters) {
                 clusterMeta << cluster.m_clusterIdx << '\t' << cluster.m_topoRank << '\t'
                             << cluster.m_assigns.size() << '\t' << cluster.m_readVarIdxs.size()
                             << '\t' << cluster.m_writtenVarIdxs.size() << '\t'
                             << cluster.m_inputSignatureBitCount << '\t' << cluster.m_ownerHint
                             << '\t' << cluster.m_dominantHierarchy << '\t'
-                            << cluster.m_uniqueHierarchyCount << '\n';
+                            << cluster.m_uniqueHierarchyCount << '\t'
+                            << cluster.m_operatorCount << '\t'
+                            << simAccelExprKindCountsSummary(cluster.m_exprKindCounts) << '\n';
             }
         }
     }

@@ -92,6 +92,18 @@ void writeVarIndexList(std::ofstream& of, const std::vector<size_t>& values, con
     of << "]";
 }
 
+void writeExprKindCounts(std::ofstream& of, const std::vector<size_t>& counts, const char* indent,
+                         const char* closingIndent) {
+    of << "{\n";
+    for (size_t kindIdx = 0; kindIdx < counts.size(); ++kindIdx) {
+        const auto kind = static_cast<V3SimAccelProgram::ExprKind>(kindIdx);
+        of << indent << "\"" << exprKindName(kind) << "\": " << counts.at(kindIdx);
+        if (kindIdx + 1 != counts.size()) of << ",";
+        of << "\n";
+    }
+    of << closingIndent << "}";
+}
+
 }  // namespace
 
 void V3SimAccelProgramJson::write(const string& filename, const V3SimAccelProgram& program,
@@ -201,6 +213,7 @@ void V3SimAccelProgramJson::write(const string& filename, const V3SimAccelProgra
     of << "  \"approx_regcut_analysis\": {\n";
     of << "    \"cluster_count\": " << approxRegCutSummary.m_clusterCount << ",\n";
     of << "    \"assign_count\": " << approxRegCutSummary.m_assignCount << ",\n";
+    of << "    \"operator_count\": " << approxRegCutSummary.m_operatorCount << ",\n";
     of << "    \"input_signature_var_count\": " << approxRegCutSummary.m_inputSignatureVarCount
        << ",\n";
     of << "    \"input_signature_bit_count\": " << approxRegCutSummary.m_inputSignatureBitCount
@@ -233,7 +246,10 @@ void V3SimAccelProgramJson::write(const string& filename, const V3SimAccelProgra
     of << "    \"max_boundary_output_var_count\": "
        << approxRegCutSummary.m_maxBoundaryOutputVarCount << ",\n";
     of << "    \"max_internal_var_count\": " << approxRegCutSummary.m_maxInternalVarCount
-       << "\n";
+       << ",\n";
+    of << "    \"expr_kind_counts\": ";
+    writeExprKindCounts(of, approxRegCutSummary.m_exprKindCounts, "      ", "    ");
+    of << "\n";
     of << "  },\n";
 
     of << "  \"spec_frontier_analysis\": {\n";
@@ -272,6 +288,7 @@ void V3SimAccelProgramJson::write(const string& filename, const V3SimAccelProgra
         of << "    {\n";
         of << "      \"cluster_idx\": " << cluster.m_clusterIdx << ",\n";
         of << "      \"assign_count\": " << cluster.m_assignCount << ",\n";
+        of << "      \"operator_count\": " << cluster.m_operatorCount << ",\n";
         of << "      \"input_signature_var_count\": " << cluster.m_inputSignatureVarCount << ",\n";
         of << "      \"boundary_input_var_count\": " << cluster.m_boundaryInputVarCount << ",\n";
         of << "      \"boundary_output_var_count\": " << cluster.m_boundaryOutputVarCount
@@ -329,6 +346,9 @@ void V3SimAccelProgramJson::write(const string& filename, const V3SimAccelProgra
         of << ",\n";
         of << "      \"gpu_internal_output_var_idxs\": ";
         writeVarIndexList(of, cluster.m_gpuInternalOutputVarIdxs, "        ");
+        of << ",\n";
+        of << "      \"expr_kind_counts\": ";
+        writeExprKindCounts(of, cluster.m_exprKindCounts, "        ", "      ");
         of << ",\n";
         of << "      \"spec_frontier_candidates\": [";
         if (!cluster.m_specFrontierCandidates.empty()) of << "\n";

@@ -55,6 +55,7 @@ void emitStats(const V3SimAccelProgram& program,
     v3info("--sim-accel-only approx_regcut "
            << "cluster_count=" << approxRegCutSummary.m_clusterCount << " "
            << "assign_count=" << approxRegCutSummary.m_assignCount << " "
+           << "operator_count=" << approxRegCutSummary.m_operatorCount << " "
            << "input_signature_vars=" << approxRegCutSummary.m_inputSignatureVarCount << " "
            << "input_signature_bits=" << approxRegCutSummary.m_inputSignatureBitCount << " "
            << "boundary_input_vars=" << approxRegCutSummary.m_boundaryInputVarCount << " "

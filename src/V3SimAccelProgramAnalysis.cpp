@@ -22,6 +22,9 @@
 
 namespace {
 
+constexpr size_t kExprKindCount
+    = static_cast<size_t>(V3SimAccelProgram::ExprKind::EXTENDS) + 1U;
+
 class DisjointSets final {
 private:
     std::vector<size_t> m_parent;
@@ -67,6 +70,11 @@ struct TempSpecCandidate final {
 };
 
 enum class SpecBias : uint8_t { NONE, ZERO, ONE };
+
+bool isOperatorExprKind(V3SimAccelProgram::ExprKind kind) {
+    return kind != V3SimAccelProgram::ExprKind::VAR
+           && kind != V3SimAccelProgram::ExprKind::CONST;
+}
 
 uint64_t sumVarWidths(const V3SimAccelProgram& program, const std::unordered_set<size_t>& varIdxs) {
     uint64_t total = 0;
@@ -141,6 +149,23 @@ void accumulateSpecBias(const V3SimAccelProgram& program, size_t exprIdx,
     }
 }
 
+void accumulateExprKinds(const V3SimAccelProgram& program, size_t exprIdx,
+                         std::unordered_set<size_t>& visitedExprIdxs,
+                         std::vector<size_t>& exprKindCounts, size_t& operatorCount) {
+    if (exprIdx == V3SimAccelProgram::INVALID_SLOT) return;
+    if (!visitedExprIdxs.emplace(exprIdx).second) return;
+    const V3SimAccelProgram::Expr& expr = program.m_exprs.at(exprIdx);
+    ++exprKindCounts.at(static_cast<size_t>(expr.m_kind));
+    if (isOperatorExprKind(expr.m_kind)) ++operatorCount;
+    if (expr.m_kind == V3SimAccelProgram::ExprKind::VAR
+        || expr.m_kind == V3SimAccelProgram::ExprKind::CONST) {
+        return;
+    }
+    accumulateExprKinds(program, expr.m_lhs, visitedExprIdxs, exprKindCounts, operatorCount);
+    accumulateExprKinds(program, expr.m_rhs, visitedExprIdxs, exprKindCounts, operatorCount);
+    accumulateExprKinds(program, expr.m_third, visitedExprIdxs, exprKindCounts, operatorCount);
+}
+
 uint64_t computeSpecScore(const TempSpecCandidate& candidate) {
     const uint64_t biasCount
         = std::max(candidate.m_zeroBiasCount, candidate.m_oneBiasCount);
@@ -157,6 +182,7 @@ V3SimAccelProgramAnalysis::analyzeApproxRegCut(const V3SimAccelProgram& program)
     V3SimAccelProgramAnalysis::SpecFrontierSummary& frontierSummary
         = analysis.m_specFrontierSummary;
     summary.m_assignCount = program.m_assigns.size();
+    summary.m_exprKindCounts.assign(kExprKindCount, 0);
     if (program.m_assigns.empty()) return analysis;
 
     DisjointSets dsu{program.m_assigns.size()};
@@ -256,6 +282,7 @@ V3SimAccelProgramAnalysis::analyzeApproxRegCut(const V3SimAccelProgram& program)
 
         ApproxRegCutCluster clusterSummary;
         clusterSummary.m_clusterIdx = clusterIdx;
+        clusterSummary.m_exprKindCounts.assign(kExprKindCount, 0);
         clusterSummary.m_assignCount = cluster.m_assignCount;
         clusterSummary.m_inputSignatureVarCount = boundaryInputs.size();
         clusterSummary.m_boundaryInputVarCount = boundaryInputs.size();
@@ -302,6 +329,14 @@ V3SimAccelProgramAnalysis::analyzeApproxRegCut(const V3SimAccelProgram& program)
             }
         }
         clusterSummary.m_assignIdxs = cluster.m_assignIdxs;
+
+        std::unordered_set<size_t> visitedExprIdxs;
+        for (const size_t assignIdx : cluster.m_assignIdxs) {
+            if (assignIdx >= program.m_assigns.size()) continue;
+            accumulateExprKinds(program, program.m_assigns.at(assignIdx).m_exprIdx, visitedExprIdxs,
+                                clusterSummary.m_exprKindCounts,
+                                clusterSummary.m_operatorCount);
+        }
 
         std::unordered_set<size_t> frontierVarIdxs{boundaryInputs.begin(), boundaryInputs.end()};
         std::unordered_map<size_t, TempSpecCandidate> tempCandidates;
@@ -395,6 +430,7 @@ V3SimAccelProgramAnalysis::analyzeApproxRegCut(const V3SimAccelProgram& program)
         }
 
         summary.m_inputSignatureVarCount += clusterSummary.m_inputSignatureVarCount;
+        summary.m_operatorCount += clusterSummary.m_operatorCount;
         summary.m_boundaryInputVarCount += clusterSummary.m_boundaryInputVarCount;
         summary.m_boundaryOutputVarCount += clusterSummary.m_boundaryOutputVarCount;
         summary.m_internalVarCount += clusterSummary.m_internalVarCount;
@@ -414,6 +450,9 @@ V3SimAccelProgramAnalysis::analyzeApproxRegCut(const V3SimAccelProgram& program)
             = std::max(summary.m_maxInternalVarCount, clusterSummary.m_internalVarCount);
         summary.m_maxInputSignatureBitCount
             = std::max(summary.m_maxInputSignatureBitCount, clusterSummary.m_inputSignatureBitCount);
+        for (size_t kindIdx = 0; kindIdx < clusterSummary.m_exprKindCounts.size(); ++kindIdx) {
+            summary.m_exprKindCounts.at(kindIdx) += clusterSummary.m_exprKindCounts.at(kindIdx);
+        }
 
         uniqueBoundaryInputs.insert(boundaryInputs.begin(), boundaryInputs.end());
         uniqueBoundaryOutputs.insert(boundaryOutputs.begin(), boundaryOutputs.end());
