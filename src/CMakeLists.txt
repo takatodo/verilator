@@ -171,6 +171,8 @@ set(HEADERS
     V3SenExprBuilder.h
     V3SenTree.h
     V3SimAccelBackendCuda.h
+    V3SimAccelBackendCudaExprEmitter.h
+    V3SimAccelBackendCudaWriter.h
     V3SimAccelLowerAssignwBool32.h
     V3SimAccelLowerAssignwBool32Visitor.h
     V3SimAccelProgram.h
@@ -341,6 +343,8 @@ set(COMMON_SOURCES
     V3Sampled.cpp
     V3Sched.cpp
     V3SimAccelBackendCuda.cpp
+    V3SimAccelBackendCudaExprEmitter.cpp
+    V3SimAccelBackendCudaWriter.cpp
     V3SimAccelLowerAssignwBool32.cpp
     V3SimAccelLowerAssignwBool32Visitor.cpp
     V3SimAccelProgramJson.cpp
