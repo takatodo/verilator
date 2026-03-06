@@ -374,6 +374,10 @@ compute_compile_cache_key() {
     printf 'nvcc_flags=-O3 -std=c++17 -DSIM_ACCEL_PARTIAL_WRITE=1\n'
     printf 'bench_kernel_sha=%s\n' "$bench_sha"
     printf 'generated_bundle_sha=%s\n' "$bundle_sha"
+    printf 'hybrid_mode=%s\n' "$HYBRID_MODE"
+    printf 'hybrid_cluster_build_index=%s\n' "${HYBRID_BUILD_CLUSTER_INDEX:-}"
+    printf 'hybrid_cluster_build_owner_hint=%s\n' "${HYBRID_BUILD_CLUSTER_OWNER_HINT:-}"
+    printf 'hybrid_cluster_build_fallback=%s\n' "${HYBRID_BUILD_CLUSTER_FALLBACK:-0}"
   } | sha256sum | awk '{print $1}'
 }
 
@@ -439,6 +443,96 @@ append_partition_canonical_stats() {
     echo "partition_canonical_duplicates=$dup"
     echo "partition_canonical_max_reuse=$max_count"
   } >> "$out_log"
+}
+
+select_auto_hybrid_cluster_from_tsv() {
+  local clusters_tsv="$1"
+  local max_input_bits="$2"
+  python3 - "$clusters_tsv" "$max_input_bits" <<'PY'
+import csv
+import sys
+
+path = sys.argv[1]
+max_bits = int(sys.argv[2])
+preferred = None
+fallback = None
+preferred_count = 0
+fallback_count = 0
+
+def better(cur, best):
+    if best is None:
+        return True
+    return ((cur["assign_count"], -cur["input_signature_bits"], -cur["index"])
+            > (best["assign_count"], -best["input_signature_bits"], -best["index"]))
+
+with open(path, newline="") as fh:
+    reader = csv.DictReader(fh, delimiter="\t")
+    for row in reader:
+        idx = int(row["index"])
+        assigns = int(row["assign_count"])
+        bits = int(row["input_signature_bits"])
+        owner = row["owner_hint"]
+        if assigns <= 0 or bits > max_bits:
+            continue
+        cand = {"index": idx, "assign_count": assigns, "input_signature_bits": bits}
+        if owner == "gpu_candidate":
+            preferred_count += 1
+            if better(cand, preferred):
+                preferred = cand
+        elif owner == "cpu_boundary_heavy":
+            fallback_count += 1
+            if better(cand, fallback):
+                fallback = cand
+
+if preferred is not None:
+    print(f"{preferred['index']}\t{preferred_count + fallback_count}\t0\tgpu_candidate")
+    sys.exit(0)
+if fallback is not None:
+    print(f"{fallback['index']}\t{preferred_count + fallback_count}\t1\tcpu_boundary_heavy")
+    sys.exit(0)
+sys.exit(1)
+PY
+}
+
+prepare_single_cluster_link_source() {
+  local link_src="$1"
+  local cluster_index="$2"
+  python3 - "$link_src" "$cluster_index" <<'PY'
+import sys
+
+path = sys.argv[1]
+cluster = int(sys.argv[2])
+func_name = 'extern "C" __host__ cudaError_t sim_accel_eval_assignw_launch_cluster('
+
+with open(path, "r", encoding="utf-8") as fh:
+    text = fh.read()
+
+start = text.find(func_name)
+if start < 0:
+    raise SystemExit(f"Could not find cluster launch function in {path}")
+brace_start = text.find("{", start)
+if brace_start < 0:
+    raise SystemExit(f"Could not find function body start in {path}")
+
+depth = 0
+end = None
+for idx in range(brace_start, len(text)):
+    ch = text[idx]
+    if ch == "{":
+        depth += 1
+    elif ch == "}":
+        depth -= 1
+        if depth == 0:
+            end = idx + 1
+            break
+if end is None:
+    raise SystemExit(f"Could not find function body end in {path}")
+
+replacement = f'''extern "C" __host__ cudaError_t sim_accel_eval_assignw_launch_cluster(uint32_t index,\n                                                               const uint32_t* state_in,\n                                                               uint32_t* state_out,\n                                                               uint32_t nstates,\n                                                               uint32_t block_size) {{\n    const uint32_t block = block_size ? block_size : 256U;\n    const uint32_t grid = (nstates + block - 1U) / block;\n    switch (index) {{\n    case {cluster}U:\n        sim_accel_eval_assignw_u32_cluster{cluster}<<<grid, block>>>(state_in, state_out, nstates);\n        return cudaGetLastError();\n    default:\n        return cudaErrorInvalidValue;\n    }}\n}}'''
+
+with open(path, "w", encoding="utf-8") as fh:
+    fh.write(text[:start] + replacement + text[end:])
+PY
 }
 
 compute_object_cache_key() {
@@ -1812,12 +1906,44 @@ done < <(find "$OUTDIR" -maxdepth 1 -type f \
 USE_PARTITION_OBJECTS=0
 declare -a PARTITION_SOURCES=()
 declare -a CLUSTER_SOURCES=()
+HYBRID_BUILD_CLUSTER_INDEX=""
+HYBRID_BUILD_CLUSTER_OWNER_HINT=""
+HYBRID_BUILD_CLUSTER_FALLBACK=0
 if [[ -f "$OUTDIR/kernel_generated.api.h" && -f "$OUTDIR/kernel_generated.cpu.cpp" && -f "$OUTDIR/kernel_generated.link.cu" ]]; then
   mapfile -t PARTITION_SOURCES < <(find "$OUTDIR" -maxdepth 1 -type f -name 'kernel_generated.part*.cu' | LC_ALL=C sort)
   mapfile -t CLUSTER_SOURCES < <(find "$OUTDIR" -maxdepth 1 -type f -name 'kernel_generated.cluster*.cu' | LC_ALL=C sort)
   if (( ${#PARTITION_SOURCES[@]} > 0 || ${#CLUSTER_SOURCES[@]} > 0 )); then
     USE_PARTITION_OBJECTS=1
   fi
+fi
+
+if [[ "$HYBRID_MODE" == "single-cluster" && "$USE_PARTITION_OBJECTS" -eq 1 ]]; then
+  if [[ "$HYBRID_CLUSTER_AUTO" -eq 1 ]]; then
+    if [[ ! -f "$OUTDIR/kernel_generated.clusters.tsv" ]]; then
+      echo "Missing cluster metadata for --hybrid-cluster-auto: $OUTDIR/kernel_generated.clusters.tsv" >&2
+      exit 2
+    fi
+    if ! auto_cluster_selection="$(select_auto_hybrid_cluster_from_tsv \
+      "$OUTDIR/kernel_generated.clusters.tsv" "$HYBRID_CLUSTER_AUTO_MAX_INPUT_BITS")"; then
+      echo "No suitable hybrid cluster found for auto-selection (max_input_bits=$HYBRID_CLUSTER_AUTO_MAX_INPUT_BITS)" >&2
+      exit 2
+    fi
+    IFS=$'\t' read -r HYBRID_BUILD_CLUSTER_INDEX _ HYBRID_BUILD_CLUSTER_FALLBACK \
+      HYBRID_BUILD_CLUSTER_OWNER_HINT <<<"$auto_cluster_selection"
+  else
+    HYBRID_BUILD_CLUSTER_INDEX="$HYBRID_CLUSTER_INDEX"
+    if [[ -f "$OUTDIR/kernel_generated.clusters.tsv" ]]; then
+      HYBRID_BUILD_CLUSTER_OWNER_HINT="$(awk -F '\t' -v idx="$HYBRID_BUILD_CLUSTER_INDEX" \
+        'NR > 1 && $1 == idx { print $7; exit }' "$OUTDIR/kernel_generated.clusters.tsv")"
+    fi
+  fi
+  selected_cluster_src="$OUTDIR/kernel_generated.cluster${HYBRID_BUILD_CLUSTER_INDEX}.cu"
+  if [[ ! -f "$selected_cluster_src" ]]; then
+    echo "Missing generated source for selected hybrid cluster: $selected_cluster_src" >&2
+    exit 2
+  fi
+  prepare_single_cluster_link_source "$OUTDIR/kernel_generated.link.cu" "$HYBRID_BUILD_CLUSTER_INDEX"
+  CLUSTER_SOURCES=("$selected_cluster_src")
 fi
 
 BENCH_GENERATED_INCLUDE="kernel_generated.cu"
