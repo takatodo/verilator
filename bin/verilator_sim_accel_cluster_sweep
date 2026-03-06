@@ -448,12 +448,30 @@ PY
   fi
 done
 
-python3 - "$SUMMARY_TSV" "$SUMMARY_JSON" "$WORTHY_MIN_SPEEDUP" "$WORTHY_MIN_MARGIN_MS" <<'PY'
+python3 - "$SUMMARY_TSV" "$SUMMARY_JSON" "$WORTHY_MIN_SPEEDUP" "$WORTHY_MIN_MARGIN_MS" \
+  "$TOP_MODULE" "$OUTDIR" "$NSTATES" "$GPU_REPS" "$CPU_REPS" "$BLOCK_SIZE" "$CLUSTER_GROUP_SIZE" \
+  "$CLUSTER_LIMIT" "$CLUSTER_MAX_INPUT_BITS" "$CLUSTER_MIN_ASSIGNS" "$CLUSTER_OWNER_LIST" <<'PY'
 import csv
 import json
 import sys
 
-tsv_path, json_path, worthy_min_speedup, worthy_min_margin_ms = sys.argv[1:5]
+(
+    tsv_path,
+    json_path,
+    worthy_min_speedup,
+    worthy_min_margin_ms,
+    top_module,
+    outdir,
+    nstates,
+    gpu_reps,
+    cpu_reps,
+    block_size,
+    cluster_group_size,
+    cluster_limit,
+    cluster_max_input_bits,
+    cluster_min_assigns,
+    cluster_owner_list,
+) = sys.argv[1:16]
 rows = list(csv.DictReader(open(tsv_path, newline=''), delimiter='\t'))
 for row in rows:
     row['cluster_group_size'] = int(row['cluster_group_size'])
@@ -479,11 +497,80 @@ for row in rows:
     row['offload_score'] = float(row['offload_score'])
     row['offload_worthy'] = (row['offload_worthy'] == '1')
     row['hybrid_mismatch'] = int(row['hybrid_mismatch'])
+    row['cluster_indices_list'] = [int(x) for x in row['cluster_indices'].split(',') if x]
 
 rows_by_score = sorted(rows, key=lambda r: (r['offload_score'], r['hybrid_speedup_gpu_over_cpu']), reverse=True)
 worthy = [r for r in rows_by_score if r['offload_worthy']]
 
+def normalize_row(row):
+    return {
+        'unit': {
+            'cluster_indices': row['cluster_indices_list'],
+            'cluster_group_size': row['cluster_group_size'],
+            'owner_hint': row['owner_hint'],
+            'topo_rank': int(row['topo_rank']),
+            'topo_span': int(row['topo_span']),
+            'dominant_hierarchy': row['dominant_hierarchy'],
+        },
+        'operators': {
+            'assign_count': row['group_assign_count'],
+            'operator_count': row['group_operator_count'],
+            'weighted_operator_count': row['group_weighted_operator_count'],
+            'expr_kind_counts': row['group_expr_kind_counts'],
+            'input_signature_bits': row['group_input_signature_bits'],
+        },
+        'execution': {
+            'gpu_ms_per_rep': row['hybrid_gpu_ms_per_rep'],
+            'cpu_ms_per_rep': row['hybrid_cpu_ms_per_rep'],
+            'speedup_gpu_over_cpu': row['hybrid_speedup_gpu_over_cpu'],
+            'margin_ms': row['hybrid_margin_ms'],
+            'mismatch': row['hybrid_mismatch'],
+        },
+        'hybrid': {
+            'setup_h2d_ms': row['hybrid_setup_h2d_ms'],
+            'dynamic_h2d_ms_per_rep': row['hybrid_dynamic_h2d_ms_per_rep'],
+            'kernel_ms_per_rep': row['hybrid_kernel_ms_per_rep'],
+            'd2h_ms_per_rep': row['hybrid_d2h_ms_per_rep'],
+            'transfer_ms_per_rep': row['hybrid_transfer_ms_per_rep'],
+            'cpu_dispatch_ms_per_rep': row['hybrid_cpu_dispatch_ms_per_rep'],
+        },
+        'transfer': {
+            'static_h2d_bytes_per_batch': row['hybrid_static_h2d_bytes_per_batch'],
+            'dynamic_h2d_bytes_per_batch': row['hybrid_dynamic_h2d_bytes_per_batch'],
+            'actual_h2d_bytes_per_batch': row['hybrid_actual_h2d_bytes_per_batch'],
+            'actual_d2h_bytes_per_batch': row['hybrid_actual_d2h_bytes_per_batch'],
+            'total_bytes_per_batch': row['hybrid_transfer_total_bytes_per_batch'],
+            'assigns_per_kib_transferred': row['assigns_per_kib_transferred'],
+            'weighted_ops_per_kib_transferred': row['weighted_ops_per_kib_transferred'],
+        },
+        'compile': {
+            'nvcc_compile_s': row['nvcc_compile_s'],
+            'bench_run_s': row['bench_run_s'],
+            'total_elapsed_s': row['total_elapsed_s'],
+        },
+        'scoring': {
+            'offload_score': row['offload_score'],
+            'offload_worthy': row['offload_worthy'],
+        },
+    }
+
 payload = {
+    'schema_version': 'sim-accel-cluster-sweep-v1',
+    'design': {
+        'top_module': top_module,
+        'outdir': outdir,
+        'nstates': int(nstates),
+        'gpu_reps': int(gpu_reps),
+        'cpu_reps': int(cpu_reps),
+        'block_size': int(block_size),
+    },
+    'selection': {
+        'cluster_group_size': int(cluster_group_size),
+        'cluster_limit': int(cluster_limit),
+        'cluster_max_input_bits': int(cluster_max_input_bits),
+        'cluster_min_assigns': int(cluster_min_assigns),
+        'cluster_owner_list': cluster_owner_list.split(',') if cluster_owner_list else [],
+    },
     'heuristic': {
         'worthy_min_speedup': float(worthy_min_speedup),
         'worthy_min_margin_ms': float(worthy_min_margin_ms),
@@ -499,7 +586,9 @@ payload = {
     'worthy_cluster_count': len(worthy),
     'worthy_cluster_indices': [r['cluster_indices'] for r in worthy],
     'top_clusters_by_score': rows_by_score[:10],
+    'normalized_top_clusters_by_score': [normalize_row(r) for r in rows_by_score[:10]],
     'rows': rows,
+    'normalized_rows': [normalize_row(r) for r in rows],
 }
 with open(json_path, 'w', encoding='utf-8') as fh:
     json.dump(payload, fh, indent=2)
