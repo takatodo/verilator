@@ -1593,9 +1593,13 @@ void V3Options::parseOptsList(FileLine* fl, const string& optdir, int argc,
     });
     DECL_OPTION("-sim-accel-strategy", CbVal, [this, fl](const char* valp) {
         m_simAccelStrategy = valp;
-        if (m_simAccelStrategy != "gem") {
+        if (m_simAccelStrategy == "gem") {
+            fl->v3warn(DEPRECATED, "--sim-accel-strategy gem is deprecated; use "
+                                       "--sim-accel-strategy assignw-bool32");
+            m_simAccelStrategy = "assignw-bool32";
+        } else if (m_simAccelStrategy != "assignw-bool32") {
             fl->v3error("Unsupported --sim-accel-strategy: '" << m_simAccelStrategy
-                                                              << "' (supported: gem)");
+                                                              << "' (supported: assignw-bool32)");
         }
     });
     // Aliases
@@ -1632,9 +1636,13 @@ void V3Options::parseOptsList(FileLine* fl, const string& optdir, int argc,
     });
     DECL_OPTION("-gpu-strategy", CbVal, [this, fl](const char* valp) {
         m_simAccelStrategy = valp;
-        if (m_simAccelStrategy != "gem") {
+        if (m_simAccelStrategy == "gem") {
+            fl->v3warn(DEPRECATED, "--gpu-strategy gem is deprecated; use "
+                                       "--gpu-strategy assignw-bool32");
+            m_simAccelStrategy = "assignw-bool32";
+        } else if (m_simAccelStrategy != "assignw-bool32") {
             fl->v3error("Unsupported --gpu-strategy: '" << m_simAccelStrategy
-                                                        << "' (supported: gem)");
+                                                        << "' (supported: assignw-bool32)");
         }
     });
     DECL_OPTION("-gem-cuda-only", CbOnOff, [this](bool flag) {

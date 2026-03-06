@@ -384,7 +384,7 @@ private:
     string      m_simAccelOutput;  // main switch: --sim-accel-output, --sim-accel-sidecar-output
     string      m_simAccelIrOutput;  // main switch: --sim-accel-ir-output
     string      m_simAccelBackend = "cuda";  // main switch: --sim-accel-backend
-    string      m_simAccelStrategy = "gem";  // main switch: --sim-accel-strategy
+    string      m_simAccelStrategy = "assignw-bool32";  // main switch: --sim-accel-strategy
     string      m_topModule;    // main switch: --top-module
     string      m_unusedRegexp; // main switch: --unused-regexp
     string      m_waiverOutput;  // main switch: --waiver-output {filename}
