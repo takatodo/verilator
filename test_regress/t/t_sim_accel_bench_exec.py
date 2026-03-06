@@ -42,6 +42,7 @@ bench_cmd = (
     + " --nstates 8192"
     + " --gpu-reps 16"
     + " --cpu-reps 4"
+    + " --assigns-per-kernel 2"
     + " --compile-cache-dir " + cache_dir
     + " -- "
     + test.t_dir + "/t_sim_accel_bench_exec.v")
@@ -60,6 +61,7 @@ test.file_grep(bench_run_log, r"nvcc_cache_mode=hit")
 test.file_grep(bench_run_log, r"mismatch=0")
 test.file_grep(bench_run_log, r"compact_mismatch=0")
 test.file_grep(bench_run_log, r"speedup_gpu_over_cpu=")
+test.file_grep(bench_run_log, r"kernel_partitions=[2-9][0-9]*")
 test.file_grep(bench_run_log, r"auto_engine_recommendation=")
 test.file_grep(bench_run_log, r"comm_input_vars=")
 test.file_grep(bench_run_log, r"comm_output_vars=")

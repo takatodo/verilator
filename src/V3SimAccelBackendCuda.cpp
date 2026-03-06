@@ -24,7 +24,8 @@
 
 namespace {
 
-void emitStats(const V3SimAccelProgram& program, size_t emittedUniqueAssignw) {
+void emitStats(const V3SimAccelProgram& program, size_t emittedUniqueAssignw,
+               size_t partitionCount) {
     const size_t supportedAssignw = program.m_stats.m_assignwSupported;
     const size_t totalAssignw = program.m_stats.m_assignwTotal;
     const size_t skipped = program.m_stats.m_assignwIgnored;
@@ -43,6 +44,7 @@ void emitStats(const V3SimAccelProgram& program, size_t emittedUniqueAssignw) {
            << "assignw_total=" << totalAssignw << " "
            << "assignw_ignored=" << skipped << " "
            << "assignw_emitted_unique=" << emittedUniqueAssignw << " "
+           << "kernel_partitions=" << partitionCount << " "
            << "assignw_offload_pct=" << offloadStr.str());
 }
 
@@ -68,6 +70,16 @@ void V3SimAccelBackendCuda::emitCuda() VL_MT_DISABLED {
                 "EQ/NEQ/COND/CONCAT/SEL/SHIFT plus CCAST/EXTEND wrappers)");
     }
 
-    const size_t emittedUniqueAssignw = V3SimAccelBackendCudaWriter::write(filename, program);
-    emitStats(program, emittedUniqueAssignw);
+    const size_t assignsPerKernel = v3Global.opt.simAccelAssignsPerKernel() > 0
+                                        ? static_cast<size_t>(v3Global.opt.simAccelAssignsPerKernel())
+                                        : 0;
+    const size_t emittedUniqueAssignw
+        = V3SimAccelBackendCudaWriter::write(filename, program, assignsPerKernel);
+    const size_t partitionCount
+        = emittedUniqueAssignw ? (assignsPerKernel
+                                      ? ((emittedUniqueAssignw + assignsPerKernel - 1)
+                                         / assignsPerKernel)
+                                      : 1)
+                              : 0;
+    emitStats(program, emittedUniqueAssignw, partitionCount);
 }

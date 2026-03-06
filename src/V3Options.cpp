@@ -1591,6 +1591,12 @@ void V3Options::parseOptsList(FileLine* fl, const string& optdir, int argc,
                                                              << "' (supported: cuda)");
         }
     });
+    DECL_OPTION("-sim-accel-assigns-per-kernel", CbVal, [this, fl](int val) {
+        m_simAccelAssignsPerKernel = val;
+        if (m_simAccelAssignsPerKernel < 0) {
+            fl->v3fatal("--sim-accel-assigns-per-kernel must be non-negative: " << val);
+        }
+    });
     DECL_OPTION("-sim-accel-strategy", CbVal, [this, fl](const char* valp) {
         m_simAccelStrategy = valp;
         if (m_simAccelStrategy != "assignw-bool32") {
@@ -1628,6 +1634,12 @@ void V3Options::parseOptsList(FileLine* fl, const string& optdir, int argc,
         if (m_simAccelBackend != "cuda") {
             fl->v3error("Unsupported --gpu-backend: '" << m_simAccelBackend
                                                        << "' (supported: cuda)");
+        }
+    });
+    DECL_OPTION("-gpu-assigns-per-kernel", CbVal, [this, fl](int val) {
+        m_simAccelAssignsPerKernel = val;
+        if (m_simAccelAssignsPerKernel < 0) {
+            fl->v3fatal("--gpu-assigns-per-kernel must be non-negative: " << val);
         }
     });
     DECL_OPTION("-gpu-strategy", CbVal, [this, fl](const char* valp) {

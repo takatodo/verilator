@@ -22,7 +22,8 @@
 
 class V3SimAccelBackendCudaWriter final {
 public:
-    static size_t write(const string& filename, const V3SimAccelProgram& program);
+    static size_t write(const string& filename, const V3SimAccelProgram& program,
+                        size_t assignsPerKernel);
 
 private:
     V3SimAccelBackendCudaWriter() = default;

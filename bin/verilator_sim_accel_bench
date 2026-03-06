@@ -20,6 +20,7 @@ Options:
   --init-mode MODE     Initial state mode: random|zero|ones|counter (default: random)
   --init-seed N        Seed for random init mode (default: 1)
   --init-file PATH     Optional init override file (index/name based)
+  --assigns-per-kernel N  Limit emitted assigns per generated CUDA kernel partition (default: 0)
   --compile-cache-dir DIR  Reuse compiled bench binaries across runs
                            (default: /tmp/verilator-sim-accel-compile-cache)
   --no-compile-cache   Disable compiled bench cache reuse
@@ -56,6 +57,7 @@ INIT_MODE="random"
 INIT_SEED=1
 INIT_FILE=""
 INIT_FILE_ABS=""
+ASSIGNS_PER_KERNEL=0
 COMPILE_CACHE_DIR="${SIM_ACCEL_COMPILE_CACHE_DIR:-/tmp/verilator-sim-accel-compile-cache}"
 COMPILE_CACHE_ENABLED=1
 declare -a SOURCES=()
@@ -84,6 +86,8 @@ while [[ $# -gt 0 ]]; do
       INIT_SEED="$2"; shift 2 ;;
     --init-file)
       INIT_FILE="$2"; shift 2 ;;
+    --assigns-per-kernel)
+      ASSIGNS_PER_KERNEL="$2"; shift 2 ;;
     --compile-cache-dir)
       COMPILE_CACHE_DIR="$2"; shift 2 ;;
     --no-compile-cache)
@@ -121,6 +125,10 @@ if ! [[ "$BLOCK_SIZE" =~ ^[0-9]+$ ]] || [[ "$BLOCK_SIZE" -eq 0 ]] || [[ "$BLOCK_
   echo "Invalid --block-size: $BLOCK_SIZE (expected integer in 1..1024)" >&2
   exit 2
 fi
+if ! [[ "$ASSIGNS_PER_KERNEL" =~ ^[0-9]+$ ]]; then
+  echo "Invalid --assigns-per-kernel: $ASSIGNS_PER_KERNEL (expected integer >= 0)" >&2
+  exit 2
+fi
 
 case "$INIT_MODE" in
   random|zero|ones|counter) ;;
@@ -147,17 +155,15 @@ sha256_one() {
 }
 
 compute_compile_cache_key() {
-  local nvcc_version bench_sha kernel_sha cpu_sha
+  local nvcc_version bench_sha kernel_sha
   nvcc_version="$(nvcc --version | tr '\n' '|')"
   bench_sha="$(sha256_one "$OUTDIR/bench_kernel.cu")"
   kernel_sha="$(sha256_one "$OUTDIR/kernel_generated.cu")"
-  cpu_sha="$(sha256_one "$OUTDIR/cpu_body.inc")"
   {
     printf 'nvcc_version=%s\n' "$nvcc_version"
     printf 'nvcc_flags=-O3 -std=c++17 -DSIM_ACCEL_PARTIAL_WRITE=1\n'
     printf 'bench_kernel_sha=%s\n' "$bench_sha"
     printf 'kernel_generated_sha=%s\n' "$kernel_sha"
-    printf 'cpu_body_sha=%s\n' "$cpu_sha"
   } | sha256sum | awk '{print $1}'
 }
 
@@ -172,6 +178,10 @@ TIME_VERILATOR="$OUTDIR/time_verilator_codegen_sec.txt"
 TIME_NVCC="$OUTDIR/time_nvcc_compile_sec.txt"
 TIME_RUN="$OUTDIR/time_bench_run_sec.txt"
 
+declare -a VERILATOR_SIM_ACCEL_ARGS=()
+if [[ "$ASSIGNS_PER_KERNEL" -gt 0 ]]; then
+  VERILATOR_SIM_ACCEL_ARGS+=(--sim-accel-assigns-per-kernel "$ASSIGNS_PER_KERNEL")
+fi
 
 echo "[1/4] Generating CUDA kernel with --sim-accel-only..."
 /usr/bin/time -f "%e" -o "$TIME_VERILATOR" \
@@ -180,6 +190,7 @@ echo "[1/4] Generating CUDA kernel with --sim-accel-only..."
     --top-module "$TOP_MODULE" \
     --sim-accel-only \
     --sim-accel-output "$KERNEL_CU" \
+    "${VERILATOR_SIM_ACCEL_ARGS[@]}" \
     "${SOURCES[@]}" \
     >"$LOG" 2>&1
 
@@ -188,13 +199,7 @@ if [[ ! -s "$KERNEL_CU" || ! -s "$KERNEL_VARS" ]]; then
   exit 1
 fi
 
-
-echo "[2/4] Extracting CPU fallback body..."
-awk '
-  /if \(tid >= nstates\) return;/ {cap=1; next}
-  cap && /^}/ {cap=0; exit}
-  cap {print}
-' "$KERNEL_CU" > "$OUTDIR/cpu_body.inc"
+echo "[2/4] Preparing benchmark sources..."
 
 cat > "$OUTDIR/bench_kernel.cu" <<'CU'
 #include <cuda_runtime.h>
@@ -435,9 +440,7 @@ static InitFileStats applyInitFile(std::vector<uint32_t>& h_in, uint32_t nvars, 
 
 static void sim_accel_eval_assignw_cpu(const uint32_t* state_in, uint32_t* state_out,
                                        uint32_t nstates) {
-  for (uint32_t tid = 0; tid < nstates; ++tid) {
-#include "cpu_body.inc"
-  }
+  sim_accel_eval_assignw_cpu_ref(state_in, state_out, nstates);
 }
 
 static size_t chunkedIndex(uint32_t varIdx, uint32_t stateIdx, uint32_t nvars, uint32_t stateChunk) {
@@ -548,6 +551,7 @@ int main(int argc, char** argv) {
   }
 
   const uint32_t nvars = sim_accel_eval_var_count();
+  const uint32_t partitionCount = sim_accel_eval_partition_count();
   const std::vector<uint32_t> inputVarIdxs
       = loadCommVarIdxs(sim_accel_eval_input_count, sim_accel_eval_input_var_index);
   const std::vector<uint32_t> outputVarIdxs
@@ -635,19 +639,17 @@ int main(int argc, char** argv) {
     checkCuda(cudaGetLastError(), "scatter launch");
     checkCuda(cudaDeviceSynchronize(), "scatter sync");
   }
-  checkCuda(cudaMemcpy(d_out, d_in, bytes, cudaMemcpyDeviceToDevice), "D2D init out");
 
-  const int block = static_cast<int>(blockSize);
   for (int i = 0; i < 10; ++i) {
     if (!useChunkLayout) {
-      const int grid = static_cast<int>((nstates + block - 1) / block);
-      sim_accel_eval_assignw_u32<<<grid, block>>>(d_in, d_out, nstates);
+      checkCuda(sim_accel_eval_assignw_launch_all(d_in, d_out, nstates, blockSize),
+                "launch_all warmup");
     } else {
-      const int grid = static_cast<int>((stateChunk + block - 1) / block);
       const size_t chunkElems = static_cast<size_t>(nvars) * stateChunk;
       for (uint32_t chunkId = 0; chunkId < nchunks; ++chunkId) {
         const size_t off = static_cast<size_t>(chunkId) * chunkElems;
-        sim_accel_eval_assignw_u32<<<grid, block>>>(d_in + off, d_out + off, stateChunk);
+        checkCuda(sim_accel_eval_assignw_launch_all(d_in + off, d_out + off, stateChunk, blockSize),
+                  "launch_all warmup chunk");
       }
     }
   }
@@ -659,14 +661,14 @@ int main(int argc, char** argv) {
   checkCuda(cudaEventRecord(evStart), "event record start");
   for (int i = 0; i < gpu_reps; ++i) {
     if (!useChunkLayout) {
-      const int grid = static_cast<int>((nstates + block - 1) / block);
-      sim_accel_eval_assignw_u32<<<grid, block>>>(d_in, d_out, nstates);
+      checkCuda(sim_accel_eval_assignw_launch_all(d_in, d_out, nstates, blockSize),
+                "launch_all timed");
     } else {
-      const int grid = static_cast<int>((stateChunk + block - 1) / block);
       const size_t chunkElems = static_cast<size_t>(nvars) * stateChunk;
       for (uint32_t chunkId = 0; chunkId < nchunks; ++chunkId) {
         const size_t off = static_cast<size_t>(chunkId) * chunkElems;
-        sim_accel_eval_assignw_u32<<<grid, block>>>(d_in + off, d_out + off, stateChunk);
+        checkCuda(sim_accel_eval_assignw_launch_all(d_in + off, d_out + off, stateChunk, blockSize),
+                  "launch_all timed chunk");
       }
     }
   }
@@ -721,7 +723,8 @@ int main(int argc, char** argv) {
   std::cout << std::fixed << std::setprecision(6);
   std::cout << "nvars=" << nvars << " nstates=" << nstates << " elems=" << elems << "\n";
   std::cout << "state_chunk=" << (useChunkLayout ? stateChunk : 0) << "\n";
-  std::cout << "block_size=" << block << "\n";
+  std::cout << "block_size=" << blockSize << "\n";
+  std::cout << "kernel_partitions=" << partitionCount << "\n";
   std::cout << "state_chunks=" << nchunks << "\n";
   std::cout << "padded_states=" << paddedStates << "\n";
   std::cout << "init_mode=" << initMode << "\n";
@@ -828,7 +831,6 @@ if [[ "$COMPILE_CACHE_ENABLED" -eq 1 ]]; then
       echo "nvcc_version=$(nvcc --version | tr '\n' '|')"
       echo "kernel_generated_sha=$(sha256_one "$OUTDIR/kernel_generated.cu")"
       echo "bench_kernel_sha=$(sha256_one "$OUTDIR/bench_kernel.cu")"
-      echo "cpu_body_sha=$(sha256_one "$OUTDIR/cpu_body.inc")"
     } > "$TMP_CACHE_ENTRY/meta.txt"
     if ! mv "$TMP_CACHE_ENTRY" "$CACHE_ENTRY" 2>/dev/null; then
       rm -rf "$TMP_CACHE_ENTRY"

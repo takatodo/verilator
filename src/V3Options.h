@@ -336,6 +336,7 @@ private:
     int         m_maxNumWidth = 65536;  // main switch: --max-num-width
     int         m_funcRecursion = 1000;  // main switch: --func-recursion-depth
     int         m_moduleRecursion = 100;  // main switch: --module-recursion-depth
+    int         m_simAccelAssignsPerKernel = 0;  // main switch: --sim-accel-assigns-per-kernel
     int         m_outputGroups = -1;  // main switch: --output-groups
     int         m_outputSplit = 20000;  // main switch: --output-split
     int         m_outputSplitCFuncs = -1;  // main switch: --output-split-cfuncs
@@ -610,6 +611,7 @@ public:
     const string& simAccelIrOutput() const { return m_simAccelIrOutput; }
     const string& simAccelBackend() const { return m_simAccelBackend; }
     const string& simAccelStrategy() const { return m_simAccelStrategy; }
+    int simAccelAssignsPerKernel() const { return m_simAccelAssignsPerKernel; }
     bool topIfacesSupported() const { return lintOnly() && !hierarchical(); }
 
     int buildJobs() const VL_MT_SAFE { return m_buildJobs; }

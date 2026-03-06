@@ -847,6 +847,10 @@ Summary:
 
    Alias of :vlopt:`--sim-accel-backend`.
 
+.. option:: --gpu-assigns-per-kernel <value>
+
+   Alias of :vlopt:`--sim-accel-assigns-per-kernel`.
+
 .. option:: --gpu-ir-only
 
    Alias of :vlopt:`--sim-accel-ir-only`.
@@ -1683,6 +1687,15 @@ Summary:
 
    Current supported value is ``cuda``.
    Alias: :vlopt:`--gpu-backend`.
+
+.. option:: --sim-accel-assigns-per-kernel <value>
+
+   Limit the number of emitted ASSIGNW operations placed into a single
+   generated CUDA kernel partition.
+
+   ``0`` disables partitioning. Positive values preserve source-order lowering
+   while splitting large CUDA kernels into multiple sequential launches.
+   Alias: :vlopt:`--gpu-assigns-per-kernel`.
 
 .. option:: --sim-accel-bench
 
