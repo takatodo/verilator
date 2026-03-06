@@ -19,10 +19,12 @@
 #include "verilatedos.h"
 
 #include "V3SimAccelProgram.h"
+#include "V3SimAccelProgramAnalysis.h"
 
 class V3SimAccelBackendCudaWriter final {
 public:
     static size_t write(const string& filename, const V3SimAccelProgram& program,
+                        const V3SimAccelProgramAnalysis::ApproxRegCutAnalysis& approxRegCut,
                         size_t assignsPerKernel);
 
 private:

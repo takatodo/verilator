@@ -25,10 +25,9 @@
 
 namespace {
 
-void emitStats(const V3SimAccelProgram& program, size_t emittedUniqueAssignw,
-               size_t partitionCount) {
-    const V3SimAccelProgramAnalysis::ApproxRegCutAnalysis approxRegCut
-        = V3SimAccelProgramAnalysis::analyzeApproxRegCut(program);
+void emitStats(const V3SimAccelProgram& program,
+               const V3SimAccelProgramAnalysis::ApproxRegCutAnalysis& approxRegCut,
+               size_t emittedUniqueAssignw, size_t partitionCount) {
     const V3SimAccelProgramAnalysis::ApproxRegCutSummary& approxRegCutSummary
         = approxRegCut.m_summary;
     const V3SimAccelProgramAnalysis::SpecFrontierSummary& specFrontierSummary
@@ -118,13 +117,15 @@ void V3SimAccelBackendCuda::emitCuda() VL_MT_DISABLED {
     const size_t assignsPerKernel = v3Global.opt.simAccelAssignsPerKernel() > 0
                                         ? static_cast<size_t>(v3Global.opt.simAccelAssignsPerKernel())
                                         : 0;
+    const V3SimAccelProgramAnalysis::ApproxRegCutAnalysis approxRegCut
+        = V3SimAccelProgramAnalysis::analyzeApproxRegCut(program);
     const size_t emittedUniqueAssignw
-        = V3SimAccelBackendCudaWriter::write(filename, program, assignsPerKernel);
+        = V3SimAccelBackendCudaWriter::write(filename, program, approxRegCut, assignsPerKernel);
     const size_t partitionCount
         = emittedUniqueAssignw ? (assignsPerKernel
                                       ? ((emittedUniqueAssignw + assignsPerKernel - 1)
                                          / assignsPerKernel)
                                       : 1)
                               : 0;
-    emitStats(program, emittedUniqueAssignw, partitionCount);
+    emitStats(program, approxRegCut, emittedUniqueAssignw, partitionCount);
 }

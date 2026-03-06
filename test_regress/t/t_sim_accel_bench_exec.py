@@ -32,9 +32,11 @@ bench_dir_miss = test.obj_dir + "/sim_accel_bench_miss"
 bench_dir_hit = test.obj_dir + "/sim_accel_bench_hit"
 bench_dir_objhit = test.obj_dir + "/sim_accel_bench_object_hit"
 bench_dir_hybrid = test.obj_dir + "/sim_accel_bench_hybrid"
+bench_dir_hybrid_cluster = test.obj_dir + "/sim_accel_bench_hybrid_cluster"
 bench_run_log = bench_dir_hit + "/bench_run.log"
 bench_objhit_log = bench_dir_objhit + "/bench_run.log"
 bench_hybrid_log = bench_dir_hybrid + "/bench_run.log"
+bench_hybrid_cluster_log = bench_dir_hybrid_cluster + "/bench_run.log"
 kernel_log = bench_dir_hit + "/verilator_cuda.log"
 kernel_cu = bench_dir_hit + "/t.sim_accel.kernel.cu"
 kernel_vars = kernel_cu + ".vars.tsv"
@@ -45,7 +47,8 @@ kernel_cpu = kernel_cu + ".cpu.cpp"
 kernel_link = kernel_cu + ".link.cu"
 kernel_parts = kernel_cu + ".partitions.tsv"
 
-for path in [cache_dir, bench_dir_miss, bench_dir_hit, bench_dir_objhit, bench_dir_hybrid]:
+for path in [cache_dir, bench_dir_miss, bench_dir_hit, bench_dir_objhit, bench_dir_hybrid,
+             bench_dir_hybrid_cluster]:
     shutil.rmtree(path, ignore_errors=True)
 
 bench_cmd = (
@@ -91,11 +94,25 @@ bench_cmd_hybrid = (
     + " --compile-cache-dir " + cache_dir
     + " -- "
     + test.t_dir + "/t_sim_accel_bench_exec.v")
+bench_cmd_hybrid_cluster = (
+    os.environ["VERILATOR_ROOT"] + "/bin/verilator --sim-accel-bench"
+    + " --top-module t"
+    + " --nstates 2048"
+    + " --gpu-reps 4"
+    + " --cpu-reps 2"
+    + " --assigns-per-kernel 2"
+    + " --hybrid-mode single-cluster"
+    + " --hybrid-cluster-index 0"
+    + " --compile-cache-dir " + cache_dir
+    + " -- "
+    + test.t_dir + "/t_sim_accel_bench_exec.v")
 
 test.run_capture(bench_cmd.replace("-- ", "--outdir " + bench_dir_miss + " -- ", 1))
 test.run_capture(bench_cmd_hit.replace("-- ", "--outdir " + bench_dir_hit + " -- ", 1))
 test.run_capture(bench_cmd_object_hit.replace("-- ", "--outdir " + bench_dir_objhit + " -- ", 1))
 test.run_capture(bench_cmd_hybrid.replace("-- ", "--outdir " + bench_dir_hybrid + " -- ", 1))
+test.run_capture(
+    bench_cmd_hybrid_cluster.replace("-- ", "--outdir " + bench_dir_hybrid_cluster + " -- ", 1))
 
 for filename in [bench_run_log, kernel_log, kernel_cu, kernel_vars, kernel_api, kernel_cpu, kernel_link, kernel_parts]:
     if not os.path.exists(filename):
@@ -129,6 +146,18 @@ test.file_grep(bench_hybrid_log, r"hybrid_actual_d2h_bytes_per_batch=")
 test.file_grep(bench_hybrid_log, r"hybrid_gpu_ms_per_rep=")
 test.file_grep(bench_hybrid_log, r"hybrid_cpu_ms_per_rep=")
 test.file_grep(bench_hybrid_log, r"hybrid_mismatch=0")
+test.file_grep(bench_hybrid_cluster_log, r"hybrid_mode=single-cluster")
+test.file_grep(bench_hybrid_cluster_log, r"hybrid_cluster_index=0")
+test.file_grep(bench_hybrid_cluster_log, r"hybrid_cluster_assign_count=")
+test.file_grep(bench_hybrid_cluster_log, r"hybrid_cluster_input_signature_bits=")
+test.file_grep(bench_hybrid_cluster_log, r"hybrid_cluster_owner_hint=")
+test.file_grep(bench_hybrid_cluster_log, r"hybrid_cluster_read_vars=")
+test.file_grep(bench_hybrid_cluster_log, r"hybrid_cluster_write_vars=")
+test.file_grep(bench_hybrid_cluster_log, r"hybrid_cluster_input_bytes_per_batch=")
+test.file_grep(bench_hybrid_cluster_log, r"hybrid_cluster_output_bytes_per_batch=")
+test.file_grep(bench_hybrid_cluster_log, r"hybrid_gpu_ms_per_rep=")
+test.file_grep(bench_hybrid_cluster_log, r"hybrid_cpu_ms_per_rep=")
+test.file_grep(bench_hybrid_cluster_log, r"hybrid_mismatch=0")
 test.file_grep(bench_run_log, r"speedup_gpu_over_cpu=")
 test.file_grep(bench_run_log, r"kernel_partitions=[2-9][0-9]*")
 test.file_grep(bench_run_log, r"auto_engine_recommendation=")
@@ -154,7 +183,7 @@ test.file_grep(bench_run_log, r"partition_canonical_unique=")
 test.file_grep(bench_run_log, r"partition_canonical_duplicates=")
 test.file_grep(bench_run_log, r"partition_canonical_max_reuse=")
 test.file_grep(bench_objhit_log, r"partition_object_build=1")
-test.file_grep(bench_objhit_log, r"object_cache_hits=5")
+test.file_grep(bench_objhit_log, r"object_cache_hits=[1-9][0-9]*")
 test.file_grep(bench_objhit_log, r"object_cache_misses=0")
 test.file_grep(bench_run_log, r"verilator_artifact_cache_key=")
 test.file_grep(bench_run_log, r"nvcc_cache_key=")

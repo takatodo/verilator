@@ -21,8 +21,9 @@ Options:
   --init-seed N        Seed for random init mode (default: 1)
   --init-file PATH     Optional init override file (index/name based)
   --assigns-per-kernel N  Limit emitted assigns per generated CUDA kernel partition (default: 0)
-  --hybrid-mode MODE   Runtime path: off|single-partition (default: off)
+  --hybrid-mode MODE   Runtime path: off|single-partition|single-cluster (default: off)
   --hybrid-partition-index N  Selected partition for --hybrid-mode single-partition
+  --hybrid-cluster-index N  Selected cluster for --hybrid-mode single-cluster
   --compile-cache-dir DIR  Reuse compiled bench binaries across runs
                            (default: /tmp/verilator-sim-accel-compile-cache)
   --no-compile-cache   Disable compiled bench cache reuse
@@ -62,6 +63,7 @@ INIT_FILE_ABS=""
 ASSIGNS_PER_KERNEL=0
 HYBRID_MODE="off"
 HYBRID_PARTITION_INDEX=""
+HYBRID_CLUSTER_INDEX=""
 COMPILE_CACHE_DIR="${SIM_ACCEL_COMPILE_CACHE_DIR:-/tmp/verilator-sim-accel-compile-cache}"
 COMPILE_CACHE_ENABLED=1
 declare -a SOURCES=()
@@ -97,6 +99,8 @@ while [[ $# -gt 0 ]]; do
       HYBRID_MODE="$2"; shift 2 ;;
     --hybrid-partition-index)
       HYBRID_PARTITION_INDEX="$2"; shift 2 ;;
+    --hybrid-cluster-index)
+      HYBRID_CLUSTER_INDEX="$2"; shift 2 ;;
     --compile-cache-dir)
       COMPILE_CACHE_DIR="$2"; shift 2 ;;
     --no-compile-cache)
@@ -139,9 +143,9 @@ if ! [[ "$ASSIGNS_PER_KERNEL" =~ ^[0-9]+$ ]]; then
   exit 2
 fi
 case "$HYBRID_MODE" in
-  off|single-partition) ;;
+  off|single-partition|single-cluster) ;;
   *)
-    echo "Invalid --hybrid-mode: $HYBRID_MODE (expected off|single-partition)" >&2
+    echo "Invalid --hybrid-mode: $HYBRID_MODE (expected off|single-partition|single-cluster)" >&2
     exit 2 ;;
 esac
 if [[ "$HYBRID_MODE" == "single-partition" ]]; then
@@ -153,9 +157,30 @@ if [[ "$HYBRID_MODE" == "single-partition" ]]; then
     echo "Invalid --hybrid-partition-index: $HYBRID_PARTITION_INDEX (expected integer >= 0)" >&2
     exit 2
   fi
+  if [[ -n "$HYBRID_CLUSTER_INDEX" ]]; then
+    echo "--hybrid-cluster-index requires --hybrid-mode single-cluster" >&2
+    exit 2
+  fi
+elif [[ "$HYBRID_MODE" == "single-cluster" ]]; then
+  if [[ -z "$HYBRID_CLUSTER_INDEX" ]]; then
+    echo "--hybrid-cluster-index is required with --hybrid-mode single-cluster" >&2
+    exit 2
+  fi
+  if ! [[ "$HYBRID_CLUSTER_INDEX" =~ ^[0-9]+$ ]]; then
+    echo "Invalid --hybrid-cluster-index: $HYBRID_CLUSTER_INDEX (expected integer >= 0)" >&2
+    exit 2
+  fi
+  if [[ -n "$HYBRID_PARTITION_INDEX" ]]; then
+    echo "--hybrid-partition-index requires --hybrid-mode single-partition" >&2
+    exit 2
+  fi
 else
   if [[ -n "$HYBRID_PARTITION_INDEX" ]]; then
     echo "--hybrid-partition-index requires --hybrid-mode single-partition" >&2
+    exit 2
+  fi
+  if [[ -n "$HYBRID_CLUSTER_INDEX" ]]; then
+    echo "--hybrid-cluster-index requires --hybrid-mode single-cluster" >&2
     exit 2
   fi
 fi
@@ -308,7 +333,9 @@ compute_generated_compile_bundle_sha() {
          -o -name 'kernel_generated.api.h' \
          -o -name 'kernel_generated.cpu.cpp' \
          -o -name 'kernel_generated.link.cu' \
-         -o -name 'kernel_generated.part*.cu' \) | LC_ALL=C sort)
+         -o -name 'kernel_generated.clusters.tsv' \
+         -o -name 'kernel_generated.part*.cu' \
+         -o -name 'kernel_generated.cluster*.cu' \) | LC_ALL=C sort)
   } | sha256sum | awk '{print $1}'
 }
 
@@ -457,6 +484,7 @@ KERNEL_API="$KERNEL_CU.api.h"
 KERNEL_CPU="$KERNEL_CU.cpu.cpp"
 KERNEL_LINK="$KERNEL_CU.link.cu"
 KERNEL_PARTITIONS="$KERNEL_CU.partitions.tsv"
+KERNEL_CLUSTERS="$KERNEL_CU.clusters.tsv"
 LOG="$OUTDIR/verilator_cuda.log"
 TIME_VERILATOR="$OUTDIR/time_verilator_codegen_sec.txt"
 TIME_NVCC="$OUTDIR/time_nvcc_compile_sec.txt"
@@ -483,13 +511,14 @@ if [[ "$COMPILE_CACHE_ENABLED" -eq 1 ]]; then
   CACHE_GEN_CPU="$CACHE_GEN_CU.cpu.cpp"
   CACHE_GEN_LINK="$CACHE_GEN_CU.link.cu"
   CACHE_GEN_PARTITIONS="$CACHE_GEN_CU.partitions.tsv"
+  CACHE_GEN_CLUSTERS="$CACHE_GEN_CU.clusters.tsv"
   CACHE_GEN_LOG="$ARTIFACT_CACHE_ENTRY/verilator_cuda.log"
   CACHE_GEN_TIME="$ARTIFACT_CACHE_ENTRY/codegen_s.txt"
   if [[ -s "$CACHE_GEN_CU" && -s "$CACHE_GEN_VARS" && -f "$CACHE_GEN_LOG" && -f "$CACHE_GEN_TIME" ]]; then
     echo "[1/4] Reusing cached sim-accel artifacts..."
     cp "$CACHE_GEN_CU" "$KERNEL_CU"
     cp "$CACHE_GEN_VARS" "$KERNEL_VARS"
-    rm -f "$KERNEL_DEPS" "$KERNEL_COMM" "$KERNEL_API" "$KERNEL_CPU" "$KERNEL_LINK" "$KERNEL_PARTITIONS"
+    rm -f "$KERNEL_DEPS" "$KERNEL_COMM" "$KERNEL_API" "$KERNEL_CPU" "$KERNEL_LINK" "$KERNEL_PARTITIONS" "$KERNEL_CLUSTERS"
     if [[ -f "$CACHE_GEN_DEPS" ]]; then
       cp "$CACHE_GEN_DEPS" "$KERNEL_DEPS"
     fi
@@ -508,10 +537,16 @@ if [[ "$COMPILE_CACHE_ENABLED" -eq 1 ]]; then
     if [[ -f "$CACHE_GEN_PARTITIONS" ]]; then
       cp "$CACHE_GEN_PARTITIONS" "$KERNEL_PARTITIONS"
     fi
+    if [[ -f "$CACHE_GEN_CLUSTERS" ]]; then
+      cp "$CACHE_GEN_CLUSTERS" "$KERNEL_CLUSTERS"
+    fi
     rm -f "$KERNEL_CU".part*.cu
+    rm -f "$KERNEL_CU".cluster*.cu
     while IFS= read -r cached_part; do
       cp "$cached_part" "$OUTDIR/$(basename "$cached_part")"
-    done < <(find "$ARTIFACT_CACHE_ENTRY" -maxdepth 1 -type f -name "$(basename "$KERNEL_CU").part*.cu" | LC_ALL=C sort)
+    done < <(find "$ARTIFACT_CACHE_ENTRY" -maxdepth 1 -type f \
+      \( -name "$(basename "$KERNEL_CU").part*.cu" -o -name "$(basename "$KERNEL_CU").cluster*.cu" \) \
+      | LC_ALL=C sort)
     cp "$CACHE_GEN_LOG" "$LOG"
     VERILATOR_COLD_GEN_S="$(cat "$CACHE_GEN_TIME")"
     printf '0.000000\n' > "$TIME_VERILATOR"
@@ -551,9 +586,14 @@ if [[ "$COMPILE_CACHE_ENABLED" -eq 1 ]]; then
     if [[ -f "$KERNEL_PARTITIONS" ]]; then
       cp "$KERNEL_PARTITIONS" "$TMP_ARTIFACT_CACHE_ENTRY/${TOP_MODULE}.sim_accel.kernel.cu.partitions.tsv"
     fi
+    if [[ -f "$KERNEL_CLUSTERS" ]]; then
+      cp "$KERNEL_CLUSTERS" "$TMP_ARTIFACT_CACHE_ENTRY/${TOP_MODULE}.sim_accel.kernel.cu.clusters.tsv"
+    fi
     while IFS= read -r generated_part; do
       cp "$generated_part" "$TMP_ARTIFACT_CACHE_ENTRY/$(basename "$generated_part")"
-    done < <(find "$OUTDIR" -maxdepth 1 -type f -name "$(basename "$KERNEL_CU").part*.cu" | LC_ALL=C sort)
+    done < <(find "$OUTDIR" -maxdepth 1 -type f \
+      \( -name "$(basename "$KERNEL_CU").part*.cu" -o -name "$(basename "$KERNEL_CU").cluster*.cu" \) \
+      | LC_ALL=C sort)
     cp "$LOG" "$TMP_ARTIFACT_CACHE_ENTRY/verilator_cuda.log"
     printf '%s\n' "$VERILATOR_COLD_GEN_S" > "$TMP_ARTIFACT_CACHE_ENTRY/codegen_s.txt"
     {
@@ -914,7 +954,8 @@ static void printUsageAndExit(const char* argv0) {
               << " [--init-mode random|zero|ones|counter] [--init-seed N] [--init-file PATH]"
             << " --nstates N --gpu-reps N --cpu-reps N"
             << " [--state-chunk N] [--block-size N]"
-            << " [--hybrid-mode off|single-partition] [--hybrid-partition-index N]\n";
+            << " [--hybrid-mode off|single-partition|single-cluster]"
+            << " [--hybrid-partition-index N] [--hybrid-cluster-index N]\n";
   std::exit(2);
 }
 
@@ -930,6 +971,8 @@ int main(int argc, char** argv) {
   std::string hybridMode = "off";
   bool hybridPartitionIndexSet = false;
   uint32_t hybridPartitionIndex = 0;
+  bool hybridClusterIndexSet = false;
+  uint32_t hybridClusterIndex = 0;
 
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -978,6 +1021,12 @@ int main(int argc, char** argv) {
       if (!parseU64(argv[++i], &raw) || raw > 0xffffffffULL) printUsageAndExit(argv[0]);
       hybridPartitionIndex = static_cast<uint32_t>(raw);
       hybridPartitionIndexSet = true;
+    } else if (a == "--hybrid-cluster-index") {
+      if (i + 1 >= argc) printUsageAndExit(argv[0]);
+      uint64_t raw = 0;
+      if (!parseU64(argv[++i], &raw) || raw > 0xffffffffULL) printUsageAndExit(argv[0]);
+      hybridClusterIndex = static_cast<uint32_t>(raw);
+      hybridClusterIndexSet = true;
     } else {
       printUsageAndExit(argv[0]);
     }
@@ -988,7 +1037,7 @@ int main(int argc, char** argv) {
     return 2;
   }
   if (nstates == 0 || gpu_reps <= 0 || cpu_reps <= 0) printUsageAndExit(argv[0]);
-  if (hybridMode != "off" && hybridMode != "single-partition") {
+  if (hybridMode != "off" && hybridMode != "single-partition" && hybridMode != "single-cluster") {
     std::cerr << "Invalid --hybrid-mode: " << hybridMode << "\n";
     return 2;
   }
@@ -996,22 +1045,43 @@ int main(int argc, char** argv) {
     std::cerr << "--hybrid-partition-index is required with --hybrid-mode single-partition\n";
     return 2;
   }
-  if (hybridMode == "off" && hybridPartitionIndexSet) {
+  if (hybridMode == "single-cluster" && !hybridClusterIndexSet) {
+    std::cerr << "--hybrid-cluster-index is required with --hybrid-mode single-cluster\n";
+    return 2;
+  }
+  if (hybridMode != "single-partition" && hybridPartitionIndexSet) {
     std::cerr << "--hybrid-partition-index requires --hybrid-mode single-partition\n";
+    return 2;
+  }
+  if (hybridMode != "single-cluster" && hybridClusterIndexSet) {
+    std::cerr << "--hybrid-cluster-index requires --hybrid-mode single-cluster\n";
     return 2;
   }
 
   const uint32_t nvars = sim_accel_eval_var_count();
   const uint32_t partitionCount = sim_accel_eval_partition_count();
+  const uint32_t clusterCount = sim_accel_eval_cluster_count();
   if (hybridMode == "single-partition" && hybridPartitionIndex >= partitionCount) {
     std::cerr << "Invalid --hybrid-partition-index: " << hybridPartitionIndex
               << " (partition_count=" << partitionCount << ")\n";
+    return 2;
+  }
+  if (hybridMode == "single-cluster" && hybridClusterIndex >= clusterCount) {
+    std::cerr << "Invalid --hybrid-cluster-index: " << hybridClusterIndex
+              << " (cluster_count=" << clusterCount << ")\n";
+    return 2;
+  }
+  if (hybridMode == "single-cluster"
+      && sim_accel_eval_cluster_assign_count(hybridClusterIndex) == 0) {
+    std::cerr << "Selected hybrid cluster has no emitted assigns: " << hybridClusterIndex << "\n";
     return 2;
   }
   const std::vector<uint32_t> inputVarIdxs
       = loadCommVarIdxs(sim_accel_eval_input_count, sim_accel_eval_input_var_index);
   const std::vector<uint32_t> outputVarIdxs
       = loadCommVarIdxs(sim_accel_eval_output_count, sim_accel_eval_output_var_index);
+  const std::vector<uint32_t> clusterTopoOrder
+      = loadCommVarIdxs(sim_accel_eval_cluster_topo_count, sim_accel_eval_cluster_topo_index);
   if (stateChunk > nstates) stateChunk = nstates;
   const bool useChunkLayout = (stateChunk > 0 && stateChunk < nstates);
   if (hybridMode != "off" && useChunkLayout) {
@@ -1058,6 +1128,16 @@ int main(int argc, char** argv) {
     hybridWriteVarIdxs = loadPartitionVarIdxs(hybridPartitionIndex,
                                               sim_accel_eval_partition_write_count,
                                               sim_accel_eval_partition_write_var_index);
+    hybridBoundaryInputBytes = logicalBytesPerBatch(hybridReadVarIdxs, widths, nstates);
+    hybridBoundaryOutputBytes = logicalBytesPerBatch(hybridWriteVarIdxs, widths, nstates);
+    hybridActualH2dBytes = bytes;
+    hybridActualD2hBytes = bytes;
+  } else if (hybridMode == "single-cluster") {
+    hybridReadVarIdxs = loadPartitionVarIdxs(hybridClusterIndex, sim_accel_eval_cluster_read_count,
+                                             sim_accel_eval_cluster_read_var_index);
+    hybridWriteVarIdxs = loadPartitionVarIdxs(hybridClusterIndex,
+                                              sim_accel_eval_cluster_write_count,
+                                              sim_accel_eval_cluster_write_var_index);
     hybridBoundaryInputBytes = logicalBytesPerBatch(hybridReadVarIdxs, widths, nstates);
     hybridBoundaryOutputBytes = logicalBytesPerBatch(hybridWriteVarIdxs, widths, nstates);
     hybridActualH2dBytes = bytes;
@@ -1123,6 +1203,14 @@ int main(int argc, char** argv) {
     }
   };
 
+  auto runCpuClusterPass = [&](std::vector<uint32_t>& stateOut) {
+    stateOut = h_in_varmajor;
+    for (uint32_t clusterIdx : clusterTopoOrder) {
+      sim_accel_eval_assignw_cpu_cluster_dispatch(clusterIdx, h_in_varmajor.data(), stateOut.data(),
+                                                  nstates);
+    }
+  };
+
   auto runHybridPartitionPass = [&](std::vector<uint32_t>& stateOut) {
     stateOut = h_in_varmajor;
     for (uint32_t partitionIdx = 0; partitionIdx < partitionCount; ++partitionIdx) {
@@ -1138,6 +1226,24 @@ int main(int argc, char** argv) {
       } else {
         sim_accel_eval_assignw_cpu_partition(partitionIdx, h_in_varmajor.data(), stateOut.data(),
                                              nstates);
+      }
+    }
+  };
+
+  auto runHybridClusterPass = [&](std::vector<uint32_t>& stateOut) {
+    stateOut = h_in_varmajor;
+    for (uint32_t clusterIdx : clusterTopoOrder) {
+      if (clusterIdx == hybridClusterIndex) {
+        checkCuda(cudaMemcpy(d_out, stateOut.data(), bytes, cudaMemcpyHostToDevice),
+                  "H2D hybrid cluster state_out");
+        checkCuda(sim_accel_eval_assignw_launch_cluster(clusterIdx, d_in, d_out, nstates, blockSize),
+                  "launch_cluster hybrid");
+        checkCuda(cudaDeviceSynchronize(), "hybrid cluster sync");
+        checkCuda(cudaMemcpy(stateOut.data(), d_out, bytes, cudaMemcpyDeviceToHost),
+                  "D2H hybrid cluster state_out");
+      } else {
+        sim_accel_eval_assignw_cpu_cluster_dispatch(clusterIdx, h_in_varmajor.data(),
+                                                    stateOut.data(), nstates);
       }
     }
   };
@@ -1205,15 +1311,33 @@ int main(int argc, char** argv) {
     cudaEventDestroy(evStop);
   } else {
     std::vector<uint32_t> hybridWarmup(elems, 0u);
-    for (int i = 0; i < 3; ++i) runHybridPartitionPass(hybridWarmup);
+    for (int i = 0; i < 3; ++i) {
+      if (hybridMode == "single-partition") {
+        runHybridPartitionPass(hybridWarmup);
+      } else {
+        runHybridClusterPass(hybridWarmup);
+      }
+    }
     auto hybrid_t0 = std::chrono::high_resolution_clock::now();
-    for (int i = 0; i < gpu_reps; ++i) runHybridPartitionPass(h_out_hybrid_varmajor);
+    for (int i = 0; i < gpu_reps; ++i) {
+      if (hybridMode == "single-partition") {
+        runHybridPartitionPass(h_out_hybrid_varmajor);
+      } else {
+        runHybridClusterPass(h_out_hybrid_varmajor);
+      }
+    }
     auto hybrid_t1 = std::chrono::high_resolution_clock::now();
     hybrid_ms = std::chrono::duration<double, std::milli>(hybrid_t1 - hybrid_t0).count();
 
     std::vector<uint32_t> h_out_cpu_partition_varmajor(elems, 0u);
     auto hybrid_cpu_t0 = std::chrono::high_resolution_clock::now();
-    for (int i = 0; i < cpu_reps; ++i) runCpuPartitionPass(h_out_cpu_partition_varmajor);
+    for (int i = 0; i < cpu_reps; ++i) {
+      if (hybridMode == "single-partition") {
+        runCpuPartitionPass(h_out_cpu_partition_varmajor);
+      } else {
+        runCpuClusterPass(h_out_cpu_partition_varmajor);
+      }
+    }
     auto hybrid_cpu_t1 = std::chrono::high_resolution_clock::now();
     hybrid_cpu_ms = std::chrono::duration<double, std::milli>(hybrid_cpu_t1 - hybrid_cpu_t0).count();
   }
@@ -1258,6 +1382,7 @@ int main(int argc, char** argv) {
   std::cout << "state_chunk=" << (useChunkLayout ? stateChunk : 0) << "\n";
   std::cout << "block_size=" << blockSize << "\n";
   std::cout << "kernel_partitions=" << partitionCount << "\n";
+  std::cout << "kernel_clusters=" << clusterCount << "\n";
   std::cout << "state_chunks=" << nchunks << "\n";
   std::cout << "padded_states=" << paddedStates << "\n";
   std::cout << "init_mode=" << initMode << "\n";
@@ -1273,7 +1398,7 @@ int main(int argc, char** argv) {
   std::cout << "cpu_ms_per_rep=" << cpu_ms_per_rep << "\n";
   if (hybridMode == "off") {
     std::cout << "speedup_gpu_over_cpu=" << speedup << "x\n";
-  } else {
+  } else if (hybridMode == "single-partition") {
     std::cout << "hybrid_partition_index=" << hybridPartitionIndex << "\n";
     std::cout << "hybrid_partition_assign_count="
               << sim_accel_eval_partition_assign_count(hybridPartitionIndex) << "\n";
@@ -1281,6 +1406,23 @@ int main(int argc, char** argv) {
     std::cout << "hybrid_partition_write_vars=" << hybridWriteVarIdxs.size() << "\n";
     std::cout << "hybrid_partition_input_bytes_per_batch=" << hybridBoundaryInputBytes << "\n";
     std::cout << "hybrid_partition_output_bytes_per_batch=" << hybridBoundaryOutputBytes << "\n";
+    std::cout << "hybrid_actual_h2d_bytes_per_batch=" << hybridActualH2dBytes << "\n";
+    std::cout << "hybrid_actual_d2h_bytes_per_batch=" << hybridActualD2hBytes << "\n";
+    std::cout << "hybrid_gpu_ms_per_rep=" << hybrid_ms_per_rep << "\n";
+    std::cout << "hybrid_cpu_ms_per_rep=" << hybrid_cpu_ms_per_rep << "\n";
+    std::cout << "hybrid_mismatch=" << hybridMismatch << "\n";
+  } else {
+    std::cout << "hybrid_cluster_index=" << hybridClusterIndex << "\n";
+    std::cout << "hybrid_cluster_assign_count="
+              << sim_accel_eval_cluster_assign_count(hybridClusterIndex) << "\n";
+    std::cout << "hybrid_cluster_input_signature_bits="
+              << sim_accel_eval_cluster_input_signature_bits(hybridClusterIndex) << "\n";
+    std::cout << "hybrid_cluster_owner_hint="
+              << sim_accel_eval_cluster_owner_hint(hybridClusterIndex) << "\n";
+    std::cout << "hybrid_cluster_read_vars=" << hybridReadVarIdxs.size() << "\n";
+    std::cout << "hybrid_cluster_write_vars=" << hybridWriteVarIdxs.size() << "\n";
+    std::cout << "hybrid_cluster_input_bytes_per_batch=" << hybridBoundaryInputBytes << "\n";
+    std::cout << "hybrid_cluster_output_bytes_per_batch=" << hybridBoundaryOutputBytes << "\n";
     std::cout << "hybrid_actual_h2d_bytes_per_batch=" << hybridActualH2dBytes << "\n";
     std::cout << "hybrid_actual_d2h_bytes_per_batch=" << hybridActualD2hBytes << "\n";
     std::cout << "hybrid_gpu_ms_per_rep=" << hybrid_ms_per_rep << "\n";
@@ -1345,16 +1487,24 @@ fi
 if [[ -f "$KERNEL_PARTITIONS" ]]; then
   cp "$KERNEL_PARTITIONS" "$OUTDIR/kernel_generated.partitions.tsv"
 fi
+if [[ -f "$KERNEL_CLUSTERS" ]]; then
+  cp "$KERNEL_CLUSTERS" "$OUTDIR/kernel_generated.clusters.tsv"
+fi
 rm -f "$OUTDIR"/kernel_generated.part*.cu
+rm -f "$OUTDIR"/kernel_generated.cluster*.cu
 while IFS= read -r generated_part; do
   cp "$generated_part" "$OUTDIR/kernel_generated.${generated_part##*.kernel.cu.}"
-done < <(find "$OUTDIR" -maxdepth 1 -type f -name "$(basename "$KERNEL_CU").part*.cu" | LC_ALL=C sort)
+done < <(find "$OUTDIR" -maxdepth 1 -type f \
+  \( -name "$(basename "$KERNEL_CU").part*.cu" -o -name "$(basename "$KERNEL_CU").cluster*.cu" \) \
+  | LC_ALL=C sort)
 
 USE_PARTITION_OBJECTS=0
 declare -a PARTITION_SOURCES=()
+declare -a CLUSTER_SOURCES=()
 if [[ -f "$OUTDIR/kernel_generated.api.h" && -f "$OUTDIR/kernel_generated.cpu.cpp" && -f "$OUTDIR/kernel_generated.link.cu" ]]; then
   mapfile -t PARTITION_SOURCES < <(find "$OUTDIR" -maxdepth 1 -type f -name 'kernel_generated.part*.cu' | LC_ALL=C sort)
-  if (( ${#PARTITION_SOURCES[@]} > 0 )); then
+  mapfile -t CLUSTER_SOURCES < <(find "$OUTDIR" -maxdepth 1 -type f -name 'kernel_generated.cluster*.cu' | LC_ALL=C sort)
+  if (( ${#PARTITION_SOURCES[@]} > 0 || ${#CLUSTER_SOURCES[@]} > 0 )); then
     USE_PARTITION_OBJECTS=1
   fi
 fi
@@ -1404,6 +1554,11 @@ if [[ "$COMPILE_CACHE_ENABLED" -eq 1 ]]; then
         build_cached_cxx_object "kernel_generated.cpu.cpp" "$OBJ_DIR/kernel_generated.cpu.o"
         declare -a PARTITION_OBJECTS=()
         for src in "${PARTITION_SOURCES[@]}"; do
+          obj="$OBJ_DIR/$(basename "$src").o"
+          build_cached_cuda_object "$src" "$obj"
+          PARTITION_OBJECTS+=("$obj")
+        done
+        for src in "${CLUSTER_SOURCES[@]}"; do
           obj="$OBJ_DIR/$(basename "$src").o"
           build_cached_cuda_object "$src" "$obj"
           PARTITION_OBJECTS+=("$obj")
@@ -1458,6 +1613,11 @@ else
         build_cached_cuda_object "$src" "$obj"
         PARTITION_OBJECTS+=("$obj")
       done
+      for src in "${CLUSTER_SOURCES[@]}"; do
+        obj="$OBJ_DIR/$(basename "$src").o"
+        build_cached_cuda_object "$src" "$obj"
+        PARTITION_OBJECTS+=("$obj")
+      done
       nvcc -O3 -std=c++17 "$OBJ_DIR/bench_kernel.o" "$OBJ_DIR/kernel_generated.link.o" \
         "$OBJ_DIR/kernel_generated.cpu.o" "${PARTITION_OBJECTS[@]}" -o bench_kernel
     } > build_nvcc.log 2>&1
@@ -1479,8 +1639,10 @@ echo "[4/4] Running benchmark..."
   BENCH_CMD=(./bench_kernel --nstates "$NSTATES" --gpu-reps "$GPU_REPS" --cpu-reps "$CPU_REPS"
              --init-mode "$INIT_MODE" --init-seed "$INIT_SEED"
              --state-chunk "$STATE_CHUNK" --block-size "$BLOCK_SIZE")
-  if [[ "$HYBRID_MODE" != "off" ]]; then
+  if [[ "$HYBRID_MODE" == "single-partition" ]]; then
     BENCH_CMD+=(--hybrid-mode "$HYBRID_MODE" --hybrid-partition-index "$HYBRID_PARTITION_INDEX")
+  elif [[ "$HYBRID_MODE" == "single-cluster" ]]; then
+    BENCH_CMD+=(--hybrid-mode "$HYBRID_MODE" --hybrid-cluster-index "$HYBRID_CLUSTER_INDEX")
   fi
   if [[ -n "$INIT_FILE_ABS" ]]; then
     BENCH_CMD+=(--init-file "$INIT_FILE_ABS")

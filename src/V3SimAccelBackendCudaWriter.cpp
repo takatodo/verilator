@@ -20,6 +20,7 @@
 #include <cctype>
 #include <functional>
 #include <fstream>
+#include <numeric>
 #include <unordered_map>
 #include <sstream>
 #include <unordered_set>
@@ -67,6 +68,19 @@ struct AssignPartition final {
     size_t m_uniqueHierarchyCount = 0;
     string m_canonicalHash;
     size_t m_canonicalVarCount = 0;
+};
+
+struct AssignCluster final {
+    size_t m_clusterIdx = 0;
+    size_t m_topoRank = 0;
+    uint64_t m_inputSignatureBitCount = 0;
+    string m_ownerHint;
+    std::vector<EmittedAssign> m_assigns;
+    std::vector<size_t> m_readVarIdxs;
+    std::vector<size_t> m_writtenVarIdxs;
+    std::unordered_set<size_t> m_writtenBeforeIdxs;
+    string m_dominantHierarchy;
+    size_t m_uniqueHierarchyCount = 0;
 };
 
 std::vector<size_t> toSortedVector(const std::unordered_set<size_t>& in) {
@@ -204,6 +218,71 @@ std::vector<AssignPartition> buildPartitions(const V3SimAccelProgram& program,
     return partitions;
 }
 
+std::vector<AssignCluster> buildClusters(
+    const V3SimAccelProgram& program,
+    const V3SimAccelProgramAnalysis::ApproxRegCutAnalysis& approxRegCut,
+    const std::vector<EmittedAssign>& emittedAssigns,
+    const std::vector<size_t>& programAssignToEmitted) {
+    std::vector<AssignCluster> clusters(approxRegCut.m_clusters.size());
+    for (const V3SimAccelProgramAnalysis::ApproxRegCutCluster& analysisCluster :
+         approxRegCut.m_clusters) {
+        AssignCluster& cluster = clusters.at(analysisCluster.m_clusterIdx);
+        cluster.m_clusterIdx = analysisCluster.m_clusterIdx;
+        cluster.m_topoRank = analysisCluster.m_topoRank;
+        cluster.m_inputSignatureBitCount = analysisCluster.m_inputSignatureBitCount;
+        cluster.m_ownerHint = analysisCluster.m_hybridOwnerHint;
+
+        std::unordered_set<size_t> readVarIdxs;
+        std::unordered_set<size_t> writtenVarIdxs;
+        std::unordered_map<string, size_t> hierarchyCounts;
+        size_t dominantCount = 0;
+        for (const size_t assignIdx : analysisCluster.m_assignIdxs) {
+            if (assignIdx >= programAssignToEmitted.size()) continue;
+            const size_t emittedIdx = programAssignToEmitted.at(assignIdx);
+            if (emittedIdx == static_cast<size_t>(-1) || emittedIdx >= emittedAssigns.size()) continue;
+            const EmittedAssign& assign = emittedAssigns.at(emittedIdx);
+            cluster.m_assigns.push_back(assign);
+            writtenVarIdxs.emplace(assign.m_lhsIdx);
+            for (const size_t rhsIdx : assign.m_rhsIdxs) readVarIdxs.emplace(rhsIdx);
+            const string hierarchy
+                = simAccelPartitionHierarchyLabel(program.m_vars.at(assign.m_lhsIdx));
+            const size_t count = ++hierarchyCounts[hierarchy];
+            if (count > dominantCount
+                || (count == dominantCount
+                    && (cluster.m_dominantHierarchy.empty()
+                        || hierarchy < cluster.m_dominantHierarchy))) {
+                cluster.m_dominantHierarchy = hierarchy;
+                dominantCount = count;
+            }
+        }
+        cluster.m_readVarIdxs = toSortedVector(readVarIdxs);
+        cluster.m_writtenVarIdxs = toSortedVector(writtenVarIdxs);
+        cluster.m_uniqueHierarchyCount = hierarchyCounts.size();
+        if (cluster.m_dominantHierarchy.empty() && !cluster.m_assigns.empty()) {
+            cluster.m_dominantHierarchy
+                = simAccelPartitionHierarchyLabel(program.m_vars.at(cluster.m_assigns.front().m_lhsIdx));
+        }
+    }
+
+    std::unordered_set<size_t> writtenBeforeIdxs;
+    std::vector<size_t> topoOrder = approxRegCut.m_clusterTopoOrder;
+    if (topoOrder.size() != clusters.size()) {
+        topoOrder.resize(clusters.size());
+        std::iota(topoOrder.begin(), topoOrder.end(), 0);
+    }
+    for (size_t topoRank = 0; topoRank < topoOrder.size(); ++topoRank) {
+        const size_t clusterIdx = topoOrder.at(topoRank);
+        if (clusterIdx >= clusters.size()) continue;
+        AssignCluster& cluster = clusters.at(clusterIdx);
+        cluster.m_topoRank = topoRank;
+        cluster.m_writtenBeforeIdxs = writtenBeforeIdxs;
+        for (const size_t writtenIdx : cluster.m_writtenVarIdxs) {
+            writtenBeforeIdxs.emplace(writtenIdx);
+        }
+    }
+    return clusters;
+}
+
 void emitVarLoads(std::ofstream& of, const V3SimAccelProgram& program,
                   const std::vector<size_t>& readVarIdxs,
                   const std::vector<size_t>& writtenVarIdxs,
@@ -327,6 +406,58 @@ void emitPartitionKernel(std::ofstream& of, const V3SimAccelProgram& program,
     of << "}\n\n";
 }
 
+void emitClusterKernel(std::ofstream& of, const V3SimAccelProgram& program,
+                       const AssignCluster& cluster) {
+    of << "extern \"C\" __global__ void sim_accel_eval_assignw_u32_cluster"
+       << cluster.m_clusterIdx << "(const uint32_t* state_in,\n"
+       << "                                                           uint32_t* state_out,\n"
+       << "                                                           uint32_t nstates) {\n"
+       << "    const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;\n"
+       << "    if (tid >= nstates) return;\n";
+    emitVarLoads(of, program, cluster.m_readVarIdxs, cluster.m_writtenVarIdxs,
+                 &cluster.m_writtenBeforeIdxs, "state_in", "state_out");
+    of << "\n";
+    emitAssignStatements(of, cluster.m_assigns);
+    of << "\n";
+    emitPartitionStores(of, program, cluster.m_writtenVarIdxs, "state_out");
+    of << "}\n\n";
+}
+
+void emitClusterCpuHelpers(std::ofstream& of, const V3SimAccelProgram& program,
+                           const std::vector<AssignCluster>& clusters) {
+    for (const AssignCluster& cluster : clusters) {
+        of << "extern \"C\" __host__ void sim_accel_eval_assignw_cpu_cluster"
+           << cluster.m_clusterIdx << "(const uint32_t* state_in,\n"
+           << "                                                          uint32_t* state_out,\n"
+           << "                                                          uint32_t nstates) {\n"
+           << "    for (uint32_t tid = 0; tid < nstates; ++tid) {\n";
+        emitVarLoads(of, program, cluster.m_readVarIdxs, cluster.m_writtenVarIdxs,
+                     &cluster.m_writtenBeforeIdxs, "state_in", "state_out");
+        of << "\n";
+        emitAssignStatements(of, cluster.m_assigns);
+        of << "\n";
+        emitPartitionStores(of, program, cluster.m_writtenVarIdxs, "state_out");
+        of << "    }\n"
+           << "}\n\n";
+    }
+
+    of << "extern \"C\" __host__ void sim_accel_eval_assignw_cpu_cluster_dispatch(uint32_t index,\n"
+       << "                                                                   const uint32_t* state_in,\n"
+       << "                                                                   uint32_t* state_out,\n"
+       << "                                                                   uint32_t nstates) {\n"
+       << "    switch (index) {\n";
+    for (const AssignCluster& cluster : clusters) {
+        of << "    case " << cluster.m_clusterIdx << "U:\n"
+           << "        sim_accel_eval_assignw_cpu_cluster" << cluster.m_clusterIdx
+           << "(state_in, state_out, nstates);\n"
+           << "        return;\n";
+    }
+    of << "    default:\n"
+       << "        return;\n"
+       << "    }\n"
+       << "}\n\n";
+}
+
 void emitPartitionLaunchHelpers(std::ofstream& of, const V3SimAccelProgram& program,
                                 const std::vector<AssignPartition>& partitions) {
     of << "extern \"C\" __host__ uint32_t sim_accel_eval_partition_count() {\n"
@@ -433,6 +564,137 @@ void emitPartitionLaunchHelpers(std::ofstream& of, const V3SimAccelProgram& prog
        << "}\n\n";
 }
 
+void emitClusterLaunchHelpers(std::ofstream& of, const std::vector<AssignCluster>& clusters) {
+    of << "extern \"C\" __host__ uint32_t sim_accel_eval_cluster_count() {\n"
+       << "    return " << clusters.size() << "U;\n"
+       << "}\n\n";
+
+    of << "extern \"C\" __host__ uint32_t sim_accel_eval_cluster_assign_count(uint32_t index) {\n"
+       << "    switch (index) {\n";
+    for (const AssignCluster& cluster : clusters) {
+        of << "    case " << cluster.m_clusterIdx << "U: return " << cluster.m_assigns.size()
+           << "U;\n";
+    }
+    of << "    default: return 0U;\n"
+       << "    }\n"
+       << "}\n\n";
+
+    std::vector<const AssignCluster*> topoOrdered;
+    topoOrdered.reserve(clusters.size());
+    for (const AssignCluster& cluster : clusters) topoOrdered.push_back(&cluster);
+    std::sort(topoOrdered.begin(), topoOrdered.end(),
+              [](const AssignCluster* lhs, const AssignCluster* rhs) {
+                  if (lhs->m_topoRank != rhs->m_topoRank) return lhs->m_topoRank < rhs->m_topoRank;
+                  return lhs->m_clusterIdx < rhs->m_clusterIdx;
+              });
+
+    of << "extern \"C\" __host__ uint32_t sim_accel_eval_cluster_topo_count() {\n"
+       << "    return " << topoOrdered.size() << "U;\n"
+       << "}\n\n";
+
+    of << "extern \"C\" __host__ uint32_t sim_accel_eval_cluster_topo_index(uint32_t slot) {\n"
+       << "    switch (slot) {\n";
+    for (size_t slot = 0; slot < topoOrdered.size(); ++slot) {
+        of << "    case " << slot << "U: return " << topoOrdered.at(slot)->m_clusterIdx << "U;\n";
+    }
+    of << "    default: return 0xffffffffU;\n"
+       << "    }\n"
+       << "}\n\n";
+
+    of << "extern \"C\" __host__ uint64_t sim_accel_eval_cluster_input_signature_bits(uint32_t index) {\n"
+       << "    switch (index) {\n";
+    for (const AssignCluster& cluster : clusters) {
+        of << "    case " << cluster.m_clusterIdx << "U: return "
+           << cluster.m_inputSignatureBitCount << "ULL;\n";
+    }
+    of << "    default: return 0ULL;\n"
+       << "    }\n"
+       << "}\n\n";
+
+    of << "extern \"C\" __host__ const char* sim_accel_eval_cluster_owner_hint(uint32_t index) {\n"
+       << "    switch (index) {\n";
+    for (const AssignCluster& cluster : clusters) {
+        of << "    case " << cluster.m_clusterIdx << "U: return \""
+           << simAccelEscapeCString(cluster.m_ownerHint) << "\";\n";
+    }
+    of << "    default: return \"\";\n"
+       << "    }\n"
+       << "}\n\n";
+
+    of << "extern \"C\" __host__ uint32_t sim_accel_eval_cluster_read_count(uint32_t index) {\n"
+       << "    switch (index) {\n";
+    for (const AssignCluster& cluster : clusters) {
+        of << "    case " << cluster.m_clusterIdx << "U: return " << cluster.m_readVarIdxs.size()
+           << "U;\n";
+    }
+    of << "    default: return 0U;\n"
+       << "    }\n"
+       << "}\n\n";
+
+    of << "extern \"C\" __host__ uint32_t sim_accel_eval_cluster_read_var_index(uint32_t index,\n"
+       << "                                                             uint32_t slot) {\n"
+       << "    switch (index) {\n";
+    for (const AssignCluster& cluster : clusters) {
+        of << "    case " << cluster.m_clusterIdx << "U:\n"
+           << "        switch (slot) {\n";
+        for (size_t slot = 0; slot < cluster.m_readVarIdxs.size(); ++slot) {
+            of << "        case " << slot << "U: return " << cluster.m_readVarIdxs.at(slot)
+               << "U;\n";
+        }
+        of << "        default: return 0xffffffffU;\n"
+           << "        }\n";
+    }
+    of << "    default: return 0xffffffffU;\n"
+       << "    }\n"
+       << "}\n\n";
+
+    of << "extern \"C\" __host__ uint32_t sim_accel_eval_cluster_write_count(uint32_t index) {\n"
+       << "    switch (index) {\n";
+    for (const AssignCluster& cluster : clusters) {
+        of << "    case " << cluster.m_clusterIdx << "U: return "
+           << cluster.m_writtenVarIdxs.size() << "U;\n";
+    }
+    of << "    default: return 0U;\n"
+       << "    }\n"
+       << "}\n\n";
+
+    of << "extern \"C\" __host__ uint32_t sim_accel_eval_cluster_write_var_index(uint32_t index,\n"
+       << "                                                              uint32_t slot) {\n"
+       << "    switch (index) {\n";
+    for (const AssignCluster& cluster : clusters) {
+        of << "    case " << cluster.m_clusterIdx << "U:\n"
+           << "        switch (slot) {\n";
+        for (size_t slot = 0; slot < cluster.m_writtenVarIdxs.size(); ++slot) {
+            of << "        case " << slot << "U: return "
+               << cluster.m_writtenVarIdxs.at(slot) << "U;\n";
+        }
+        of << "        default: return 0xffffffffU;\n"
+           << "        }\n";
+    }
+    of << "    default: return 0xffffffffU;\n"
+       << "    }\n"
+       << "}\n\n";
+
+    of << "extern \"C\" __host__ cudaError_t sim_accel_eval_assignw_launch_cluster(uint32_t index,\n"
+       << "                                                               const uint32_t* state_in,\n"
+       << "                                                               uint32_t* state_out,\n"
+       << "                                                               uint32_t nstates,\n"
+       << "                                                               uint32_t block_size) {\n"
+       << "    const uint32_t block = block_size ? block_size : 256U;\n"
+       << "    const uint32_t grid = (nstates + block - 1U) / block;\n"
+       << "    switch (index) {\n";
+    for (const AssignCluster& cluster : clusters) {
+        of << "    case " << cluster.m_clusterIdx << "U:\n"
+           << "        sim_accel_eval_assignw_u32_cluster" << cluster.m_clusterIdx
+           << "<<<grid, block>>>(state_in, state_out, nstates);\n"
+           << "        return cudaGetLastError();\n";
+    }
+    of << "    default:\n"
+       << "        return cudaErrorInvalidValue;\n"
+       << "    }\n"
+       << "}\n\n";
+}
+
 void emitPartitionForwardDecls(std::ofstream& of, size_t partitionCount) {
     for (size_t i = 0; i < partitionCount; ++i) {
         of << "extern \"C\" __global__ void sim_accel_eval_assignw_u32_part" << i
@@ -441,6 +703,16 @@ void emitPartitionForwardDecls(std::ofstream& of, size_t partitionCount) {
            << "                                                        uint32_t nstates);\n";
     }
     if (partitionCount) of << "\n";
+}
+
+void emitClusterForwardDecls(std::ofstream& of, const std::vector<AssignCluster>& clusters) {
+    for (const AssignCluster& cluster : clusters) {
+        of << "extern \"C\" __global__ void sim_accel_eval_assignw_u32_cluster"
+           << cluster.m_clusterIdx << "(const uint32_t* state_in,\n"
+           << "                                                           uint32_t* state_out,\n"
+           << "                                                           uint32_t nstates);\n";
+    }
+    if (!clusters.empty()) of << "\n";
 }
 
 void emitProgramMetadataHelpers(std::ofstream& of, const V3SimAccelProgram& program) {
@@ -485,7 +757,8 @@ void emitProgramMetadataHelpers(std::ofstream& of, const V3SimAccelProgram& prog
        << "}\n";
 }
 
-void emitApiHeader(const string& filename, const std::vector<AssignPartition>& partitions) {
+void emitApiHeader(const string& filename, const std::vector<AssignPartition>& partitions,
+                   const std::vector<AssignCluster>& clusters) {
     std::ofstream of{filename};
     if (!of.is_open()) v3fatal("Cannot open output file: " + filename);  // LCOV_EXCL_LINE
     of << "// Generated by Verilator --sim-accel-only\n"
@@ -499,11 +772,20 @@ void emitApiHeader(const string& filename, const std::vector<AssignPartition>& p
        << "                                                        const uint32_t* state_in,\n"
        << "                                                        uint32_t* state_out,\n"
        << "                                                        uint32_t nstates);\n"
+       << "extern \"C\" void sim_accel_eval_assignw_cpu_cluster_dispatch(uint32_t index,\n"
+       << "                                                               const uint32_t* state_in,\n"
+       << "                                                               uint32_t* state_out,\n"
+       << "                                                               uint32_t nstates);\n"
        << "extern \"C\" cudaError_t sim_accel_eval_assignw_launch_partition(uint32_t index,\n"
        << "                                                                 const uint32_t* state_in,\n"
        << "                                                                 uint32_t* state_out,\n"
        << "                                                                 uint32_t nstates,\n"
        << "                                                                 uint32_t block_size);\n"
+       << "extern \"C\" cudaError_t sim_accel_eval_assignw_launch_cluster(uint32_t index,\n"
+       << "                                                               const uint32_t* state_in,\n"
+       << "                                                               uint32_t* state_out,\n"
+       << "                                                               uint32_t nstates,\n"
+       << "                                                               uint32_t block_size);\n"
        << "extern \"C\" cudaError_t sim_accel_eval_assignw_launch_all(const uint32_t* state_in,\n"
        << "                                                           uint32_t* state_out,\n"
        << "                                                           uint32_t nstates,\n"
@@ -516,6 +798,18 @@ void emitApiHeader(const string& filename, const std::vector<AssignPartition>& p
        << "extern \"C\" uint32_t sim_accel_eval_partition_write_count(uint32_t index);\n"
        << "extern \"C\" uint32_t sim_accel_eval_partition_write_var_index(uint32_t index,\n"
        << "                                                               uint32_t slot);\n"
+       << "extern \"C\" uint32_t sim_accel_eval_cluster_count();\n"
+       << "extern \"C\" uint32_t sim_accel_eval_cluster_assign_count(uint32_t index);\n"
+       << "extern \"C\" uint32_t sim_accel_eval_cluster_topo_count();\n"
+       << "extern \"C\" uint32_t sim_accel_eval_cluster_topo_index(uint32_t slot);\n"
+       << "extern \"C\" uint64_t sim_accel_eval_cluster_input_signature_bits(uint32_t index);\n"
+       << "extern \"C\" const char* sim_accel_eval_cluster_owner_hint(uint32_t index);\n"
+       << "extern \"C\" uint32_t sim_accel_eval_cluster_read_count(uint32_t index);\n"
+       << "extern \"C\" uint32_t sim_accel_eval_cluster_read_var_index(uint32_t index,\n"
+       << "                                                            uint32_t slot);\n"
+       << "extern \"C\" uint32_t sim_accel_eval_cluster_write_count(uint32_t index);\n"
+       << "extern \"C\" uint32_t sim_accel_eval_cluster_write_var_index(uint32_t index,\n"
+       << "                                                             uint32_t slot);\n"
        << "extern \"C\" uint32_t sim_accel_eval_var_count();\n"
        << "extern \"C\" const char* sim_accel_eval_var_name(uint32_t index);\n"
        << "extern \"C\" uint32_t sim_accel_eval_input_count();\n"
@@ -523,14 +817,16 @@ void emitApiHeader(const string& filename, const std::vector<AssignPartition>& p
        << "extern \"C\" uint32_t sim_accel_eval_output_count();\n"
        << "extern \"C\" uint32_t sim_accel_eval_output_var_index(uint32_t slot);\n";
     emitPartitionForwardDecls(of, partitions.size());
+    emitClusterForwardDecls(of, clusters);
 }
 
 void emitPartitionedAuxFiles(const string& filename, const V3SimAccelProgram& program,
                              const std::vector<EmittedAssign>& emittedAssigns,
                              const std::unordered_set<size_t>& readVarIdxs,
                              const std::unordered_set<size_t>& writtenVarIdxs,
-                             const std::vector<AssignPartition>& partitions) {
-    emitApiHeader(filename + ".api.h", partitions);
+                             const std::vector<AssignPartition>& partitions,
+                             const std::vector<AssignCluster>& clusters) {
+    emitApiHeader(filename + ".api.h", partitions, clusters);
 
     {
         std::ofstream cpu{filename + ".cpu.cpp"};
@@ -542,6 +838,7 @@ void emitPartitionedAuxFiles(const string& filename, const V3SimAccelProgram& pr
             << "#endif\n\n";
         emitCpuReference(cpu, program, emittedAssigns, readVarIdxs, writtenVarIdxs);
         emitPartitionCpuHelpers(cpu, program, partitions);
+        emitClusterCpuHelpers(cpu, program, clusters);
     }
 
     {
@@ -551,7 +848,9 @@ void emitPartitionedAuxFiles(const string& filename, const V3SimAccelProgram& pr
              << "#include <cuda_runtime.h>\n"
              << "#include <stdint.h>\n\n";
         emitPartitionForwardDecls(link, partitions.size());
+        emitClusterForwardDecls(link, clusters);
         emitPartitionLaunchHelpers(link, program, partitions);
+        emitClusterLaunchHelpers(link, clusters);
         emitProgramMetadataHelpers(link, program);
     }
 
@@ -577,6 +876,23 @@ void emitPartitionedAuxFiles(const string& filename, const V3SimAccelProgram& pr
         }
     }
 
+    {
+        std::ofstream clusterMeta{filename + ".clusters.tsv"};
+        if (clusterMeta.is_open()) {
+            clusterMeta << "index\ttopo_rank\tassign_count\tread_var_count\twritten_var_count"
+                           "\tinput_signature_bits\towner_hint\tdominant_hierarchy"
+                           "\tunique_hierarchy_count\n";
+            for (const AssignCluster& cluster : clusters) {
+                clusterMeta << cluster.m_clusterIdx << '\t' << cluster.m_topoRank << '\t'
+                            << cluster.m_assigns.size() << '\t' << cluster.m_readVarIdxs.size()
+                            << '\t' << cluster.m_writtenVarIdxs.size() << '\t'
+                            << cluster.m_inputSignatureBitCount << '\t' << cluster.m_ownerHint
+                            << '\t' << cluster.m_dominantHierarchy << '\t'
+                            << cluster.m_uniqueHierarchyCount << '\n';
+            }
+        }
+    }
+
     for (size_t partitionIdx = 0; partitionIdx < partitions.size(); ++partitionIdx) {
         std::ofstream part{filename + ".part" + cvtToStr(partitionIdx) + ".cu"};
         if (!part.is_open()) {
@@ -588,13 +904,26 @@ void emitPartitionedAuxFiles(const string& filename, const V3SimAccelProgram& pr
              << "#include <stdint.h>\n\n";
         emitPartitionKernel(part, program, partitions.at(partitionIdx), partitionIdx);
     }
+
+    for (const AssignCluster& cluster : clusters) {
+        std::ofstream clusterOf{filename + ".cluster" + cvtToStr(cluster.m_clusterIdx) + ".cu"};
+        if (!clusterOf.is_open()) {
+            v3fatal("Cannot open output file: "
+                    + filename + ".cluster" + cvtToStr(cluster.m_clusterIdx) + ".cu");
+        }
+        clusterOf << "// Generated by Verilator --sim-accel-only\n"
+                  << "#include <cuda_runtime.h>\n"
+                  << "#include <stdint.h>\n\n";
+        emitClusterKernel(clusterOf, program, cluster);
+    }
 }
 
 }  // namespace
 
-size_t V3SimAccelBackendCudaWriter::write(const string& filename,
-                                          const V3SimAccelProgram& program,
-                                          size_t assignsPerKernel) {
+size_t V3SimAccelBackendCudaWriter::write(
+    const string& filename, const V3SimAccelProgram& program,
+    const V3SimAccelProgramAnalysis::ApproxRegCutAnalysis& approxRegCut,
+    size_t assignsPerKernel) {
     std::ofstream of{filename};
     if (!of.is_open()) v3fatal("Cannot open output file: " + filename);  // LCOV_EXCL_LINE
 
@@ -606,10 +935,12 @@ size_t V3SimAccelBackendCudaWriter::write(const string& filename,
     const V3SimAccelBackendCudaExprEmitter emitter{program};
     std::unordered_set<string> emittedAssignKeys;
     std::vector<EmittedAssign> emittedAssigns;
+    std::vector<size_t> programAssignToEmitted(program.m_assigns.size(), static_cast<size_t>(-1));
     std::unordered_set<size_t> writtenVarIdxs;
     std::unordered_set<size_t> readVarIdxs;
 
-    for (const V3SimAccelProgram::Assign& assign : program.m_assigns) {
+    for (size_t assignIdx = 0; assignIdx < program.m_assigns.size(); ++assignIdx) {
+        const V3SimAccelProgram::Assign& assign = program.m_assigns.at(assignIdx);
         const string expr = emitter.emit(assign.m_exprIdx);
         if (expr == ("v_" + cvtToStr(assign.m_lhsIdx))) continue;
         const string key = cvtToStr(assign.m_lhsIdx) + "|" + expr;
@@ -622,22 +953,28 @@ size_t V3SimAccelBackendCudaWriter::write(const string& filename,
         rec.m_rhsIdxs = assign.m_rhsIdxs;
         for (const size_t rhsIdx : rec.m_rhsIdxs) readVarIdxs.emplace(rhsIdx);
         writtenVarIdxs.emplace(rec.m_lhsIdx);
+        programAssignToEmitted.at(assignIdx) = emittedAssigns.size();
         emittedAssigns.push_back(std::move(rec));
     }
 
     const std::vector<AssignPartition> partitions = buildPartitions(program, emittedAssigns,
                                                                     assignsPerKernel);
+    const std::vector<AssignCluster> clusters
+        = buildClusters(program, approxRegCut, emittedAssigns, programAssignToEmitted);
     emitCpuReference(of, program, emittedAssigns, readVarIdxs, writtenVarIdxs);
     emitPartitionCpuHelpers(of, program, partitions);
+    emitClusterCpuHelpers(of, program, clusters);
     for (size_t partitionIdx = 0; partitionIdx < partitions.size(); ++partitionIdx) {
         emitPartitionKernel(of, program, partitions.at(partitionIdx), partitionIdx);
     }
+    for (const AssignCluster& cluster : clusters) emitClusterKernel(of, program, cluster);
     emitPartitionLaunchHelpers(of, program, partitions);
+    emitClusterLaunchHelpers(of, clusters);
     emitProgramMetadataHelpers(of, program);
     of.close();
 
     emitPartitionedAuxFiles(filename, program, emittedAssigns, readVarIdxs, writtenVarIdxs,
-                            partitions);
+                            partitions, clusters);
 
     const string metaFilename = filename + ".vars.tsv";
     std::ofstream met{metaFilename};
