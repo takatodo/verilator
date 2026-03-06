@@ -447,7 +447,7 @@ detailed descriptions of these arguments.
     --sim-accel-output <filename>  Set sim-accel output filename (.sim_accel.kernel.cu)
     --sim-accel-sidecar         Emit sim-accel output alongside normal --cc/--sc output
     --sim-accel-sidecar-output <filename>  Set sidecar sim-accel output filename
-    --sim-accel-split-modules   Split sim-accel kernels by elaborated module
+    --sim-accel-split-modules   Experimental; currently parsed but not yet implemented
     --sim-accel-backend <name>  Select sim-accel backend (currently: cuda)
     --sim-accel-strategy <name> Select sim-accel strategy (currently: gem)
     --sim-accel-ir-only         Create sim-accel IR output (.sim_accel.tree.json)

@@ -654,10 +654,15 @@ static void process() {
         V3EmitGem::emitGemCuda();
     } else if (v3Global.opt.gemIrOnly()) {
         V3EmitGem::emitGemIr();
-    } else if (v3Global.opt.debugCheck() && !v3Global.opt.lintOnly()
-               && !v3Global.opt.dpiHdrOnly()) {
+    } else {
+        if (v3Global.opt.simAccelSidecar() && !v3Global.opt.lintOnly()
+            && !v3Global.opt.dpiHdrOnly()) {
+            V3EmitGem::emitGemCuda();
+        }
+        if (v3Global.opt.debugCheck() && !v3Global.opt.lintOnly() && !v3Global.opt.dpiHdrOnly()) {
         // Check JSON when debugging to make sure no missing node types
-        emitJson();
+            emitJson();
+        }
     }
 
     // Output DPI protected library files

@@ -20,6 +20,7 @@
 #include "V3Global.h"
 #include "V3Options.h"
 
+#include <algorithm>
 #include <cctype>
 #include <fstream>
 #include <iomanip>
@@ -31,7 +32,7 @@
 void V3EmitGem::emitGemIr() VL_MT_DISABLED {
     const string filename = (v3Global.opt.gemIrOutput().empty()
                                  ? v3Global.opt.makeDir() + "/" + v3Global.opt.prefix()
-                                       + ".gem.tree.json"
+                                       + ".sim_accel.tree.json"
                                  : v3Global.opt.gemIrOutput());
     v3Global.rootp()->dumpTreeJsonFile(filename);
 }
@@ -143,6 +144,52 @@ private:
         if (const AstXor* const xorp = VN_CAST(nodep, Xor)) {
             return isSupportedExpr(xorp->lhsp()) && isSupportedExpr(xorp->rhsp());
         }
+        if (const AstLogAnd* const andp = VN_CAST(nodep, LogAnd)) {
+            return isSupportedExpr(andp->lhsp()) && isSupportedExpr(andp->rhsp());
+        }
+        if (const AstLogOr* const orp = VN_CAST(nodep, LogOr)) {
+            return isSupportedExpr(orp->lhsp()) && isSupportedExpr(orp->rhsp());
+        }
+        if (const AstLogNot* const notp = VN_CAST(nodep, LogNot)) {
+            return isSupportedExpr(notp->lhsp());
+        }
+        if (const AstAdd* const addp = VN_CAST(nodep, Add)) {
+            return isSupportedExpr(addp->lhsp()) && isSupportedExpr(addp->rhsp());
+        }
+        if (const AstSub* const subp = VN_CAST(nodep, Sub)) {
+            return isSupportedExpr(subp->lhsp()) && isSupportedExpr(subp->rhsp());
+        }
+        if (const AstEq* const eqp = VN_CAST(nodep, Eq)) {
+            return isSupportedExpr(eqp->lhsp()) && isSupportedExpr(eqp->rhsp());
+        }
+        if (const AstNeq* const neqp = VN_CAST(nodep, Neq)) {
+            return isSupportedExpr(neqp->lhsp()) && isSupportedExpr(neqp->rhsp());
+        }
+        if (const AstCond* const condp = VN_CAST(nodep, Cond)) {
+            return isSupportedExpr(condp->condp()) && isSupportedExpr(condp->thenp())
+                   && isSupportedExpr(condp->elsep());
+        }
+        if (const AstConcat* const concatp = VN_CAST(nodep, Concat)) {
+            return isSupportedExpr(concatp->lhsp()) && isSupportedExpr(concatp->rhsp())
+                   && concatp->lhsp()->widthMin() > 0 && concatp->rhsp()->widthMin() > 0
+                   && concatp->rhsp()->widthMin() < 32;
+        }
+        if (const AstSel* const selp = VN_CAST(nodep, Sel)) {
+            return isSupportedExpr(selp->fromp()) && isSupportedExpr(selp->lsbp())
+                   && selp->widthConst() > 0 && selp->widthConst() <= 32;
+        }
+        if (const AstShiftL* const shlp = VN_CAST(nodep, ShiftL)) {
+            return isSupportedExpr(shlp->lhsp()) && isSupportedExpr(shlp->rhsp());
+        }
+        if (const AstShiftLOvr* const shlp = VN_CAST(nodep, ShiftLOvr)) {
+            return isSupportedExpr(shlp->lhsp()) && isSupportedExpr(shlp->rhsp());
+        }
+        if (const AstShiftR* const shrp = VN_CAST(nodep, ShiftR)) {
+            return isSupportedExpr(shrp->lhsp()) && isSupportedExpr(shrp->rhsp());
+        }
+        if (const AstShiftROvr* const shrp = VN_CAST(nodep, ShiftROvr)) {
+            return isSupportedExpr(shrp->lhsp()) && isSupportedExpr(shrp->rhsp());
+        }
         if (const AstNot* const notp = VN_CAST(nodep, Not)) return isSupportedExpr(notp->lhsp());
         if (const AstCCast* const castp = VN_CAST(nodep, CCast)) {
             return isSupportedExpr(castp->lhsp());
@@ -179,6 +226,76 @@ private:
         if (const AstXor* const xorp = VN_CAST(nodep, Xor)) {
             collectExprVars(xorp->lhsp(), currentRhsVars);
             collectExprVars(xorp->rhsp(), currentRhsVars);
+            return;
+        }
+        if (const AstLogAnd* const andp = VN_CAST(nodep, LogAnd)) {
+            collectExprVars(andp->lhsp(), currentRhsVars);
+            collectExprVars(andp->rhsp(), currentRhsVars);
+            return;
+        }
+        if (const AstLogOr* const orp = VN_CAST(nodep, LogOr)) {
+            collectExprVars(orp->lhsp(), currentRhsVars);
+            collectExprVars(orp->rhsp(), currentRhsVars);
+            return;
+        }
+        if (const AstLogNot* const notp = VN_CAST(nodep, LogNot)) {
+            collectExprVars(notp->lhsp(), currentRhsVars);
+            return;
+        }
+        if (const AstAdd* const addp = VN_CAST(nodep, Add)) {
+            collectExprVars(addp->lhsp(), currentRhsVars);
+            collectExprVars(addp->rhsp(), currentRhsVars);
+            return;
+        }
+        if (const AstSub* const subp = VN_CAST(nodep, Sub)) {
+            collectExprVars(subp->lhsp(), currentRhsVars);
+            collectExprVars(subp->rhsp(), currentRhsVars);
+            return;
+        }
+        if (const AstEq* const eqp = VN_CAST(nodep, Eq)) {
+            collectExprVars(eqp->lhsp(), currentRhsVars);
+            collectExprVars(eqp->rhsp(), currentRhsVars);
+            return;
+        }
+        if (const AstNeq* const neqp = VN_CAST(nodep, Neq)) {
+            collectExprVars(neqp->lhsp(), currentRhsVars);
+            collectExprVars(neqp->rhsp(), currentRhsVars);
+            return;
+        }
+        if (const AstCond* const condp = VN_CAST(nodep, Cond)) {
+            collectExprVars(condp->condp(), currentRhsVars);
+            collectExprVars(condp->thenp(), currentRhsVars);
+            collectExprVars(condp->elsep(), currentRhsVars);
+            return;
+        }
+        if (const AstConcat* const concatp = VN_CAST(nodep, Concat)) {
+            collectExprVars(concatp->lhsp(), currentRhsVars);
+            collectExprVars(concatp->rhsp(), currentRhsVars);
+            return;
+        }
+        if (const AstSel* const selp = VN_CAST(nodep, Sel)) {
+            collectExprVars(selp->fromp(), currentRhsVars);
+            collectExprVars(selp->lsbp(), currentRhsVars);
+            return;
+        }
+        if (const AstShiftL* const shlp = VN_CAST(nodep, ShiftL)) {
+            collectExprVars(shlp->lhsp(), currentRhsVars);
+            collectExprVars(shlp->rhsp(), currentRhsVars);
+            return;
+        }
+        if (const AstShiftLOvr* const shlp = VN_CAST(nodep, ShiftLOvr)) {
+            collectExprVars(shlp->lhsp(), currentRhsVars);
+            collectExprVars(shlp->rhsp(), currentRhsVars);
+            return;
+        }
+        if (const AstShiftR* const shrp = VN_CAST(nodep, ShiftR)) {
+            collectExprVars(shrp->lhsp(), currentRhsVars);
+            collectExprVars(shrp->rhsp(), currentRhsVars);
+            return;
+        }
+        if (const AstShiftROvr* const shrp = VN_CAST(nodep, ShiftROvr)) {
+            collectExprVars(shrp->lhsp(), currentRhsVars);
+            collectExprVars(shrp->rhsp(), currentRhsVars);
             return;
         }
         if (const AstNot* const notp = VN_CAST(nodep, Not)) {
@@ -225,7 +342,17 @@ public:
         }
         std::unordered_set<const AstVar*> rhsVars;
         collectExprVars(nodep->rhsp(), rhsVars);
-        m_assigns.push_back({lhsVarp, nodep->rhsp(), std::vector<const AstVar*>(rhsVars.begin(), rhsVars.end())});
+        std::vector<const AstVar*> rhsVarsVec{rhsVars.begin(), rhsVars.end()};
+        std::sort(rhsVarsVec.begin(), rhsVarsVec.end(),
+                  [this](const AstVar* a, const AstVar* b) {
+                      const auto ita = m_varToIndex.find(a);
+                      const auto itb = m_varToIndex.find(b);
+                      if (ita != m_varToIndex.end() && itb != m_varToIndex.end()) {
+                          return ita->second < itb->second;
+                      }
+                      return a->name() < b->name();
+                  });
+        m_assigns.push_back({lhsVarp, nodep->rhsp(), std::move(rhsVarsVec)});
     }
 
     const std::vector<AssignRec>& assigns() const { return m_assigns; }
@@ -270,6 +397,67 @@ public:
         if (const AstXor* const xorp = VN_CAST(nodep, Xor)) {
             return maskWrap(emit(xorp->lhsp()) + " ^ " + emit(xorp->rhsp()), nodep->widthMin());
         }
+        if (const AstLogAnd* const andp = VN_CAST(nodep, LogAnd)) {
+            return "(((" + emit(andp->lhsp()) + ") != 0u && (" + emit(andp->rhsp())
+                   + ") != 0u) ? 1u : 0u)";
+        }
+        if (const AstLogOr* const orp = VN_CAST(nodep, LogOr)) {
+            return "(((" + emit(orp->lhsp()) + ") != 0u || (" + emit(orp->rhsp())
+                   + ") != 0u) ? 1u : 0u)";
+        }
+        if (const AstLogNot* const notp = VN_CAST(nodep, LogNot)) {
+            return "(((" + emit(notp->lhsp()) + ") == 0u) ? 1u : 0u)";
+        }
+        if (const AstAdd* const addp = VN_CAST(nodep, Add)) {
+            return maskWrap(emit(addp->lhsp()) + " + " + emit(addp->rhsp()), nodep->widthMin());
+        }
+        if (const AstSub* const subp = VN_CAST(nodep, Sub)) {
+            return maskWrap(emit(subp->lhsp()) + " - " + emit(subp->rhsp()), nodep->widthMin());
+        }
+        if (const AstEq* const eqp = VN_CAST(nodep, Eq)) {
+            return "(((" + emit(eqp->lhsp()) + ") == (" + emit(eqp->rhsp()) + ")) ? 1u : 0u)";
+        }
+        if (const AstNeq* const neqp = VN_CAST(nodep, Neq)) {
+            return "(((" + emit(neqp->lhsp()) + ") != (" + emit(neqp->rhsp()) + ")) ? 1u : 0u)";
+        }
+        if (const AstCond* const condp = VN_CAST(nodep, Cond)) {
+            return maskWrap("((" + emit(condp->condp()) + ") ? (" + emit(condp->thenp()) + ") : ("
+                                + emit(condp->elsep()) + "))",
+                            nodep->widthMin());
+        }
+        if (const AstConcat* const concatp = VN_CAST(nodep, Concat)) {
+            const int rhsWidth = concatp->rhsp()->widthMin();
+            const string rhsMask = gemCudaMaskLiteral(rhsWidth);
+            return maskWrap("((" + emit(concatp->lhsp()) + " << " + cvtToStr(rhsWidth) + ") | (("
+                                + emit(concatp->rhsp()) + ") & " + rhsMask + "))",
+                            nodep->widthMin());
+        }
+        if (const AstSel* const selp = VN_CAST(nodep, Sel)) {
+            const string wmask = gemCudaMaskLiteral(selp->widthConst());
+            const string lsb = emit(selp->lsbp());
+            return maskWrap("((" + emit(selp->fromp()) + " >> (" + lsb + " & 31u)) & " + wmask + ")",
+                            nodep->widthMin());
+        }
+        if (const AstShiftL* const shlp = VN_CAST(nodep, ShiftL)) {
+            const string sh = emit(shlp->rhsp());
+            return maskWrap("((" + sh + " >= 32u) ? 0u : (" + emit(shlp->lhsp()) + " << (" + sh + " & 31u)))",
+                            nodep->widthMin());
+        }
+        if (const AstShiftLOvr* const shlp = VN_CAST(nodep, ShiftLOvr)) {
+            const string sh = emit(shlp->rhsp());
+            return maskWrap("((" + sh + " >= 32u) ? 0u : (" + emit(shlp->lhsp()) + " << (" + sh + " & 31u)))",
+                            nodep->widthMin());
+        }
+        if (const AstShiftR* const shrp = VN_CAST(nodep, ShiftR)) {
+            const string sh = emit(shrp->rhsp());
+            return maskWrap("((" + sh + " >= 32u) ? 0u : (" + emit(shrp->lhsp()) + " >> (" + sh + " & 31u)))",
+                            nodep->widthMin());
+        }
+        if (const AstShiftROvr* const shrp = VN_CAST(nodep, ShiftROvr)) {
+            const string sh = emit(shrp->rhsp());
+            return maskWrap("((" + sh + " >= 32u) ? 0u : (" + emit(shrp->lhsp()) + " >> (" + sh + " & 31u)))",
+                            nodep->widthMin());
+        }
         if (const AstNot* const notp = VN_CAST(nodep, Not)) {
             return maskWrap("~" + emit(notp->lhsp()), nodep->widthMin());
         }
@@ -282,7 +470,7 @@ public:
         if (const AstExtendS* const extp = VN_CAST(nodep, ExtendS)) {
             return maskWrap(emit(extp->lhsp()), nodep->widthMin());
         }
-        nodep->v3fatalSrc("Unsupported node for --gem-cuda-only: " << nodep->typeName());
+        nodep->v3fatalSrc("Unsupported node for --sim-accel-only: " << nodep->typeName());
         VL_UNREACHABLE;
     }
 };
@@ -292,13 +480,17 @@ public:
 void V3EmitGem::emitGemCuda() VL_MT_DISABLED {
     const string filename = (v3Global.opt.gemCudaOutput().empty()
                                  ? v3Global.opt.makeDir() + "/" + v3Global.opt.prefix()
-                                       + ".gem.kernel.cu"
+                                       + ".sim_accel.kernel.cu"
                                  : v3Global.opt.gemCudaOutput());
+    if (v3Global.opt.simAccelSplitModules()) {
+        v3fatal("--sim-accel-split-modules is not implemented yet");  // LCOV_EXCL_LINE
+    }
 
     const GemCudaCollector collector{v3Global.rootp()};
     if (collector.assigns().empty()) {
-        v3fatal("No supported ASSIGNW nodes found for --gem-cuda-only "  // LCOV_EXCL_LINE
-                "(supported expr ops: VARREF/CONST/AND/OR/XOR/NOT plus CCAST/EXTEND wrappers)");
+        v3fatal("No supported ASSIGNW nodes found for --sim-accel-only "  // LCOV_EXCL_LINE
+                "(supported expr ops: VARREF/CONST/AND/OR/XOR/LOGAND/LOGOR/LOGNOT/NOT/ADD/SUB/"
+                "EQ/NEQ/COND/CONCAT/SEL/SHIFT plus CCAST/EXTEND wrappers)");
     }
 
     const size_t supportedAssignw = collector.assigns().size();
@@ -306,7 +498,7 @@ void V3EmitGem::emitGemCuda() VL_MT_DISABLED {
                            + collector.skippedNonVarLhs() + collector.skippedTiming();
     const size_t totalAssignw = supportedAssignw + skipped;
     if (skipped) {
-        v3info("--gem-cuda-only ignored " << skipped
+        v3info("--sim-accel-only ignored " << skipped
                                           << " ASSIGNW nodes (unsupported or internal "
                                              "constructs)");
     }
@@ -314,49 +506,93 @@ void V3EmitGem::emitGemCuda() VL_MT_DISABLED {
     std::ofstream of{filename};
     if (!of.is_open()) v3fatal("Cannot open output file: " + filename);  // LCOV_EXCL_LINE
 
-    of << "// Generated by Verilator --gem-cuda-only\n"
-       << "// Supported node subset: ASSIGNW + AND/OR/XOR/NOT (+ casts/extends)\n"
+    of << "// Generated by Verilator --sim-accel-only\n"
+       << "// Supported node subset: ASSIGNW + bool/arith/select/shift/concat (+ casts/extends)\n"
        << "#include <stdint.h>\n\n";
+    of << "#define gem_eval_assignw_u32 sim_accel_eval_assignw_u32\n"
+       << "#define gem_eval_var_count sim_accel_eval_var_count\n"
+       << "#define gem_eval_var_name sim_accel_eval_var_name\n\n";
 
-    of << "extern \"C\" __global__ void gem_eval_assignw_u32(const uint32_t* state_in,\n"
+    of << "extern \"C\" __global__ void sim_accel_eval_assignw_u32(const uint32_t* state_in,\n"
        << "                                                  uint32_t* state_out,\n"
        << "                                                  uint32_t nstates) {\n"
        << "    const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;\n"
        << "    if (tid >= nstates) return;\n";
 
+    struct EmittedAssign final {
+        size_t m_lhsIdx = 0;
+        const AstVar* m_lhsVarp = nullptr;
+        string m_expr;
+        std::vector<size_t> m_rhsIdxs;
+    };
+    const auto& varToIndex = collector.varToIndex();
+    const GemCudaExprEmitter emitter{varToIndex};
+    std::unordered_set<string> emittedAssignKeys;
+    std::vector<EmittedAssign> emittedAssigns;
+    std::unordered_set<size_t> writtenVarIdxs;
+    std::unordered_set<size_t> readVarIdxs;
+
+    for (const GemCudaCollector::AssignRec& as : collector.assigns()) {
+        const size_t lhsIdx = varToIndex.at(as.m_lhsVarp);
+        const string expr = emitter.emit(as.m_rhsp);
+        if (expr == ("v_" + cvtToStr(lhsIdx))) continue;  // Skip no-op self-assign
+        const string key = cvtToStr(lhsIdx) + "|" + expr;
+        if (!emittedAssignKeys.emplace(key).second) continue;
+
+        EmittedAssign rec;
+        rec.m_lhsIdx = lhsIdx;
+        rec.m_lhsVarp = as.m_lhsVarp;
+        rec.m_expr = expr;
+        rec.m_rhsIdxs.reserve(as.m_rhsVarps.size());
+        for (const AstVar* const rhsVar : as.m_rhsVarps) {
+            const auto it = varToIndex.find(rhsVar);
+            if (it == varToIndex.end()) continue;
+            rec.m_rhsIdxs.push_back(it->second);
+            readVarIdxs.emplace(it->second);
+        }
+        emittedAssigns.push_back(std::move(rec));
+        writtenVarIdxs.emplace(lhsIdx);
+    }
+
+    const size_t emittedUniqueAssignw = emittedAssigns.size();
+
     for (size_t i = 0; i < collector.vars().size(); ++i) {
         const AstVar* const varp = collector.vars().at(i);
-        of << "    uint32_t v_" << i << " = state_in[" << i << "U * nstates + tid] & "
-           << gemCudaMaskLiteral(varp->widthMin()) << ";  // " << varp->name() << "\n";
+        if (readVarIdxs.find(i) != readVarIdxs.end()) {
+            of << "    uint32_t v_" << i << " = state_in[" << i << "U * nstates + tid] & "
+               << gemCudaMaskLiteral(varp->widthMin()) << ";  // " << varp->name() << "\n";
+        } else if (writtenVarIdxs.find(i) != writtenVarIdxs.end()) {
+            of << "    uint32_t v_" << i << " = 0u;  // " << varp->name()
+               << " (write-only)\n";
+        }
     }
     of << "\n";
 
-    const GemCudaExprEmitter emitter{collector.varToIndex()};
-    std::unordered_set<string> emittedAssignKeys;
-    size_t emittedUniqueAssignw = 0;
-    for (const GemCudaCollector::AssignRec& as : collector.assigns()) {
-        const size_t lhsIdx = collector.varToIndex().at(as.m_lhsVarp);
-        const string expr = emitter.emit(as.m_rhsp);
-        const string key = cvtToStr(lhsIdx) + "|" + expr;
-        if (!emittedAssignKeys.emplace(key).second) continue;
-        ++emittedUniqueAssignw;
-        of << "    v_" << lhsIdx << " = " << expr << ";  // "
+    for (const EmittedAssign& as : emittedAssigns) {
+        of << "    v_" << as.m_lhsIdx << " = " << as.m_expr << ";  // "
            << as.m_lhsVarp->name() << "\n";
     }
     of << "\n";
 
     for (size_t i = 0; i < collector.vars().size(); ++i) {
         const AstVar* const varp = collector.vars().at(i);
-        of << "    state_out[" << i << "U * nstates + tid] = v_" << i << " & "
-           << gemCudaMaskLiteral(varp->widthMin()) << ";\n";
+        if (writtenVarIdxs.find(i) != writtenVarIdxs.end()) {
+            of << "    state_out[" << i << "U * nstates + tid] = v_" << i << " & "
+               << gemCudaMaskLiteral(varp->widthMin()) << ";\n";
+        } else {
+            of << "#ifndef SIM_ACCEL_PARTIAL_WRITE\n";
+            of << "    state_out[" << i << "U * nstates + tid] = state_in[" << i
+               << "U * nstates + tid] & " << gemCudaMaskLiteral(varp->widthMin()) << ";\n";
+            of << "#endif\n";
+        }
     }
     of << "}\n\n";
 
-    of << "extern \"C\" __host__ uint32_t gem_eval_var_count() {\n"
+    of << "extern \"C\" __host__ uint32_t sim_accel_eval_var_count() {\n"
        << "    return " << collector.vars().size() << "U;\n"
        << "}\n\n";
 
-    of << "extern \"C\" __host__ const char* gem_eval_var_name(uint32_t index) {\n"
+    of << "extern \"C\" __host__ const char* sim_accel_eval_var_name(uint32_t index) {\n"
        << "    switch (index) {\n";
     for (size_t i = 0; i < collector.vars().size(); ++i) {
         of << "    case " << i << "U: return \"" << gemCudaEscapeCString(collector.vars().at(i)->name())
@@ -387,23 +623,13 @@ void V3EmitGem::emitGemCuda() VL_MT_DISABLED {
     std::ofstream dep{depsFilename};
     if (dep.is_open()) {
         dep << "lhs_idx\trhs_idx_list\n";
-        const auto& varToIndex = collector.varToIndex();
-        std::unordered_set<string> emittedDepKeys;
-        for (const GemCudaCollector::AssignRec& as : collector.assigns()) {
-            const size_t lhsIdx = varToIndex.at(as.m_lhsVarp);
-            // Skip duplicate assigns to simplify deps graph
-            const string expr = emitter.emit(as.m_rhsp);
-            const string key = cvtToStr(lhsIdx) + "|" + expr;
-            if (!emittedDepKeys.emplace(key).second) continue;
-
-            dep << lhsIdx << "\t";
+        for (const EmittedAssign& as : emittedAssigns) {
+            dep << as.m_lhsIdx << "\t";
             bool first = true;
-            for (const AstVar* rhsVar : as.m_rhsVarps) {
-                if (varToIndex.find(rhsVar) != varToIndex.end()) {
-                    if (!first) dep << ",";
-                    dep << varToIndex.at(rhsVar);
-                    first = false;
-                }
+            for (const size_t rhsIdx : as.m_rhsIdxs) {
+                if (!first) dep << ",";
+                dep << rhsIdx;
+                first = false;
             }
             dep << "\n";
         }
@@ -415,7 +641,7 @@ void V3EmitGem::emitGemCuda() VL_MT_DISABLED {
                                         : 0.0;
         std::ostringstream covStr;
         covStr << std::fixed << std::setprecision(2) << cov;
-        v3info("--gem-cuda-only stats "
+        v3info("--sim-accel-only stats "
                << "assignw_supported=" << supportedAssignw << " "
                << "assignw_total=" << totalAssignw << " "
                << "assignw_ignored=" << skipped << " "

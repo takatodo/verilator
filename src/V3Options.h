@@ -275,6 +275,10 @@ private:
     bool m_profExec = false;        // main switch: --prof-exec
     bool m_profPgo = false;         // main switch: --prof-pgo
     bool m_protectIds = false;      // main switch: --protect-ids
+    bool m_simAccelOnly = false;    // main switch: --sim-accel-only
+    bool m_simAccelIrOnly = false;  // main switch: --sim-accel-ir-only
+    bool m_simAccelSidecar = false;  // main switch: --sim-accel-sidecar
+    bool m_simAccelSplitModules = false;  // main switch: --sim-accel-split-modules
     bool m_public = false;          // main switch: --public
     bool m_publicFlatRW = false;    // main switch: --public-flat-rw
     bool m_publicIgnore = false;    // main switch: --public-ignore
@@ -377,6 +381,10 @@ private:
     string      m_pipeFilter;   // main switch: --pipe-filter
     string      m_prefix;       // main switch: --prefix
     string      m_protectKey;   // main switch: --protect-key
+    string      m_simAccelOutput;  // main switch: --sim-accel-output, --sim-accel-sidecar-output
+    string      m_simAccelIrOutput;  // main switch: --sim-accel-ir-output
+    string      m_simAccelBackend = "cuda";  // main switch: --sim-accel-backend
+    string      m_simAccelStrategy = "gem";  // main switch: --sim-accel-strategy
     string      m_topModule;    // main switch: --top-module
     string      m_unusedRegexp; // main switch: --unused-regexp
     string      m_waiverOutput;  // main switch: --waiver-output {filename}
@@ -594,6 +602,21 @@ public:
     bool waiverMultiline() const { return m_waiverMultiline; }
     bool xInitialEdge() const { return m_xInitialEdge; }
     bool serializeOnly() const { return m_jsonOnly; }
+    bool simAccelOnly() const { return m_simAccelOnly; }
+    bool simAccelIrOnly() const { return m_simAccelIrOnly; }
+    bool simAccelSidecar() const { return m_simAccelSidecar; }
+    bool simAccelSplitModules() const { return m_simAccelSplitModules; }
+    const string& simAccelOutput() const { return m_simAccelOutput; }
+    const string& simAccelIrOutput() const { return m_simAccelIrOutput; }
+    const string& simAccelBackend() const { return m_simAccelBackend; }
+    const string& simAccelStrategy() const { return m_simAccelStrategy; }
+    // Backward-compatible aliases.
+    bool gemCudaOnly() const { return simAccelOnly(); }
+    bool gemIrOnly() const { return simAccelIrOnly(); }
+    bool gemCudaSidecar() const { return simAccelSidecar(); }
+    bool gemCudaSplitModules() const { return simAccelSplitModules(); }
+    const string& gemCudaOutput() const { return simAccelOutput(); }
+    const string& gemIrOutput() const { return simAccelIrOutput(); }
     bool topIfacesSupported() const { return lintOnly() && !hierarchical(); }
 
     int buildJobs() const VL_MT_SAFE { return m_buildJobs; }

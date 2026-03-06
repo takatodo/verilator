@@ -1746,10 +1746,9 @@ Summary:
 
 .. option:: --sim-accel-split-modules
 
-   Emit one sim-accel kernel per elaborated module partition instead of a single
-   monolithic kernel.
+   Experimental option reserved for per-module sim-accel kernel splitting.
+   It is parsed but not yet implemented and currently reports an error when used.
 
-   This can improve debugability and incremental integration workflows.
    Alias: :vlopt:`--gpu-split-modules`.
 
 .. option:: --sim-accel-strategy <name>

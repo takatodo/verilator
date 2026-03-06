@@ -940,9 +940,10 @@ void V3Options::notify() VL_MT_DISABLED {
     FileLine* const cmdfl = new FileLine{FileLine::commandLineFilename()};
 
     if (!outFormatOk() && v3Global.opt.main()) ccSet();  // --main implies --cc if not provided
-    if (!outFormatOk() && !dpiHdrOnly() && !lintOnly() && !preprocOnly() && !serializeOnly()) {
+    if (!outFormatOk() && !dpiHdrOnly() && !lintOnly() && !preprocOnly() && !serializeOnly()
+        && !simAccelIrOnly() && !simAccelOnly()) {
         v3fatal("verilator: Need --binary, --cc, --sc, --dpi-hdr-only, --lint-only, "
-                "--json-only or --E option");
+                "--json-only, --sim-accel-ir-only, --sim-accel-only or --E option");
     }
 
     if (m_build && (m_gmake || m_makeJson)) {
@@ -962,6 +963,8 @@ void V3Options::notify() VL_MT_DISABLED {
     if (m_dpiHdrOnly) backendFlags.push_back("--dpi-hdr-only");
     if (m_lintOnly) backendFlags.push_back("--lint-only");
     if (m_jsonOnly) backendFlags.push_back("--json-only");
+    if (m_simAccelOnly) backendFlags.push_back("--sim-accel-only");
+    if (m_simAccelIrOnly) backendFlags.push_back("--sim-accel-ir-only");
     if (backendFlags.size() > 1) {
         std::string backendFlagsString = backendFlags.front();
         for (size_t i = 1; i < backendFlags.size(); i++) {
@@ -969,6 +972,17 @@ void V3Options::notify() VL_MT_DISABLED {
         }
         v3error("The following cannot be used together: " + backendFlagsString
                 + ". Suggest see manual");
+    }
+    if (m_simAccelSidecar && (m_simAccelOnly || m_simAccelIrOnly)) {
+        v3error("The following cannot be used together: --sim-accel-sidecar, "
+                "--sim-accel-only/--sim-accel-ir-only. Suggest see manual");
+    }
+    if (m_simAccelSidecar && (m_lintOnly || m_preprocOnly || m_dpiHdrOnly || m_jsonOnly
+                              || m_build || m_binary)) {
+        v3error("--sim-accel-sidecar requires a normal --cc/--sc code generation flow");
+    }
+    if (m_simAccelSplitModules && !m_simAccelSidecar && !m_simAccelOnly) {
+        v3error("--sim-accel-split-modules requires --sim-accel-only or --sim-accel-sidecar");
     }
 
     if (m_exe && !v3Global.opt.libCreate().empty()) {
@@ -1544,6 +1558,102 @@ void V3Options::parseOptsList(FileLine* fl, const string& optdir, int argc,
     DECL_OPTION("-json-only-output", CbVal, [this](const char* valp) {
         m_jsonOnlyOutput = valp;
         m_jsonOnly = true;
+    });
+
+    DECL_OPTION("-sim-accel-only", CbOnOff, [this](bool flag) {
+        m_simAccelOnly = flag;
+        if (flag) m_outFormatOk = true;
+    });
+    DECL_OPTION("-sim-accel-output", CbVal, [this](const char* valp) {
+        m_simAccelOutput = valp;
+        m_simAccelOnly = true;
+        m_outFormatOk = true;
+    });
+    DECL_OPTION("-sim-accel-sidecar", OnOff, &m_simAccelSidecar);
+    DECL_OPTION("-sim-accel-sidecar-output", CbVal, [this](const char* valp) {
+        m_simAccelOutput = valp;
+        m_simAccelSidecar = true;
+    });
+    DECL_OPTION("-sim-accel-split-modules", OnOff, &m_simAccelSplitModules);
+    DECL_OPTION("-sim-accel-ir-only", CbOnOff, [this](bool flag) {
+        m_simAccelIrOnly = flag;
+        if (flag) m_outFormatOk = true;
+    });
+    DECL_OPTION("-sim-accel-ir-output", CbVal, [this](const char* valp) {
+        m_simAccelIrOutput = valp;
+        m_simAccelIrOnly = true;
+        m_outFormatOk = true;
+    });
+    DECL_OPTION("-sim-accel-backend", CbVal, [this, fl](const char* valp) {
+        m_simAccelBackend = valp;
+        if (m_simAccelBackend != "cuda") {
+            fl->v3error("Unsupported --sim-accel-backend: '" << m_simAccelBackend
+                                                             << "' (supported: cuda)");
+        }
+    });
+    DECL_OPTION("-sim-accel-strategy", CbVal, [this, fl](const char* valp) {
+        m_simAccelStrategy = valp;
+        if (m_simAccelStrategy != "gem") {
+            fl->v3error("Unsupported --sim-accel-strategy: '" << m_simAccelStrategy
+                                                              << "' (supported: gem)");
+        }
+    });
+    // Aliases
+    DECL_OPTION("-gpu-only", CbOnOff, [this](bool flag) {
+        m_simAccelOnly = flag;
+        if (flag) m_outFormatOk = true;
+    });
+    DECL_OPTION("-gpu-output", CbVal, [this](const char* valp) {
+        m_simAccelOutput = valp;
+        m_simAccelOnly = true;
+        m_outFormatOk = true;
+    });
+    DECL_OPTION("-gpu-sidecar", OnOff, &m_simAccelSidecar);
+    DECL_OPTION("-gpu-sidecar-output", CbVal, [this](const char* valp) {
+        m_simAccelOutput = valp;
+        m_simAccelSidecar = true;
+    });
+    DECL_OPTION("-gpu-split-modules", OnOff, &m_simAccelSplitModules);
+    DECL_OPTION("-gpu-ir-only", CbOnOff, [this](bool flag) {
+        m_simAccelIrOnly = flag;
+        if (flag) m_outFormatOk = true;
+    });
+    DECL_OPTION("-gpu-ir-output", CbVal, [this](const char* valp) {
+        m_simAccelIrOutput = valp;
+        m_simAccelIrOnly = true;
+        m_outFormatOk = true;
+    });
+    DECL_OPTION("-gpu-backend", CbVal, [this, fl](const char* valp) {
+        m_simAccelBackend = valp;
+        if (m_simAccelBackend != "cuda") {
+            fl->v3error("Unsupported --gpu-backend: '" << m_simAccelBackend
+                                                       << "' (supported: cuda)");
+        }
+    });
+    DECL_OPTION("-gpu-strategy", CbVal, [this, fl](const char* valp) {
+        m_simAccelStrategy = valp;
+        if (m_simAccelStrategy != "gem") {
+            fl->v3error("Unsupported --gpu-strategy: '" << m_simAccelStrategy
+                                                        << "' (supported: gem)");
+        }
+    });
+    DECL_OPTION("-gem-cuda-only", CbOnOff, [this](bool flag) {
+        m_simAccelOnly = flag;
+        if (flag) m_outFormatOk = true;
+    });
+    DECL_OPTION("-gem-cuda-output", CbVal, [this](const char* valp) {
+        m_simAccelOutput = valp;
+        m_simAccelOnly = true;
+        m_outFormatOk = true;
+    });
+    DECL_OPTION("-gem-ir-only", CbOnOff, [this](bool flag) {
+        m_simAccelIrOnly = flag;
+        if (flag) m_outFormatOk = true;
+    });
+    DECL_OPTION("-gem-ir-output", CbVal, [this](const char* valp) {
+        m_simAccelIrOutput = valp;
+        m_simAccelIrOnly = true;
+        m_outFormatOk = true;
     });
 
     DECL_OPTION("-LDFLAGS", CbVal, callStrSetter(&V3Options::addLdLibs));
