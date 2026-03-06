@@ -46,12 +46,19 @@ expect_failure(["--hybrid-mode", "single-cluster", "--hybrid-cluster-index", "0"
                "--hybrid-cluster-index and --hybrid-cluster-auto are mutually exclusive")
 expect_failure(["--hybrid-cluster-auto"],
                "--hybrid-cluster-auto requires --hybrid-mode single-cluster")
+expect_failure(["--hybrid-cluster-group-auto"],
+               "--hybrid-cluster-group-auto requires --hybrid-mode cluster-group")
 expect_failure(["--hybrid-mode", "single-cluster", "--hybrid-cluster-auto",
                 "--hybrid-cluster-auto-max-input-bits", "0"],
                "No suitable hybrid cluster found for auto-selection")
 expect_failure(["--hybrid-mode", "cluster-group"],
-               "--hybrid-cluster-indices is required with --hybrid-mode cluster-group")
+               "--hybrid-cluster-indices or --hybrid-cluster-group-auto is required with --hybrid-mode cluster-group")
 expect_failure(["--hybrid-mode", "cluster-group", "--hybrid-cluster-indices", "0,0"],
                "Duplicate cluster index in --hybrid-cluster-indices: 0")
+expect_failure(["--hybrid-mode", "cluster-group", "--hybrid-cluster-group-auto",
+                "--hybrid-cluster-indices", "0,1"],
+               "--hybrid-cluster-indices and --hybrid-cluster-group-auto are mutually exclusive")
+expect_failure(["--hybrid-cluster-group-size", "2"],
+               "--hybrid-cluster-group-size requires --hybrid-cluster-group-auto")
 
 test.passes()

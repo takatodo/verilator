@@ -29,6 +29,12 @@ Options:
   --hybrid-cluster-auto  Auto-select cluster for --hybrid-mode single-cluster
   --hybrid-cluster-auto-max-input-bits N
                          Max input-signature bits for auto-selected cluster (default: 128)
+  --hybrid-cluster-group-auto
+                         Auto-select contiguous cluster group for --hybrid-mode cluster-group
+  --hybrid-cluster-group-size N
+                         Group size for --hybrid-cluster-group-auto (default: 3)
+  --hybrid-cluster-group-auto-max-input-bits N
+                         Max summed input-signature bits for auto-selected cluster group (default: 128)
   --compile-cache-dir DIR  Reuse compiled bench binaries across runs
                            (default: /tmp/verilator-sim-accel-compile-cache)
   --no-compile-cache   Disable compiled bench cache reuse
@@ -72,6 +78,9 @@ HYBRID_CLUSTER_INDEX=""
 HYBRID_CLUSTER_INDICES=""
 HYBRID_CLUSTER_AUTO=0
 HYBRID_CLUSTER_AUTO_MAX_INPUT_BITS=128
+HYBRID_CLUSTER_GROUP_AUTO=0
+HYBRID_CLUSTER_GROUP_SIZE=3
+HYBRID_CLUSTER_GROUP_AUTO_MAX_INPUT_BITS=128
 COMPILE_CACHE_DIR="${SIM_ACCEL_COMPILE_CACHE_DIR:-/tmp/verilator-sim-accel-compile-cache}"
 COMPILE_CACHE_ENABLED=1
 declare -a SOURCES=()
@@ -115,6 +124,12 @@ while [[ $# -gt 0 ]]; do
       HYBRID_CLUSTER_AUTO=1; shift ;;
     --hybrid-cluster-auto-max-input-bits)
       HYBRID_CLUSTER_AUTO_MAX_INPUT_BITS="$2"; shift 2 ;;
+    --hybrid-cluster-group-auto)
+      HYBRID_CLUSTER_GROUP_AUTO=1; shift ;;
+    --hybrid-cluster-group-size)
+      HYBRID_CLUSTER_GROUP_SIZE="$2"; shift 2 ;;
+    --hybrid-cluster-group-auto-max-input-bits)
+      HYBRID_CLUSTER_GROUP_AUTO_MAX_INPUT_BITS="$2"; shift 2 ;;
     --compile-cache-dir)
       COMPILE_CACHE_DIR="$2"; shift 2 ;;
     --no-compile-cache)
@@ -158,6 +173,14 @@ if ! [[ "$ASSIGNS_PER_KERNEL" =~ ^[0-9]+$ ]]; then
 fi
 if ! [[ "$HYBRID_CLUSTER_AUTO_MAX_INPUT_BITS" =~ ^[0-9]+$ ]]; then
   echo "Invalid --hybrid-cluster-auto-max-input-bits: $HYBRID_CLUSTER_AUTO_MAX_INPUT_BITS (expected integer >= 0)" >&2
+  exit 2
+fi
+if ! [[ "$HYBRID_CLUSTER_GROUP_SIZE" =~ ^[0-9]+$ ]] || [[ "$HYBRID_CLUSTER_GROUP_SIZE" -eq 0 ]]; then
+  echo "Invalid --hybrid-cluster-group-size: $HYBRID_CLUSTER_GROUP_SIZE (expected integer > 0)" >&2
+  exit 2
+fi
+if ! [[ "$HYBRID_CLUSTER_GROUP_AUTO_MAX_INPUT_BITS" =~ ^[0-9]+$ ]]; then
+  echo "Invalid --hybrid-cluster-group-auto-max-input-bits: $HYBRID_CLUSTER_GROUP_AUTO_MAX_INPUT_BITS (expected integer >= 0)" >&2
   exit 2
 fi
 case "$HYBRID_MODE" in
@@ -204,24 +227,34 @@ elif [[ "$HYBRID_MODE" == "single-cluster" ]]; then
     echo "--hybrid-cluster-indices requires --hybrid-mode cluster-group" >&2
     exit 2
   fi
-elif [[ "$HYBRID_MODE" == "cluster-group" ]]; then
-  if [[ -z "$HYBRID_CLUSTER_INDICES" ]]; then
-    echo "--hybrid-cluster-indices is required with --hybrid-mode cluster-group" >&2
+  if [[ "$HYBRID_CLUSTER_GROUP_AUTO" -ne 0 ]]; then
+    echo "--hybrid-cluster-group-auto requires --hybrid-mode cluster-group" >&2
     exit 2
   fi
-  if ! [[ "$HYBRID_CLUSTER_INDICES" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+elif [[ "$HYBRID_MODE" == "cluster-group" ]]; then
+  if [[ -n "$HYBRID_CLUSTER_INDICES" && "$HYBRID_CLUSTER_GROUP_AUTO" -ne 0 ]]; then
+    echo "--hybrid-cluster-indices and --hybrid-cluster-group-auto are mutually exclusive" >&2
+    exit 2
+  fi
+  if [[ -z "$HYBRID_CLUSTER_INDICES" && "$HYBRID_CLUSTER_GROUP_AUTO" -eq 0 ]]; then
+    echo "--hybrid-cluster-indices or --hybrid-cluster-group-auto is required with --hybrid-mode cluster-group" >&2
+    exit 2
+  fi
+  if [[ -n "$HYBRID_CLUSTER_INDICES" ]] && ! [[ "$HYBRID_CLUSTER_INDICES" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
     echo "Invalid --hybrid-cluster-indices: $HYBRID_CLUSTER_INDICES (expected comma-separated integers)" >&2
     exit 2
   fi
-  declare -A seen_hybrid_cluster_indices=()
-  IFS=',' read -r -a hybrid_cluster_tokens <<<"$HYBRID_CLUSTER_INDICES"
-  for cluster_idx in "${hybrid_cluster_tokens[@]}"; do
-    if [[ -n "${seen_hybrid_cluster_indices[$cluster_idx]:-}" ]]; then
-      echo "Duplicate cluster index in --hybrid-cluster-indices: $cluster_idx" >&2
-      exit 2
-    fi
-    seen_hybrid_cluster_indices[$cluster_idx]=1
-  done
+  if [[ -n "$HYBRID_CLUSTER_INDICES" ]]; then
+    declare -A seen_hybrid_cluster_indices=()
+    IFS=',' read -r -a hybrid_cluster_tokens <<<"$HYBRID_CLUSTER_INDICES"
+    for cluster_idx in "${hybrid_cluster_tokens[@]}"; do
+      if [[ -n "${seen_hybrid_cluster_indices[$cluster_idx]:-}" ]]; then
+        echo "Duplicate cluster index in --hybrid-cluster-indices: $cluster_idx" >&2
+        exit 2
+      fi
+      seen_hybrid_cluster_indices[$cluster_idx]=1
+    done
+  fi
   if [[ -n "$HYBRID_PARTITION_INDEX" ]]; then
     echo "--hybrid-partition-index requires --hybrid-mode single-partition" >&2
     exit 2
@@ -251,9 +284,21 @@ else
     echo "--hybrid-cluster-auto requires --hybrid-mode single-cluster" >&2
     exit 2
   fi
+  if [[ "$HYBRID_CLUSTER_GROUP_AUTO" -ne 0 ]]; then
+    echo "--hybrid-cluster-group-auto requires --hybrid-mode cluster-group" >&2
+    exit 2
+  fi
 fi
 if [[ "$HYBRID_CLUSTER_AUTO" -eq 0 && "$HYBRID_CLUSTER_AUTO_MAX_INPUT_BITS" != "128" ]]; then
   echo "--hybrid-cluster-auto-max-input-bits requires --hybrid-cluster-auto" >&2
+  exit 2
+fi
+if [[ "$HYBRID_CLUSTER_GROUP_AUTO" -eq 0 && "$HYBRID_CLUSTER_GROUP_SIZE" != "3" ]]; then
+  echo "--hybrid-cluster-group-size requires --hybrid-cluster-group-auto" >&2
+  exit 2
+fi
+if [[ "$HYBRID_CLUSTER_GROUP_AUTO" -eq 0 && "$HYBRID_CLUSTER_GROUP_AUTO_MAX_INPUT_BITS" != "128" ]]; then
+  echo "--hybrid-cluster-group-auto-max-input-bits requires --hybrid-cluster-group-auto" >&2
   exit 2
 fi
 
@@ -539,6 +584,133 @@ if fallback is not None:
     print(f"{fallback['index']}\t{preferred_count + fallback_count}\t1\tcpu_boundary_heavy")
     sys.exit(0)
 sys.exit(1)
+PY
+}
+
+select_auto_hybrid_cluster_group_from_tsv() {
+  local clusters_tsv="$1"
+  local group_size="$2"
+  local max_input_bits="$3"
+  python3 - "$clusters_tsv" "$group_size" "$max_input_bits" <<'PY'
+import csv
+import sys
+from collections import Counter
+
+path = sys.argv[1]
+group_size = int(sys.argv[2])
+max_bits = int(sys.argv[3])
+
+WEIGHTS = {
+    "and": 1.0,
+    "or": 1.0,
+    "xor": 1.0,
+    "logand": 1.0,
+    "logor": 1.0,
+    "lognot": 1.0,
+    "not": 1.0,
+    "ccast": 1.0,
+    "extend": 1.0,
+    "extends": 1.0,
+    "eq": 2.0,
+    "neq": 2.0,
+    "concat": 2.0,
+    "cond": 2.5,
+    "sel": 2.5,
+    "add": 3.0,
+    "sub": 3.0,
+    "shiftl": 3.0,
+    "shiftlovr": 3.0,
+    "shiftr": 3.0,
+    "shiftrovr": 3.0,
+}
+
+def parse_expr_kind_counts(raw):
+    counts = Counter()
+    if not raw or raw == "-":
+      return counts
+    for item in raw.split(";"):
+      if not item:
+        continue
+      key, sep, value = item.partition("=")
+      if not sep:
+        continue
+      counts[key] += int(value)
+    return counts
+
+def weighted_ops(counts):
+    return sum(count * WEIGHTS.get(kind, 1.0)
+               for kind, count in counts.items()
+               if kind not in ("var", "const"))
+
+def better(cur, best):
+    if best is None:
+        return True
+    return ((cur["static_score"], cur["group_assign_count"], -cur["group_input_signature_bits"],
+             -cur["cluster_indices"][0])
+            > (best["static_score"], best["group_assign_count"], -best["group_input_signature_bits"],
+               -best["cluster_indices"][0]))
+
+rows = []
+with open(path, newline="") as fh:
+    reader = csv.DictReader(fh, delimiter="\t")
+    for row in reader:
+        assigns = int(row["assign_count"])
+        if assigns <= 0:
+            continue
+        rows.append({
+            "index": int(row["index"]),
+            "topo_rank": int(row["topo_rank"]),
+            "assign_count": assigns,
+            "input_signature_bits": int(row["input_signature_bits"]),
+            "owner_hint": row["owner_hint"],
+            "expr_kind_counts": parse_expr_kind_counts(row.get("expr_kind_counts", "-")),
+        })
+
+rows_by_topo = sorted(rows, key=lambda r: (r["topo_rank"], r["index"]))
+preferred = None
+fallback = None
+candidate_count = 0
+
+for start in range(0, len(rows_by_topo) - group_size + 1):
+    window = rows_by_topo[start:start + group_size]
+    topo_ranks = [row["topo_rank"] for row in window]
+    if any((b - a) != 1 for a, b in zip(topo_ranks, topo_ranks[1:])):
+        continue
+    group_input_bits = sum(row["input_signature_bits"] for row in window)
+    if group_input_bits > max_bits:
+        continue
+    group_assign_count = sum(row["assign_count"] for row in window)
+    group_expr_counts = sum((row["expr_kind_counts"] for row in window), Counter())
+    group_weighted_ops = weighted_ops(group_expr_counts)
+    static_score = group_weighted_ops - (8.0 * group_input_bits)
+    owner_set = {row["owner_hint"] for row in window}
+    owner_hint = next(iter(owner_set)) if len(owner_set) == 1 else "+".join(sorted(owner_set))
+    candidate = {
+        "cluster_indices": [row["index"] for row in window],
+        "group_assign_count": group_assign_count,
+        "group_input_signature_bits": group_input_bits,
+        "group_weighted_ops": group_weighted_ops,
+        "static_score": static_score,
+        "owner_hint": owner_hint,
+    }
+    candidate_count += 1
+    if any(owner == "gpu_candidate" for owner in owner_set):
+        if better(candidate, preferred):
+            preferred = candidate
+    elif any(owner == "cpu_boundary_heavy" for owner in owner_set):
+        if better(candidate, fallback):
+            fallback = candidate
+
+selected = preferred if preferred is not None else fallback
+if selected is None:
+    sys.exit(1)
+fallback_used = 0 if preferred is not None else 1
+print(
+    f"{','.join(str(x) for x in selected['cluster_indices'])}\t"
+    f"{candidate_count}\t{fallback_used}\t{selected['owner_hint']}\t"
+    f"{selected['static_score']:.6f}\t{selected['group_weighted_ops']:.3f}\t"
+    f"{selected['group_input_signature_bits']}\t{selected['group_assign_count']}"
+)
 PY
 }
 
@@ -2336,6 +2508,12 @@ HYBRID_BUILD_CLUSTER_INDEX=""
 HYBRID_BUILD_CLUSTER_INDICES=""
 HYBRID_BUILD_CLUSTER_OWNER_HINT=""
 HYBRID_BUILD_CLUSTER_FALLBACK=0
+HYBRID_BUILD_CLUSTER_GROUP_AUTO=0
+HYBRID_BUILD_CLUSTER_GROUP_CANDIDATE_COUNT=0
+HYBRID_BUILD_CLUSTER_GROUP_STATIC_SCORE=""
+HYBRID_BUILD_CLUSTER_GROUP_WEIGHTED_OPS=""
+HYBRID_BUILD_CLUSTER_GROUP_INPUT_BITS=""
+HYBRID_BUILD_CLUSTER_GROUP_ASSIGN_COUNT=""
 if [[ -f "$OUTDIR/kernel_generated.api.h" && -f "$OUTDIR/kernel_generated.cpu.cpp" && -f "$OUTDIR/kernel_generated.link.cu" ]]; then
   mapfile -t PARTITION_SOURCES < <(find "$OUTDIR" -maxdepth 1 -type f -name 'kernel_generated.part*.cu' | LC_ALL=C sort)
   mapfile -t CLUSTER_SOURCES < <(find "$OUTDIR" -maxdepth 1 -type f -name 'kernel_generated.cluster*.cu' | LC_ALL=C sort)
@@ -2373,6 +2551,24 @@ if [[ "$HYBRID_MODE" == "single-cluster" && "$USE_PARTITION_OBJECTS" -eq 1 ]]; t
   CLUSTER_SOURCES=("$selected_cluster_src")
   HYBRID_BUILD_CLUSTER_INDICES="$HYBRID_BUILD_CLUSTER_INDEX"
 elif [[ "$HYBRID_MODE" == "cluster-group" && "$USE_PARTITION_OBJECTS" -eq 1 ]]; then
+  if [[ "$HYBRID_CLUSTER_GROUP_AUTO" -eq 1 ]]; then
+    if [[ ! -f "$OUTDIR/kernel_generated.clusters.tsv" ]]; then
+      echo "Missing cluster metadata for --hybrid-cluster-group-auto: $OUTDIR/kernel_generated.clusters.tsv" >&2
+      exit 2
+    fi
+    if ! auto_group_selection="$(select_auto_hybrid_cluster_group_from_tsv \
+      "$OUTDIR/kernel_generated.clusters.tsv" "$HYBRID_CLUSTER_GROUP_SIZE" \
+      "$HYBRID_CLUSTER_GROUP_AUTO_MAX_INPUT_BITS")"; then
+      echo "No suitable hybrid cluster group found for auto-selection" \
+           " (group_size=$HYBRID_CLUSTER_GROUP_SIZE, max_input_bits=$HYBRID_CLUSTER_GROUP_AUTO_MAX_INPUT_BITS)" >&2
+      exit 2
+    fi
+    IFS=$'\t' read -r HYBRID_CLUSTER_INDICES HYBRID_BUILD_CLUSTER_GROUP_CANDIDATE_COUNT \
+      HYBRID_BUILD_CLUSTER_FALLBACK HYBRID_BUILD_CLUSTER_OWNER_HINT HYBRID_BUILD_CLUSTER_GROUP_STATIC_SCORE \
+      HYBRID_BUILD_CLUSTER_GROUP_WEIGHTED_OPS HYBRID_BUILD_CLUSTER_GROUP_INPUT_BITS \
+      HYBRID_BUILD_CLUSTER_GROUP_ASSIGN_COUNT <<<"$auto_group_selection"
+    HYBRID_BUILD_CLUSTER_GROUP_AUTO=1
+  fi
   HYBRID_BUILD_CLUSTER_INDICES="$HYBRID_CLUSTER_INDICES"
   declare -a SELECTED_CLUSTER_SOURCES=()
   IFS=',' read -r -a HYBRID_GROUP_CLUSTER_ARRAY <<<"$HYBRID_CLUSTER_INDICES"
@@ -2547,6 +2743,21 @@ EOF2
     exit 1
   fi
 )
+
+if [[ "$HYBRID_MODE" == "cluster-group" && "$HYBRID_BUILD_CLUSTER_GROUP_AUTO" -eq 1 ]]; then
+  {
+    echo "hybrid_cluster_group_auto=1"
+    echo "hybrid_cluster_group_auto_group_size=$HYBRID_CLUSTER_GROUP_SIZE"
+    echo "hybrid_cluster_group_auto_max_input_bits=$HYBRID_CLUSTER_GROUP_AUTO_MAX_INPUT_BITS"
+    echo "hybrid_cluster_group_auto_candidate_count=$HYBRID_BUILD_CLUSTER_GROUP_CANDIDATE_COUNT"
+    echo "hybrid_cluster_group_auto_fallback_used=$HYBRID_BUILD_CLUSTER_FALLBACK"
+    echo "hybrid_cluster_group_auto_selected_owner_hint=$HYBRID_BUILD_CLUSTER_OWNER_HINT"
+    echo "hybrid_cluster_group_auto_selected_static_score=$HYBRID_BUILD_CLUSTER_GROUP_STATIC_SCORE"
+    echo "hybrid_cluster_group_auto_selected_weighted_ops=$HYBRID_BUILD_CLUSTER_GROUP_WEIGHTED_OPS"
+    echo "hybrid_cluster_group_auto_selected_input_bits=$HYBRID_BUILD_CLUSTER_GROUP_INPUT_BITS"
+    echo "hybrid_cluster_group_auto_selected_assign_count=$HYBRID_BUILD_CLUSTER_GROUP_ASSIGN_COUNT"
+  } >> "$OUTDIR/bench_run.log"
+fi
 
 ASSIGNW_SUPPORTED_RAW="$(rg -o 'assignw_supported=[0-9A-Fa-f]+' "$LOG" | tail -n1 | cut -d= -f2 || true)"
 ASSIGNW_TOTAL_RAW="$(rg -o 'assignw_total=[0-9A-Fa-f]+' "$LOG" | tail -n1 | cut -d= -f2 || true)"
