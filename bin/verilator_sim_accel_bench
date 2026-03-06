@@ -299,6 +299,26 @@ compute_compile_cache_key() {
 OBJECT_CACHE_HITS=0
 OBJECT_CACHE_MISSES=0
 
+partition_object_namespace() {
+  local src="$1"
+  local base part_idx namespace
+  base="$(basename "$src")"
+  if [[ "$base" =~ \.part([0-9]+)\.cu$ && -f "$KERNEL_PARTITIONS" ]]; then
+    part_idx="${BASH_REMATCH[1]}"
+    namespace="$(awk -F '\t' -v idx="$part_idx" 'NR > 1 && $1 == idx { print $6; exit }' "$KERNEL_PARTITIONS")"
+    if [[ -n "$namespace" ]]; then
+      printf '%s\n' "$namespace"
+      return 0
+    fi
+  fi
+  case "$base" in
+    bench_kernel.cu) printf 'bench\n' ;;
+    kernel_generated.cpu.cpp) printf 'cpu_ref\n' ;;
+    kernel_generated.link.cu) printf 'link\n' ;;
+    *) printf 'shared\n' ;;
+  esac
+}
+
 compute_object_cache_key() {
   local compiler_id="$1"
   local flags="$2"
@@ -314,10 +334,11 @@ compute_object_cache_key() {
 build_cached_cuda_object() {
   local src="$1"
   local out_obj="$2"
-  local key compiler_id cache_obj tmp_obj
+  local key compiler_id cache_obj tmp_obj namespace
   compiler_id="$(nvcc --version | tr '\n' '|')"
   key="$(compute_object_cache_key "$compiler_id" "-O3 -std=c++17 -c" "$src")"
-  cache_obj="$COMPILE_CACHE_DIR/object-cache/$key.o"
+  namespace="$(partition_object_namespace "$src")"
+  cache_obj="$COMPILE_CACHE_DIR/object-cache/$namespace/$key.o"
   if [[ -f "$cache_obj" ]]; then
     cp "$cache_obj" "$out_obj"
     OBJECT_CACHE_HITS=$((OBJECT_CACHE_HITS + 1))
@@ -336,10 +357,11 @@ build_cached_cuda_object() {
 build_cached_cxx_object() {
   local src="$1"
   local out_obj="$2"
-  local key compiler_id cache_obj tmp_obj
+  local key compiler_id cache_obj tmp_obj namespace
   compiler_id="$(g++ --version | tr '\n' '|')"
   key="$(compute_object_cache_key "$compiler_id" "-O3 -std=c++17 -c" "$src")"
-  cache_obj="$COMPILE_CACHE_DIR/object-cache/$key.o"
+  namespace="$(partition_object_namespace "$src")"
+  cache_obj="$COMPILE_CACHE_DIR/object-cache/$namespace/$key.o"
   if [[ -f "$cache_obj" ]]; then
     cp "$cache_obj" "$out_obj"
     OBJECT_CACHE_HITS=$((OBJECT_CACHE_HITS + 1))

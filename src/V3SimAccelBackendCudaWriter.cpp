@@ -16,7 +16,9 @@
 #include "V3SimAccelBackendCudaExprEmitter.h"
 
 #include <algorithm>
+#include <cctype>
 #include <fstream>
+#include <unordered_map>
 #include <sstream>
 #include <unordered_set>
 #include <vector>
@@ -57,6 +59,10 @@ struct AssignPartition final {
     std::vector<size_t> m_readVarIdxs;
     std::vector<size_t> m_writtenVarIdxs;
     std::unordered_set<size_t> m_writtenBeforeIdxs;
+    string m_dominantHierarchy;
+    string m_dominantHierarchyKey;
+    size_t m_dominantHierarchyAssignCount = 0;
+    size_t m_uniqueHierarchyCount = 0;
 };
 
 std::vector<size_t> toSortedVector(const std::unordered_set<size_t>& in) {
@@ -65,7 +71,28 @@ std::vector<size_t> toSortedVector(const std::unordered_set<size_t>& in) {
     return out;
 }
 
-std::vector<AssignPartition> buildPartitions(const std::vector<EmittedAssign>& emittedAssigns,
+string simAccelPartitionHierarchyLabel(const V3SimAccelProgram::Var& var) {
+    return var.m_hierarchy.empty() ? string{"<top>"} : var.m_hierarchy;
+}
+
+string simAccelSanitizeHierarchyKey(const string& label) {
+    string out;
+    out.reserve(label.size());
+    for (char ch : label) {
+        if (std::isalnum(static_cast<unsigned char>(ch))) {
+            out += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        } else {
+            out += '_';
+        }
+    }
+    while (!out.empty() && out.front() == '_') out.erase(out.begin());
+    while (!out.empty() && out.back() == '_') out.pop_back();
+    if (out.empty()) return "top";
+    return out;
+}
+
+std::vector<AssignPartition> buildPartitions(const V3SimAccelProgram& program,
+                                             const std::vector<EmittedAssign>& emittedAssigns,
                                              size_t assignsPerKernel) {
     const size_t chunkSize = assignsPerKernel ? assignsPerKernel : emittedAssigns.size();
     std::vector<AssignPartition> partitions;
@@ -78,14 +105,28 @@ std::vector<AssignPartition> buildPartitions(const std::vector<EmittedAssign>& e
         const size_t end = std::min(start + chunkSize, emittedAssigns.size());
         std::unordered_set<size_t> readVarIdxs;
         std::unordered_set<size_t> writtenVarIdxs;
+        std::unordered_map<string, size_t> hierarchyCounts;
         for (size_t idx = start; idx < end; ++idx) {
             const EmittedAssign& assign = emittedAssigns.at(idx);
             partition.m_assigns.push_back(assign);
             writtenVarIdxs.emplace(assign.m_lhsIdx);
             for (const size_t rhsIdx : assign.m_rhsIdxs) readVarIdxs.emplace(rhsIdx);
+            const string hierarchy
+                = simAccelPartitionHierarchyLabel(program.m_vars.at(assign.m_lhsIdx));
+            const size_t count = ++hierarchyCounts[hierarchy];
+            if (count > partition.m_dominantHierarchyAssignCount
+                || (count == partition.m_dominantHierarchyAssignCount
+                    && (partition.m_dominantHierarchy.empty()
+                        || hierarchy < partition.m_dominantHierarchy))) {
+                partition.m_dominantHierarchy = hierarchy;
+                partition.m_dominantHierarchyAssignCount = count;
+            }
         }
         partition.m_readVarIdxs = toSortedVector(readVarIdxs);
         partition.m_writtenVarIdxs = toSortedVector(writtenVarIdxs);
+        partition.m_uniqueHierarchyCount = hierarchyCounts.size();
+        partition.m_dominantHierarchyKey
+            = simAccelSanitizeHierarchyKey(partition.m_dominantHierarchy);
         for (const size_t writtenIdx : partition.m_writtenVarIdxs) writtenBeforeIdxs.emplace(writtenIdx);
         partitions.push_back(std::move(partition));
     }
@@ -321,12 +362,18 @@ void emitPartitionedAuxFiles(const string& filename, const V3SimAccelProgram& pr
     {
         std::ofstream partMeta{filename + ".partitions.tsv"};
         if (partMeta.is_open()) {
-            partMeta << "index\tassign_count\tread_var_count\twritten_var_count\n";
+            partMeta << "index\tassign_count\tread_var_count\twritten_var_count"
+                        "\tdominant_hierarchy\tdominant_hierarchy_key"
+                        "\tdominant_hierarchy_assign_count\tunique_hierarchy_count\n";
             for (size_t i = 0; i < partitions.size(); ++i) {
                 const AssignPartition& partition = partitions.at(i);
                 partMeta << i << '\t' << partition.m_assigns.size() << '\t'
                          << partition.m_readVarIdxs.size() << '\t'
-                         << partition.m_writtenVarIdxs.size() << '\n';
+                         << partition.m_writtenVarIdxs.size() << '\t'
+                         << partition.m_dominantHierarchy << '\t'
+                         << partition.m_dominantHierarchyKey << '\t'
+                         << partition.m_dominantHierarchyAssignCount << '\t'
+                         << partition.m_uniqueHierarchyCount << '\n';
             }
         }
     }
@@ -379,7 +426,8 @@ size_t V3SimAccelBackendCudaWriter::write(const string& filename,
         emittedAssigns.push_back(std::move(rec));
     }
 
-    const std::vector<AssignPartition> partitions = buildPartitions(emittedAssigns, assignsPerKernel);
+    const std::vector<AssignPartition> partitions = buildPartitions(program, emittedAssigns,
+                                                                    assignsPerKernel);
     emitCpuReference(of, program, emittedAssigns, readVarIdxs, writtenVarIdxs);
     for (size_t partitionIdx = 0; partitionIdx < partitions.size(); ++partitionIdx) {
         emitPartitionKernel(of, program, partitions.at(partitionIdx), partitionIdx);

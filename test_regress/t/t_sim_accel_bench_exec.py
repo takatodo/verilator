@@ -85,6 +85,8 @@ test.run_capture(bench_cmd_object_hit.replace("-- ", "--outdir " + bench_dir_obj
 for filename in [bench_run_log, kernel_log, kernel_cu, kernel_vars, kernel_api, kernel_cpu, kernel_link, kernel_parts]:
     if not os.path.exists(filename):
         test.error("Expected output file not found: " + filename)
+test.file_grep(kernel_parts, r"dominant_hierarchy")
+test.file_grep(kernel_parts, r"dominant_hierarchy_key")
 if os.path.exists(kernel_comm):
     test.file_grep(kernel_comm, r"direction\tslot\tvar_idx\tname\twidth\tis_cpu_visible")
 
