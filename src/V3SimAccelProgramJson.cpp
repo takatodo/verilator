@@ -64,11 +64,23 @@ const char* exprKindName(V3SimAccelProgram::ExprKind kind) {
 }
 
 void writeIndexOrNull(std::ofstream& of, size_t value) {
-    if (value == static_cast<size_t>(-1)) {
+    if (value == V3SimAccelProgram::INVALID_SLOT) {
         of << "null";
     } else {
         of << value;
     }
+}
+
+void writeVarIndexList(std::ofstream& of, const std::vector<size_t>& values, const char* indent) {
+    of << "[";
+    if (!values.empty()) of << "\n";
+    for (size_t i = 0; i < values.size(); ++i) {
+        of << indent << values.at(i);
+        if (i + 1 != values.size()) of << ",";
+        of << "\n";
+    }
+    if (!values.empty()) of << "  ";
+    of << "]";
 }
 
 }  // namespace
@@ -98,7 +110,16 @@ void V3SimAccelProgramJson::write(const string& filename, const V3SimAccelProgra
         of << "      \"direction\": \"" << jsonEscape(var.m_direction) << "\",\n";
         of << "      \"width\": " << var.m_width << ",\n";
         of << "      \"is_primary_io\": " << (var.m_isPrimaryIo ? "true" : "false") << ",\n";
-        of << "      \"is_activator\": " << (var.m_isActivator ? "true" : "false") << "\n";
+        of << "      \"is_activator\": " << (var.m_isActivator ? "true" : "false") << ",\n";
+        of << "      \"is_cpu_visible\": " << (var.m_isCpuVisible ? "true" : "false") << ",\n";
+        of << "      \"is_gpu_input\": " << (var.m_isGpuInput ? "true" : "false") << ",\n";
+        of << "      \"is_gpu_output\": " << (var.m_isGpuOutput ? "true" : "false") << ",\n";
+        of << "      \"input_slot\": ";
+        writeIndexOrNull(of, var.m_inputSlot);
+        of << ",\n";
+        of << "      \"output_slot\": ";
+        writeIndexOrNull(of, var.m_outputSlot);
+        of << "\n";
         of << "    }";
         if (i + 1 != program.m_vars.size()) of << ",";
         of << "\n";
@@ -148,6 +169,18 @@ void V3SimAccelProgramJson::write(const string& filename, const V3SimAccelProgra
         if (i + 1 != program.m_assigns.size()) of << ",";
         of << "\n";
     }
-    of << "  ]\n";
+    of << "  ],\n";
+
+    of << "  \"comm_buffers\": {\n";
+    of << "    \"cpu_to_gpu_var_idxs\": ";
+    writeVarIndexList(of, program.m_commPlan.m_cpuToGpuVarIdxs, "      ");
+    of << ",\n";
+    of << "    \"gpu_to_cpu_var_idxs\": ";
+    writeVarIndexList(of, program.m_commPlan.m_gpuToCpuVarIdxs, "      ");
+    of << ",\n";
+    of << "    \"cpu_visible_var_idxs\": ";
+    writeVarIndexList(of, program.m_commPlan.m_cpuVisibleVarIdxs, "      ");
+    of << "\n";
+    of << "  }\n";
     of << "}\n";
 }

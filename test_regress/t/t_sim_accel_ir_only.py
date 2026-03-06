@@ -32,6 +32,12 @@ test.file_grep(out_filename, r'"strategy": "assignw-bool32"')
 test.file_grep(out_filename, r'"vars": \[')
 test.file_grep(out_filename, r'"exprs": \[')
 test.file_grep(out_filename, r'"assigns": \[')
+test.file_grep(out_filename, r'"comm_buffers": \{')
+test.file_grep(out_filename, r'"cpu_to_gpu_var_idxs": \[')
+test.file_grep(out_filename, r'"gpu_to_cpu_var_idxs": \[')
+test.file_grep(out_filename, r'"cpu_visible_var_idxs": \[')
+test.file_grep(out_filename, r'"is_gpu_input": true')
+test.file_grep(out_filename, r'"is_gpu_output": true')
 test.file_grep(out_filename, r'"lhs_name": "y"')
 
 for filename in glob.glob(test.obj_dir + "/*"):

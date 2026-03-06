@@ -133,17 +133,58 @@ size_t V3SimAccelBackendCudaWriter::write(const string& filename,
     of << "    default: return \"\";\n"
        << "    }\n"
        << "}\n";
+
+    of << "\nextern \"C\" __host__ uint32_t sim_accel_eval_input_count() {\n"
+       << "    return " << program.m_commPlan.m_cpuToGpuVarIdxs.size() << "U;\n"
+       << "}\n";
+    of << "\nextern \"C\" __host__ uint32_t sim_accel_eval_input_var_index(uint32_t slot) {\n"
+       << "    switch (slot) {\n";
+    for (size_t i = 0; i < program.m_commPlan.m_cpuToGpuVarIdxs.size(); ++i) {
+        of << "    case " << i << "U: return "
+           << program.m_commPlan.m_cpuToGpuVarIdxs.at(i) << "U;\n";
+    }
+    of << "    default: return 0xffffffffU;\n"
+       << "    }\n"
+       << "}\n";
+
+    of << "\nextern \"C\" __host__ uint32_t sim_accel_eval_output_count() {\n"
+       << "    return " << program.m_commPlan.m_gpuToCpuVarIdxs.size() << "U;\n"
+       << "}\n";
+    of << "\nextern \"C\" __host__ uint32_t sim_accel_eval_output_var_index(uint32_t slot) {\n"
+       << "    switch (slot) {\n";
+    for (size_t i = 0; i < program.m_commPlan.m_gpuToCpuVarIdxs.size(); ++i) {
+        of << "    case " << i << "U: return "
+           << program.m_commPlan.m_gpuToCpuVarIdxs.at(i) << "U;\n";
+    }
+    of << "    default: return 0xffffffffU;\n"
+       << "    }\n"
+       << "}\n";
     of.close();
 
     const string metaFilename = filename + ".vars.tsv";
     std::ofstream met{metaFilename};
     if (met.is_open()) {
-        met << "index\tname\thierarchy\tdirection\tis_primary_io\twidth\tis_activator\n";
+        met << "index\tname\thierarchy\tdirection\tis_primary_io\twidth\tis_activator"
+               "\tis_cpu_visible\tis_gpu_input\tis_gpu_output\tinput_slot\toutput_slot\n";
         for (size_t i = 0; i < program.m_vars.size(); ++i) {
             const V3SimAccelProgram::Var& var = program.m_vars.at(i);
             met << i << '\t' << var.m_name << '\t' << var.m_hierarchy << '\t'
                 << var.m_direction << '\t' << (var.m_isPrimaryIo ? "1" : "0") << '\t'
-                << var.m_width << '\t' << (var.m_isActivator ? "1" : "0") << '\n';
+                << var.m_width << '\t' << (var.m_isActivator ? "1" : "0") << '\t'
+                << (var.m_isCpuVisible ? "1" : "0") << '\t' << (var.m_isGpuInput ? "1" : "0")
+                << '\t' << (var.m_isGpuOutput ? "1" : "0") << '\t';
+            if (var.m_inputSlot == V3SimAccelProgram::INVALID_SLOT) {
+                met << '-';
+            } else {
+                met << var.m_inputSlot;
+            }
+            met << '\t';
+            if (var.m_outputSlot == V3SimAccelProgram::INVALID_SLOT) {
+                met << '-';
+            } else {
+                met << var.m_outputSlot;
+            }
+            met << '\n';
         }
     }
 
@@ -160,6 +201,24 @@ size_t V3SimAccelBackendCudaWriter::write(const string& filename,
                 first = false;
             }
             dep << "\n";
+        }
+    }
+
+    const string commFilename = filename + ".comm.tsv";
+    std::ofstream comm{commFilename};
+    if (comm.is_open()) {
+        comm << "direction\tslot\tvar_idx\tname\twidth\tis_cpu_visible\n";
+        for (size_t slot = 0; slot < program.m_commPlan.m_cpuToGpuVarIdxs.size(); ++slot) {
+            const size_t varIdx = program.m_commPlan.m_cpuToGpuVarIdxs.at(slot);
+            const V3SimAccelProgram::Var& var = program.m_vars.at(varIdx);
+            comm << "cpu_to_gpu\t" << slot << '\t' << varIdx << '\t' << var.m_name << '\t'
+                 << var.m_width << '\t' << (var.m_isCpuVisible ? "1" : "0") << '\n';
+        }
+        for (size_t slot = 0; slot < program.m_commPlan.m_gpuToCpuVarIdxs.size(); ++slot) {
+            const size_t varIdx = program.m_commPlan.m_gpuToCpuVarIdxs.at(slot);
+            const V3SimAccelProgram::Var& var = program.m_vars.at(varIdx);
+            comm << "gpu_to_cpu\t" << slot << '\t' << varIdx << '\t' << var.m_name << '\t'
+                 << var.m_width << '\t' << (var.m_isCpuVisible ? "1" : "0") << '\n';
         }
     }
 

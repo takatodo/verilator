@@ -73,6 +73,8 @@ class SimAccelAssignwBool32Lowerer final : public VNVisitorConst {
 private:
     V3SimAccelProgram m_program;
     std::unordered_map<const AstVar*, size_t> m_varToIndex;
+    std::unordered_set<size_t> m_gpuReadVarIdxs;
+    std::unordered_set<size_t> m_gpuWrittenVarIdxs;
     size_t m_skippedUnsupported = 0;
     size_t m_skippedInternal = 0;
     size_t m_skippedNonVarLhs = 0;
@@ -91,9 +93,32 @@ private:
         var.m_width = varp->widthMin();
         var.m_isPrimaryIo = varp->isPrimaryIO();
         var.m_isActivator = simAccelIsActivator(varp->name());
+        var.m_isCpuVisible = var.m_isPrimaryIo;
         m_program.m_vars.push_back(std::move(var));
         m_varToIndex.emplace(varp, idx);
         return idx;
+    }
+
+    void finalizeCommPlan() {
+        for (size_t idx = 0; idx < m_program.m_vars.size(); ++idx) {
+            V3SimAccelProgram::Var& var = m_program.m_vars.at(idx);
+            const bool isGpuRead = (m_gpuReadVarIdxs.find(idx) != m_gpuReadVarIdxs.end());
+            const bool isGpuWritten = (m_gpuWrittenVarIdxs.find(idx) != m_gpuWrittenVarIdxs.end());
+            // Boundary inputs exclude GPU-local temporaries; outputs stay conservative until
+            // we have whole-design usage analysis for hybrid scheduling.
+            var.m_isGpuInput = isGpuRead && !isGpuWritten;
+            var.m_isGpuOutput = isGpuWritten;
+
+            if (var.m_isGpuInput) {
+                var.m_inputSlot = m_program.m_commPlan.m_cpuToGpuVarIdxs.size();
+                m_program.m_commPlan.m_cpuToGpuVarIdxs.push_back(idx);
+            }
+            if (var.m_isGpuOutput) {
+                var.m_outputSlot = m_program.m_commPlan.m_gpuToCpuVarIdxs.size();
+                m_program.m_commPlan.m_gpuToCpuVarIdxs.push_back(idx);
+            }
+            if (var.m_isCpuVisible) m_program.m_commPlan.m_cpuVisibleVarIdxs.push_back(idx);
+        }
     }
 
     bool isSupportedExpr(const AstNodeExpr* nodep) const {
@@ -481,15 +506,20 @@ public:
         assign.m_lhsName = lhsVarp->name();
         assign.m_exprIdx = lowerExpr(nodep->rhsp());
         assign.m_rhsIdxs.reserve(rhsVarsVec.size());
+        m_gpuWrittenVarIdxs.emplace(lhsIdx);
         for (const AstVar* const rhsVarp : rhsVarsVec) {
             const auto it = m_varToIndex.find(rhsVarp);
-            if (it != m_varToIndex.end()) assign.m_rhsIdxs.push_back(it->second);
+            if (it != m_varToIndex.end()) {
+                assign.m_rhsIdxs.push_back(it->second);
+                m_gpuReadVarIdxs.emplace(it->second);
+            }
         }
         m_program.m_assigns.push_back(std::move(assign));
         ++m_program.m_stats.m_assignwSupported;
     }
 
     V3SimAccelProgram program() && {
+        finalizeCommPlan();
         m_program.m_stats.m_assignwIgnored = m_skippedUnsupported + m_skippedInternal
                                              + m_skippedNonVarLhs + m_skippedTiming;
         m_program.m_stats.m_assignwTotal = m_program.m_stats.m_assignwSupported

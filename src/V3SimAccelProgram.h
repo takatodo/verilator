@@ -24,6 +24,8 @@
 
 class V3SimAccelProgram final {
 public:
+    static constexpr size_t INVALID_SLOT = static_cast<size_t>(-1);
+
     enum class ExprKind : uint8_t {
         VAR,
         CONST,
@@ -67,6 +69,11 @@ public:
         uint32_t m_width = 0;
         bool m_isPrimaryIo = false;
         bool m_isActivator = false;
+        bool m_isCpuVisible = false;
+        bool m_isGpuInput = false;
+        bool m_isGpuOutput = false;
+        size_t m_inputSlot = INVALID_SLOT;
+        size_t m_outputSlot = INVALID_SLOT;
     };
 
     struct Assign final {
@@ -82,10 +89,17 @@ public:
         size_t m_assignwIgnored = 0;
     };
 
+    struct CommPlan final {
+        std::vector<size_t> m_cpuToGpuVarIdxs;
+        std::vector<size_t> m_gpuToCpuVarIdxs;
+        std::vector<size_t> m_cpuVisibleVarIdxs;
+    };
+
     std::vector<Expr> m_exprs;
     std::vector<Var> m_vars;
     std::vector<Assign> m_assigns;
     Stats m_stats;
+    CommPlan m_commPlan;
 };
 
 #endif  // Guard
