@@ -33,10 +33,12 @@ bench_dir_hit = test.obj_dir + "/sim_accel_bench_hit"
 bench_dir_objhit = test.obj_dir + "/sim_accel_bench_object_hit"
 bench_dir_hybrid = test.obj_dir + "/sim_accel_bench_hybrid"
 bench_dir_hybrid_cluster = test.obj_dir + "/sim_accel_bench_hybrid_cluster"
+bench_dir_hybrid_cluster_auto = test.obj_dir + "/sim_accel_bench_hybrid_cluster_auto"
 bench_run_log = bench_dir_hit + "/bench_run.log"
 bench_objhit_log = bench_dir_objhit + "/bench_run.log"
 bench_hybrid_log = bench_dir_hybrid + "/bench_run.log"
 bench_hybrid_cluster_log = bench_dir_hybrid_cluster + "/bench_run.log"
+bench_hybrid_cluster_auto_log = bench_dir_hybrid_cluster_auto + "/bench_run.log"
 kernel_log = bench_dir_hit + "/verilator_cuda.log"
 kernel_cu = bench_dir_hit + "/t.sim_accel.kernel.cu"
 kernel_vars = kernel_cu + ".vars.tsv"
@@ -48,7 +50,7 @@ kernel_link = kernel_cu + ".link.cu"
 kernel_parts = kernel_cu + ".partitions.tsv"
 
 for path in [cache_dir, bench_dir_miss, bench_dir_hit, bench_dir_objhit, bench_dir_hybrid,
-             bench_dir_hybrid_cluster]:
+             bench_dir_hybrid_cluster, bench_dir_hybrid_cluster_auto]:
     shutil.rmtree(path, ignore_errors=True)
 
 bench_cmd = (
@@ -106,6 +108,19 @@ bench_cmd_hybrid_cluster = (
     + " --compile-cache-dir " + cache_dir
     + " -- "
     + test.t_dir + "/t_sim_accel_bench_exec.v")
+bench_cmd_hybrid_cluster_auto = (
+    os.environ["VERILATOR_ROOT"] + "/bin/verilator --sim-accel-bench"
+    + " --top-module t"
+    + " --nstates 2048"
+    + " --gpu-reps 4"
+    + " --cpu-reps 2"
+    + " --assigns-per-kernel 2"
+    + " --hybrid-mode single-cluster"
+    + " --hybrid-cluster-auto"
+    + " --hybrid-cluster-auto-max-input-bits 128"
+    + " --compile-cache-dir " + cache_dir
+    + " -- "
+    + test.t_dir + "/t_sim_accel_bench_exec.v")
 
 test.run_capture(bench_cmd.replace("-- ", "--outdir " + bench_dir_miss + " -- ", 1))
 test.run_capture(bench_cmd_hit.replace("-- ", "--outdir " + bench_dir_hit + " -- ", 1))
@@ -113,6 +128,8 @@ test.run_capture(bench_cmd_object_hit.replace("-- ", "--outdir " + bench_dir_obj
 test.run_capture(bench_cmd_hybrid.replace("-- ", "--outdir " + bench_dir_hybrid + " -- ", 1))
 test.run_capture(
     bench_cmd_hybrid_cluster.replace("-- ", "--outdir " + bench_dir_hybrid_cluster + " -- ", 1))
+test.run_capture(
+    bench_cmd_hybrid_cluster_auto.replace("-- ", "--outdir " + bench_dir_hybrid_cluster_auto + " -- ", 1))
 
 for filename in [bench_run_log, kernel_log, kernel_cu, kernel_vars, kernel_api, kernel_cpu, kernel_link, kernel_parts]:
     if not os.path.exists(filename):
@@ -158,6 +175,12 @@ test.file_grep(bench_hybrid_cluster_log, r"hybrid_cluster_output_bytes_per_batch
 test.file_grep(bench_hybrid_cluster_log, r"hybrid_gpu_ms_per_rep=")
 test.file_grep(bench_hybrid_cluster_log, r"hybrid_cpu_ms_per_rep=")
 test.file_grep(bench_hybrid_cluster_log, r"hybrid_mismatch=0")
+test.file_grep(bench_hybrid_cluster_auto_log, r"hybrid_mode=single-cluster")
+test.file_grep(bench_hybrid_cluster_auto_log, r"hybrid_cluster_auto=1")
+test.file_grep(bench_hybrid_cluster_auto_log, r"hybrid_cluster_auto_candidate_count=[1-9][0-9]*")
+test.file_grep(bench_hybrid_cluster_auto_log, r"hybrid_cluster_auto_selected_owner_hint=cpu_boundary_heavy")
+test.file_grep(bench_hybrid_cluster_auto_log, r"hybrid_cluster_auto_fallback_used=1")
+test.file_grep(bench_hybrid_cluster_auto_log, r"hybrid_mismatch=0")
 test.file_grep(bench_run_log, r"speedup_gpu_over_cpu=")
 test.file_grep(bench_run_log, r"kernel_partitions=[2-9][0-9]*")
 test.file_grep(bench_run_log, r"auto_engine_recommendation=")

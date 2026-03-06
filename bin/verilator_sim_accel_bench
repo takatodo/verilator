@@ -1025,36 +1025,76 @@ static void printUsageAndExit(const char* argv0) {
   std::exit(2);
 }
 
+static bool betterAutoHybridCluster(uint32_t clusterIdx, uint32_t assignCount, uint64_t inputBits,
+                                    uint32_t bestCluster, uint32_t bestAssignCount,
+                                    uint64_t bestInputBits) {
+  return assignCount > bestAssignCount
+         || (assignCount == bestAssignCount && inputBits < bestInputBits)
+         || (assignCount == bestAssignCount && inputBits == bestInputBits
+             && clusterIdx < bestCluster);
+}
+
 static bool selectAutoHybridCluster(uint32_t clusterCount, uint64_t maxInputBits,
-                                    uint32_t* selectedClusterp,
-                                    uint32_t* candidateCountp) {
-  bool found = false;
-  uint32_t bestCluster = 0;
-  uint32_t bestAssignCount = 0;
-  uint64_t bestInputBits = 0;
-  uint32_t candidateCount = 0;
+                                    uint32_t* selectedClusterp, uint32_t* candidateCountp,
+                                    std::string* selectedOwnerHintp, bool* fallbackUsedp) {
+  bool foundPreferred = false;
+  uint32_t bestPreferredCluster = 0;
+  uint32_t bestPreferredAssignCount = 0;
+  uint64_t bestPreferredInputBits = 0;
+  uint32_t preferredCandidateCount = 0;
+
+  bool foundFallback = false;
+  uint32_t bestFallbackCluster = 0;
+  uint32_t bestFallbackAssignCount = 0;
+  uint64_t bestFallbackInputBits = 0;
+  uint32_t fallbackCandidateCount = 0;
+
   for (uint32_t clusterIdx = 0; clusterIdx < clusterCount; ++clusterIdx) {
     const std::string ownerHint = sim_accel_eval_cluster_owner_hint(clusterIdx);
     const uint64_t inputBits = sim_accel_eval_cluster_input_signature_bits(clusterIdx);
     const uint32_t assignCount = sim_accel_eval_cluster_assign_count(clusterIdx);
-    if (ownerHint != "gpu_candidate") continue;
     if (inputBits > maxInputBits) continue;
     if (assignCount == 0) continue;
-    ++candidateCount;
-    if (!found || assignCount > bestAssignCount
-        || (assignCount == bestAssignCount && inputBits < bestInputBits)
-        || (assignCount == bestAssignCount && inputBits == bestInputBits
-            && clusterIdx < bestCluster)) {
-      found = true;
-      bestCluster = clusterIdx;
-      bestAssignCount = assignCount;
-      bestInputBits = inputBits;
+
+    if (ownerHint == "gpu_candidate") {
+      ++preferredCandidateCount;
+      if (!foundPreferred || betterAutoHybridCluster(clusterIdx, assignCount, inputBits,
+                                                     bestPreferredCluster,
+                                                     bestPreferredAssignCount,
+                                                     bestPreferredInputBits)) {
+        foundPreferred = true;
+        bestPreferredCluster = clusterIdx;
+        bestPreferredAssignCount = assignCount;
+        bestPreferredInputBits = inputBits;
+      }
+    } else if (ownerHint == "cpu_boundary_heavy") {
+      ++fallbackCandidateCount;
+      if (!foundFallback || betterAutoHybridCluster(clusterIdx, assignCount, inputBits,
+                                                    bestFallbackCluster,
+                                                    bestFallbackAssignCount,
+                                                    bestFallbackInputBits)) {
+        foundFallback = true;
+        bestFallbackCluster = clusterIdx;
+        bestFallbackAssignCount = assignCount;
+        bestFallbackInputBits = inputBits;
+      }
     }
   }
-  if (candidateCountp) *candidateCountp = candidateCount;
-  if (!found) return false;
-  *selectedClusterp = bestCluster;
-  return true;
+  if (candidateCountp) *candidateCountp = preferredCandidateCount + fallbackCandidateCount;
+  if (selectedOwnerHintp) *selectedOwnerHintp = "";
+  if (fallbackUsedp) *fallbackUsedp = false;
+  if (foundPreferred) {
+    *selectedClusterp = bestPreferredCluster;
+    if (selectedOwnerHintp) *selectedOwnerHintp = "gpu_candidate";
+    return true;
+  }
+  if (foundFallback) {
+    *selectedClusterp = bestFallbackCluster;
+    if (selectedOwnerHintp) *selectedOwnerHintp = "cpu_boundary_heavy";
+    if (fallbackUsedp) *fallbackUsedp = true;
+    return true;
+  }
+  return false;
 }
 
 int main(int argc, char** argv) {
@@ -1073,6 +1113,8 @@ int main(int argc, char** argv) {
   uint32_t hybridClusterIndex = 0;
   bool hybridClusterAuto = false;
   uint64_t hybridClusterAutoMaxInputBits = 128;
+  bool hybridClusterAutoFallbackUsed = false;
+  std::string hybridClusterAutoSelectedOwnerHint;
 
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -1183,7 +1225,9 @@ int main(int argc, char** argv) {
   uint32_t hybridClusterAutoCandidateCount = 0;
   if (hybridMode == "single-cluster" && hybridClusterAuto) {
     if (!selectAutoHybridCluster(clusterCount, hybridClusterAutoMaxInputBits, &hybridClusterIndex,
-                                 &hybridClusterAutoCandidateCount)) {
+                                 &hybridClusterAutoCandidateCount,
+                                 &hybridClusterAutoSelectedOwnerHint,
+                                 &hybridClusterAutoFallbackUsed)) {
       std::cerr << "No suitable hybrid cluster found for auto-selection"
                 << " (max_input_bits=" << hybridClusterAutoMaxInputBits << ")\n";
       return 2;
@@ -1670,6 +1714,10 @@ int main(int argc, char** argv) {
     std::cout << "hybrid_cluster_auto=" << (hybridClusterAuto ? 1 : 0) << "\n";
     std::cout << "hybrid_cluster_auto_max_input_bits=" << hybridClusterAutoMaxInputBits << "\n";
     std::cout << "hybrid_cluster_auto_candidate_count=" << hybridClusterAutoCandidateCount << "\n";
+    std::cout << "hybrid_cluster_auto_fallback_used="
+              << (hybridClusterAutoFallbackUsed ? 1 : 0) << "\n";
+    std::cout << "hybrid_cluster_auto_selected_owner_hint="
+              << hybridClusterAutoSelectedOwnerHint << "\n";
     std::cout << "hybrid_cluster_assign_count="
               << sim_accel_eval_cluster_assign_count(hybridClusterIndex) << "\n";
     std::cout << "hybrid_cluster_input_signature_bits="

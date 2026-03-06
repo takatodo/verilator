@@ -46,7 +46,8 @@ expect_failure(["--hybrid-mode", "single-cluster", "--hybrid-cluster-index", "0"
                "--hybrid-cluster-index and --hybrid-cluster-auto are mutually exclusive")
 expect_failure(["--hybrid-cluster-auto"],
                "--hybrid-cluster-auto requires --hybrid-mode single-cluster")
-expect_failure(["--hybrid-mode", "single-cluster", "--hybrid-cluster-auto"],
+expect_failure(["--hybrid-mode", "single-cluster", "--hybrid-cluster-auto",
+                "--hybrid-cluster-auto-max-input-bits", "0"],
                "No suitable hybrid cluster found for auto-selection")
 
 test.passes()
