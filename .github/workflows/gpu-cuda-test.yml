@@ -1,0 +1,91 @@
+---
+# DESCRIPTION: Github actions config
+# SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
+
+name: gpu-cuda-test
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * 0'  # weekly
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+    working-directory: repo
+
+concurrency:
+  # At most 1 GPU CI run per ref
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gpu-cuda:
+    name: sim-accel CUDA smoke
+    # Security: never run untrusted fork PR code on self-hosted GPU runners.
+    # For PRs, require both maintainer label and same-repo source branch.
+    if: |
+      (github.event_name == 'schedule'
+        && vars.ENABLE_SCHEDULED_JOBS == 'true') ||
+      (github.event_name == 'pull_request'
+        && contains(github.event.pull_request.labels.*.name, 'pr: gpu-cuda')
+        && github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'workflow_dispatch')
+    runs-on: [self-hosted, linux, x64, gpu]
+    timeout-minutes: 120
+    env:
+      CCACHE_DISABLE: 1
+      VERILATOR_TEST_REQUIRE_SIM_ACCEL_CUDA: 1
+      VERILATOR_TEST_REQUIRE_GEM_CUDA: 1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          path: repo
+
+      - name: Show GPU toolchain
+        run: |
+          set -euo pipefail
+          command -v nvidia-smi
+          nvidia-smi
+          command -v nvcc
+          nvcc --version
+
+      - name: Build Verilator
+        run: |
+          set -euo pipefail
+          autoconf
+          ./configure --enable-longtests --enable-ccwarn
+          make -j "$(nproc)"
+          make venv
+
+      - name: Run sim-accel bench regressions
+        run: |
+          set -euo pipefail
+          source .venv/bin/activate
+          mkdir -p obj_gpu_ci/logs
+          tests=(
+            t_sim_accel_bench_bad
+            t_sim_accel_bench_exec
+          )
+          for t in "${tests[@]}"; do
+            echo "=== Running ${t} ==="
+            python3 "test_regress/t/${t}.py" --vlt --verbose \
+              |& tee "obj_gpu_ci/logs/${t}.log"
+          done
+
+      - name: Upload GPU CI logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gpu-cuda-test-logs
+          path: |
+            ${{ github.workspace }}/repo/obj_gpu_ci/logs
+            ${{ github.workspace }}/repo/obj_vlt/t_sim_accel_bench_*/vlt_*.log
+            ${{ github.workspace }}/repo/obj_vlt/t_sim_accel_bench_exec/sim_accel_bench/*

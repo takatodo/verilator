@@ -158,6 +158,7 @@ foreach(
     verilator_gantt
     verilator_ccache_report
     verilator_difftree
+    verilator_sim_accel_bench
     verilator_profcfunc
     verilator_includer
 )

@@ -33,6 +33,7 @@ my $opt_gdb;
 my $opt_rr;
 my $opt_gdbbt;
 my $opt_quiet_exit;
+my $opt_sim_accel_bench;
 my $opt_unlimited_stack = 1;
 my $opt_valgrind;
 
@@ -64,6 +65,7 @@ if (! GetOptions(
           "quiet!"           => \$opt_quiet_exit,  # As -quiet implies -quiet-exit
           "quiet-exit!"      => \$opt_quiet_exit,
           "rr!"              => \$opt_rr,
+          "sim-accel-bench!" => \$opt_sim_accel_bench,
           "unlimited-stack!" => \$opt_unlimited_stack,
           "valgrind!"        => \$opt_valgrind,
           # Additional parameters
@@ -89,6 +91,11 @@ if (defined $ENV{VERILATOR_ROOT}) {
 if ($opt_gdbbt && !gdb_works()) {
     warn "-Info: --gdbbt ignored: gdb doesn't seem to be working\n" if $Debug;
     $opt_gdbbt = 0;
+}
+
+if ($opt_sim_accel_bench) {
+    run_sim_accel_bench();
+    exit 0;
 }
 
 # Determine runtime flags and run
@@ -157,6 +164,46 @@ if ($opt_gdb) {
 
 sub usage {
     pod2usage(-verbose => 2, -exitval => 0, -output => \*STDOUT);
+}
+
+sub run_sim_accel_bench {
+    my $bench_script = "$ENV{VERILATOR_ROOT}/bin/verilator_sim_accel_bench";
+    if (!-x $bench_script) {
+        warn "%Error: verilator: --sim-accel-bench helper script not found or not executable:\n";
+        warn "%Error:   $ENV{VERILATOR_ROOT}/bin/verilator_sim_accel_bench\n";
+        exit 1;
+    }
+    my @bench_raw_sw;
+    for (my $i = 0; $i <= $#Opt_Verilator_Sw; ++$i) {
+        my $sw = $Opt_Verilator_Sw[$i];
+        if ($sw eq "--sim-accel-bench" || $sw eq "--no-sim-accel-bench") {
+            next;
+        } elsif ($sw eq "--debug") {
+            # --debug may be passed as --debug <level>; skip both wrapper fields.
+            if ($i < $#Opt_Verilator_Sw && $Opt_Verilator_Sw[$i + 1] !~ /^-/) {
+                ++$i;
+            }
+            next;
+        } elsif ($sw =~ /^--(?:no-)?(?:aslr|gdb|gdbbt|quiet|quiet-exit|rr|unlimited-stack|valgrind)$/) {
+            next;
+        } elsif ($sw eq "--help") {
+            next;
+        }
+        push @bench_raw_sw, $sw;
+    }
+
+    if ($#bench_raw_sw < 0) {
+        warn "%Error: verilator: --sim-accel-bench needs benchmark arguments.\n";
+        warn "%Error: Example:\n";
+        warn "%Error:   verilator --sim-accel-bench --top-module <TOP> --outdir <DIR> -- <rtl files...>\n";
+        exit 1;
+    }
+    my @bench_sw = map { sh_escape($_) } @bench_raw_sw;
+    run(ulimit_stack_unlimited()
+        . aslr(1)
+        . sh_escape($bench_script)
+        . " --verilator " . sh_escape(verilator_bin())
+        . " " . join(' ', @bench_sw));
 }
 
 sub debug {
@@ -396,6 +443,25 @@ detailed descriptions of these arguments.
     --future1 <option>          Ignore an option with argument for compatibility
      -fno-<optimization>        Disable internal optimization stage
      -G<name>=<value>           Overwrite top-level parameter
+    --sim-accel-only            Create experimental sim-accel output (.sim_accel.kernel.cu)
+    --sim-accel-output <filename>  Set sim-accel output filename (.sim_accel.kernel.cu)
+    --sim-accel-sidecar         Emit sim-accel output alongside normal --cc/--sc output
+    --sim-accel-sidecar-output <filename>  Set sidecar sim-accel output filename
+    --sim-accel-split-modules   Split sim-accel kernels by elaborated module
+    --sim-accel-backend <name>  Select sim-accel backend (currently: cuda)
+    --sim-accel-strategy <name> Select sim-accel strategy (currently: gem)
+    --sim-accel-ir-only         Create sim-accel IR output (.sim_accel.tree.json)
+    --sim-accel-ir-output <filename>  Set sim-accel IR output filename (.sim_accel.tree.json)
+    --sim-accel-bench         Run bundled sim-accel CUDA benchmark flow (helper mode)
+    --gpu-only                  Alias of --sim-accel-only
+    --gpu-output <filename>     Alias of --sim-accel-output
+    --gpu-sidecar               Alias of --sim-accel-sidecar
+    --gpu-sidecar-output <filename>  Alias of --sim-accel-sidecar-output
+    --gpu-split-modules         Alias of --sim-accel-split-modules
+    --gpu-backend <name>        Alias of --sim-accel-backend
+    --gpu-strategy <name>       Alias of --sim-accel-strategy
+    --gpu-ir-only               Alias of --sim-accel-ir-only
+    --gpu-ir-output <filename>  Alias of --sim-accel-ir-output
     --gate-stmts <value>        Tune gate optimizer depth
     --gdb                       Run Verilator under GDB interactively
     --gdbbt                     Run Verilator under GDB for backtrace

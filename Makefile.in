@@ -249,6 +249,7 @@ VL_INST_PUBLIC_BIN_FILES = \
 # Don't put wildcards in these variables, it might cause an uninstall of other stuff
 VL_INST_PRIVATE_SCRIPT_FILES = \
   verilator_ccache_report \
+  verilator_sim_accel_bench \
   verilator_includer \
 
 VL_INST_INC_BLDDIR_FILES = \
@@ -495,6 +496,7 @@ MAKE_FILES = \
 PERL_PROGRAMS = \
   bin/redirect \
   bin/verilator \
+  bin/verilator_sim_accel_bench \
   bin/verilator_coverage \
 
 # Python programs, subject to format and lint

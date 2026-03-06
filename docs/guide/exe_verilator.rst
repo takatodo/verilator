@@ -155,7 +155,8 @@ Summary:
    requires GNU Make to be available on the platform.
 
    :vlopt:`--build` cannot be specified when using :vlopt:`-E`,
-   :vlopt:`--dpi-hdr-only`, :vlopt:`--json-only` or :vlopt:`--lint-only`.
+   :vlopt:`--dpi-hdr-only`, :vlopt:`--json-only`, :vlopt:`--sim-accel-ir-only`,
+   :vlopt:`--sim-accel-only` or :vlopt:`--lint-only`.
 
 .. option:: --build-dep-bin <filename>
 
@@ -841,6 +842,42 @@ Summary:
    (e.g., VERILATOR_ROOT), print that and exit immediately. Otherwise, print
    a newline and exit immediately. This can be useful in makefiles. See
    also :vlopt:`-V`, and the various :file:`*.mk` files.
+
+.. option:: --gpu-backend <name>
+
+   Alias of :vlopt:`--sim-accel-backend`.
+
+.. option:: --gpu-ir-only
+
+   Alias of :vlopt:`--sim-accel-ir-only`.
+
+.. option:: --gpu-ir-output <filename>
+
+   Alias of :vlopt:`--sim-accel-ir-output`.
+
+.. option:: --gpu-only
+
+   Alias of :vlopt:`--sim-accel-only`.
+
+.. option:: --gpu-output <filename>
+
+   Alias of :vlopt:`--sim-accel-output`.
+
+.. option:: --gpu-sidecar
+
+   Alias of :vlopt:`--sim-accel-sidecar`.
+
+.. option:: --gpu-sidecar-output <filename>
+
+   Alias of :vlopt:`--sim-accel-sidecar-output`.
+
+.. option:: --gpu-split-modules
+
+   Alias of :vlopt:`--sim-accel-split-modules`.
+
+.. option:: --gpu-strategy <name>
+
+   Alias of :vlopt:`--sim-accel-strategy`.
 
 .. option:: --help
 
@@ -1639,6 +1676,88 @@ Summary:
    Option :vlopt:`--no-sched-zero-delay` can be used if the input contains
    ``#0`` delays, but they are known to be not executed at runtime. This can
    improve simulation performance.
+
+.. option:: --sim-accel-backend <name>
+
+   Select the sim-accel backend implementation for emission/execution.
+
+   Current supported value is ``cuda``.
+   Alias: :vlopt:`--gpu-backend`.
+
+.. option:: --sim-accel-bench
+
+   Run the bundled sim-accel CUDA benchmark helper flow.
+
+   This helper mode invokes :file:`verilator_sim_accel_bench`, which
+   generates sim-accel CUDA output, builds a benchmark runner, and reports
+   CPU/GPU timing and mismatch summary for the provided design.
+
+   Example usage::
+
+      verilator --sim-accel-bench --top-module TOP --outdir /tmp/bench -- <rtl files...>
+
+.. option:: --sim-accel-ir-only
+
+   Create sim-accel IR output only, do not create any C++ model output.
+
+   Generates a JSON AST output intended for sim-accel downstream tooling.
+   The default filename is ``<prefix>.sim_accel.tree.json`` in :vlopt:`--Mdir`.
+   Alias: :vlopt:`--gpu-ir-only`.
+
+.. option:: --sim-accel-ir-output <filename>
+
+   Specifies the filename for the sim-accel IR output file (``.sim_accel.tree.json``) of
+   :vlopt:`--sim-accel-ir-only`. Using this option automatically sets
+   :vlopt:`--sim-accel-ir-only`.
+   Alias: :vlopt:`--gpu-ir-output`.
+
+.. option:: --sim-accel-only
+
+   Create experimental sim-accel output only, do not create any C++ model output.
+
+   Generates a CUDA kernel-oriented output from supported ASSIGNW/logic forms.
+   The default filename is ``<prefix>.sim_accel.kernel.cu`` in :vlopt:`--Mdir`.
+   Alias: :vlopt:`--gpu-only`.
+
+.. option:: --sim-accel-output <filename>
+
+   Specifies the filename for the sim-accel output file (``.sim_accel.kernel.cu``) of
+   :vlopt:`--sim-accel-only`. Using this option automatically sets
+   :vlopt:`--sim-accel-only`.
+   Alias: :vlopt:`--gpu-output`.
+
+.. option:: --sim-accel-sidecar
+
+   Emit sim-accel output (``.sim_accel.kernel.cu``) in addition to normal
+   :vlopt:`--cc`/:vlopt:`--sc` output.
+
+   This is intended for sidecar workflows that keep the standard C++ model
+   while also generating a CUDA kernel artifact from supported ASSIGNW/logic
+   forms. The default filename is ``<prefix>.sim_accel.kernel.cu`` in
+   :vlopt:`--Mdir`.
+   Alias: :vlopt:`--gpu-sidecar`.
+
+.. option:: --sim-accel-sidecar-output <filename>
+
+   Specifies the filename for sidecar sim-accel output of
+   :vlopt:`--sim-accel-sidecar`. Using this option automatically sets
+   :vlopt:`--sim-accel-sidecar`.
+   Alias: :vlopt:`--gpu-sidecar-output`.
+
+.. option:: --sim-accel-split-modules
+
+   Emit one sim-accel kernel per elaborated module partition instead of a single
+   monolithic kernel.
+
+   This can improve debugability and incremental integration workflows.
+   Alias: :vlopt:`--gpu-split-modules`.
+
+.. option:: --sim-accel-strategy <name>
+
+   Select the sim-accel lowering/partition strategy.
+
+   Current supported value is ``gem``.
+   Alias: :vlopt:`--gpu-strategy`.
 
 .. option:: --skip-identical
 
