@@ -119,6 +119,8 @@
 
 #include <ctime>
 
+#include "V3EmitGem.h"
+
 VL_DEFINE_DEBUG_FUNCTIONS;
 
 V3Global v3Global;
@@ -142,6 +144,8 @@ static void emitJson() VL_MT_DISABLED {
 static void emitSerialized() VL_MT_DISABLED {
     if (v3Global.opt.jsonOnly()) emitJson();
 }
+
+
 
 static void process() {
     {
@@ -195,7 +199,8 @@ static void process() {
         if (v3Global.hasTable()) V3Udp::udpResolve(v3Global.rootp());
 
         // Create a hierarchical Verilation plan
-        if (!v3Global.opt.lintOnly() && !v3Global.opt.serializeOnly()
+        if (!v3Global.opt.lintOnly() && !v3Global.opt.serializeOnly() && !v3Global.opt.gemIrOnly()
+            && !v3Global.opt.gemCudaOnly()
             && v3Global.opt.hierarchical() && !v3Global.opt.hierChild()) {
             V3Hierarchical::createGraph(v3Global.rootp());
             // If a plan is created, further analysis is not necessary.
@@ -622,7 +627,8 @@ static void process() {
         }
 
         // Output the text
-        if (!v3Global.opt.lintOnly() && !v3Global.opt.serializeOnly()
+        if (!v3Global.opt.lintOnly() && !v3Global.opt.serializeOnly() && !v3Global.opt.gemIrOnly()
+            && !v3Global.opt.gemCudaOnly()
             && !v3Global.opt.dpiHdrOnly()) {
             // emitcInlines is first, as it may set needHInlines which other emitters read
             V3EmitC::emitcInlines();
@@ -638,12 +644,16 @@ static void process() {
         // End of conversion
         V3Stats::addStatPerf(V3Stats::STAT_WALLTIME_CVT, cvtWallTime.deltaTime());
     }
-    if (!v3Global.opt.serializeOnly()
+    if (!v3Global.opt.serializeOnly() && !v3Global.opt.gemIrOnly() && !v3Global.opt.gemCudaOnly()
         && !v3Global.opt.dpiHdrOnly()) {  // Unfortunately we have some lint checks in emitcImp.
         V3EmitC::emitcImp();
     }
     if (v3Global.opt.serializeOnly()) {
         emitSerialized();
+    } else if (v3Global.opt.gemCudaOnly()) {
+        V3EmitGem::emitGemCuda();
+    } else if (v3Global.opt.gemIrOnly()) {
+        V3EmitGem::emitGemIr();
     } else if (v3Global.opt.debugCheck() && !v3Global.opt.lintOnly()
                && !v3Global.opt.dpiHdrOnly()) {
         // Check JSON when debugging to make sure no missing node types
@@ -660,7 +670,9 @@ static void process() {
         V3EmitC::emitcFiles();
     }
 
-    if (!v3Global.opt.lintOnly() && !v3Global.opt.serializeOnly() && !v3Global.opt.dpiHdrOnly()) {
+    if (!v3Global.opt.lintOnly() && !v3Global.opt.serializeOnly() && !v3Global.opt.gemIrOnly()
+        && !v3Global.opt.gemCudaOnly()
+        && !v3Global.opt.dpiHdrOnly()) {
         if (v3Global.opt.main()) V3EmitCMain::emit();
 
         // V3EmitMk/V3EmitMkJson must be after all other emitters,
