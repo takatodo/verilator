@@ -89,6 +89,16 @@ std::vector<size_t> toSortedVector(const std::unordered_set<size_t>& in) {
     return out;
 }
 
+std::vector<size_t> filterReadFromOutputVarIdxs(
+    const std::vector<size_t>& readVarIdxs, const std::unordered_set<size_t>& writtenBeforeIdxs) {
+    std::vector<size_t> out;
+    out.reserve(readVarIdxs.size());
+    for (const size_t readIdx : readVarIdxs) {
+        if (writtenBeforeIdxs.find(readIdx) != writtenBeforeIdxs.end()) out.push_back(readIdx);
+    }
+    return out;
+}
+
 string simAccelPartitionHierarchyLabel(const V3SimAccelProgram::Var& var) {
     return var.m_hierarchy.empty() ? string{"<top>"} : var.m_hierarchy;
 }
@@ -499,6 +509,37 @@ void emitPartitionLaunchHelpers(std::ofstream& of, const V3SimAccelProgram& prog
        << "    }\n"
        << "}\n\n";
 
+    of << "extern \"C\" __host__ uint32_t sim_accel_eval_partition_read_from_output_count(uint32_t index) {\n"
+       << "    switch (index) {\n";
+    for (size_t i = 0; i < partitions.size(); ++i) {
+        const std::vector<size_t> readFromOutput
+            = filterReadFromOutputVarIdxs(partitions.at(i).m_readVarIdxs,
+                                          partitions.at(i).m_writtenBeforeIdxs);
+        of << "    case " << i << "U: return " << readFromOutput.size() << "U;\n";
+    }
+    of << "    default: return 0U;\n"
+       << "    }\n"
+       << "}\n\n";
+
+    of << "extern \"C\" __host__ uint32_t sim_accel_eval_partition_read_from_output_var_index(uint32_t index,\n"
+       << "                                                                           uint32_t slot) {\n"
+       << "    switch (index) {\n";
+    for (size_t i = 0; i < partitions.size(); ++i) {
+        const std::vector<size_t> readFromOutput
+            = filterReadFromOutputVarIdxs(partitions.at(i).m_readVarIdxs,
+                                          partitions.at(i).m_writtenBeforeIdxs);
+        of << "    case " << i << "U:\n"
+           << "        switch (slot) {\n";
+        for (size_t slot = 0; slot < readFromOutput.size(); ++slot) {
+            of << "        case " << slot << "U: return " << readFromOutput.at(slot) << "U;\n";
+        }
+        of << "        default: return 0xffffffffU;\n"
+           << "        }\n";
+    }
+    of << "    default: return 0xffffffffU;\n"
+       << "    }\n"
+       << "}\n\n";
+
     of << "extern \"C\" __host__ uint32_t sim_accel_eval_partition_write_count(uint32_t index) {\n"
        << "    switch (index) {\n";
     for (size_t i = 0; i < partitions.size(); ++i) {
@@ -640,6 +681,36 @@ void emitClusterLaunchHelpers(std::ofstream& of, const std::vector<AssignCluster
         for (size_t slot = 0; slot < cluster.m_readVarIdxs.size(); ++slot) {
             of << "        case " << slot << "U: return " << cluster.m_readVarIdxs.at(slot)
                << "U;\n";
+        }
+        of << "        default: return 0xffffffffU;\n"
+           << "        }\n";
+    }
+    of << "    default: return 0xffffffffU;\n"
+       << "    }\n"
+       << "}\n\n";
+
+    of << "extern \"C\" __host__ uint32_t sim_accel_eval_cluster_read_from_output_count(uint32_t index) {\n"
+       << "    switch (index) {\n";
+    for (const AssignCluster& cluster : clusters) {
+        const std::vector<size_t> readFromOutput
+            = filterReadFromOutputVarIdxs(cluster.m_readVarIdxs, cluster.m_writtenBeforeIdxs);
+        of << "    case " << cluster.m_clusterIdx << "U: return " << readFromOutput.size()
+           << "U;\n";
+    }
+    of << "    default: return 0U;\n"
+       << "    }\n"
+       << "}\n\n";
+
+    of << "extern \"C\" __host__ uint32_t sim_accel_eval_cluster_read_from_output_var_index(uint32_t index,\n"
+       << "                                                                         uint32_t slot) {\n"
+       << "    switch (index) {\n";
+    for (const AssignCluster& cluster : clusters) {
+        const std::vector<size_t> readFromOutput
+            = filterReadFromOutputVarIdxs(cluster.m_readVarIdxs, cluster.m_writtenBeforeIdxs);
+        of << "    case " << cluster.m_clusterIdx << "U:\n"
+           << "        switch (slot) {\n";
+        for (size_t slot = 0; slot < readFromOutput.size(); ++slot) {
+            of << "        case " << slot << "U: return " << readFromOutput.at(slot) << "U;\n";
         }
         of << "        default: return 0xffffffffU;\n"
            << "        }\n";
@@ -795,6 +866,9 @@ void emitApiHeader(const string& filename, const std::vector<AssignPartition>& p
        << "extern \"C\" uint32_t sim_accel_eval_partition_read_count(uint32_t index);\n"
        << "extern \"C\" uint32_t sim_accel_eval_partition_read_var_index(uint32_t index,\n"
        << "                                                              uint32_t slot);\n"
+       << "extern \"C\" uint32_t sim_accel_eval_partition_read_from_output_count(uint32_t index);\n"
+       << "extern \"C\" uint32_t sim_accel_eval_partition_read_from_output_var_index(uint32_t index,\n"
+       << "                                                                          uint32_t slot);\n"
        << "extern \"C\" uint32_t sim_accel_eval_partition_write_count(uint32_t index);\n"
        << "extern \"C\" uint32_t sim_accel_eval_partition_write_var_index(uint32_t index,\n"
        << "                                                               uint32_t slot);\n"
@@ -807,6 +881,9 @@ void emitApiHeader(const string& filename, const std::vector<AssignPartition>& p
        << "extern \"C\" uint32_t sim_accel_eval_cluster_read_count(uint32_t index);\n"
        << "extern \"C\" uint32_t sim_accel_eval_cluster_read_var_index(uint32_t index,\n"
        << "                                                            uint32_t slot);\n"
+       << "extern \"C\" uint32_t sim_accel_eval_cluster_read_from_output_count(uint32_t index);\n"
+       << "extern \"C\" uint32_t sim_accel_eval_cluster_read_from_output_var_index(uint32_t index,\n"
+       << "                                                                        uint32_t slot);\n"
        << "extern \"C\" uint32_t sim_accel_eval_cluster_write_count(uint32_t index);\n"
        << "extern \"C\" uint32_t sim_accel_eval_cluster_write_var_index(uint32_t index,\n"
        << "                                                             uint32_t slot);\n"

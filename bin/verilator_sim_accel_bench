@@ -732,6 +732,21 @@ static std::vector<uint32_t> loadPartitionVarIdxs(uint32_t partitionIndex,
   return out;
 }
 
+static std::vector<uint32_t> subtractOrderedVarIdxs(const std::vector<uint32_t>& allVarIdxs,
+                                                    const std::vector<uint32_t>& removedVarIdxs,
+                                                    uint32_t nvars) {
+  std::vector<uint8_t> removed(nvars, 0);
+  for (const uint32_t varIdx : removedVarIdxs) {
+    if (varIdx < nvars) removed[varIdx] = 1;
+  }
+  std::vector<uint32_t> out;
+  out.reserve(allVarIdxs.size());
+  for (const uint32_t varIdx : allVarIdxs) {
+    if (varIdx >= nvars || !removed[varIdx]) out.push_back(varIdx);
+  }
+  return out;
+}
+
 static size_t logicalBytesPerBatch(const std::vector<uint32_t>& varIdxs,
                                    const std::vector<uint32_t>& widths, uint32_t nstates) {
   size_t perStateBytes = 0;
@@ -752,6 +767,31 @@ static std::vector<uint32_t> gatherSlotsVarMajor(const std::vector<uint32_t>& st
     std::copy_n(stateVarMajor.begin() + srcBase, nstates, out.begin() + dstBase);
   }
   return out;
+}
+
+static void gatherSlotsVarMajorInto(const std::vector<uint32_t>& stateVarMajor,
+                                    const std::vector<uint32_t>& varIdxs, uint32_t nstates,
+                                    std::vector<uint32_t>* outp) {
+  outp->resize(static_cast<size_t>(varIdxs.size()) * nstates, 0u);
+  for (size_t slot = 0; slot < varIdxs.size(); ++slot) {
+    const size_t srcBase = static_cast<size_t>(varIdxs[slot]) * nstates;
+    const size_t dstBase = slot * static_cast<size_t>(nstates);
+    std::copy_n(stateVarMajor.begin() + srcBase, nstates, outp->begin() + dstBase);
+  }
+}
+
+static void scatterSlotsVarMajor(std::vector<uint32_t>& stateVarMajor,
+                                 const std::vector<uint32_t>& compactSlots,
+                                 const std::vector<uint32_t>& varIdxs, uint32_t nstates) {
+  for (size_t slot = 0; slot < varIdxs.size(); ++slot) {
+    const size_t srcBase = slot * static_cast<size_t>(nstates);
+    const size_t dstBase = static_cast<size_t>(varIdxs[slot]) * nstates;
+    std::copy_n(compactSlots.begin() + srcBase, nstates, stateVarMajor.begin() + dstBase);
+  }
+}
+
+static size_t compactTransferBytes(const std::vector<uint32_t>& varIdxs, uint32_t nstates) {
+  return static_cast<size_t>(varIdxs.size()) * nstates * sizeof(uint32_t);
 }
 
 static void applyInitMode(std::vector<uint32_t>& h_in, uint32_t nvars, uint32_t nstates,
@@ -1116,6 +1156,8 @@ int main(int argc, char** argv) {
   }
   const auto widths = loadVarWidths("kernel_generated.vars.tsv", nvars);
   std::vector<uint32_t> hybridReadVarIdxs;
+  std::vector<uint32_t> hybridReadFromOutputVarIdxs;
+  std::vector<uint32_t> hybridReadInputVarIdxs;
   std::vector<uint32_t> hybridWriteVarIdxs;
   size_t hybridBoundaryInputBytes = 0;
   size_t hybridBoundaryOutputBytes = 0;
@@ -1125,23 +1167,35 @@ int main(int argc, char** argv) {
     hybridReadVarIdxs = loadPartitionVarIdxs(hybridPartitionIndex,
                                              sim_accel_eval_partition_read_count,
                                              sim_accel_eval_partition_read_var_index);
+    hybridReadFromOutputVarIdxs
+        = loadPartitionVarIdxs(hybridPartitionIndex,
+                               sim_accel_eval_partition_read_from_output_count,
+                               sim_accel_eval_partition_read_from_output_var_index);
+    hybridReadInputVarIdxs
+        = subtractOrderedVarIdxs(hybridReadVarIdxs, hybridReadFromOutputVarIdxs, nvars);
     hybridWriteVarIdxs = loadPartitionVarIdxs(hybridPartitionIndex,
                                               sim_accel_eval_partition_write_count,
                                               sim_accel_eval_partition_write_var_index);
     hybridBoundaryInputBytes = logicalBytesPerBatch(hybridReadVarIdxs, widths, nstates);
     hybridBoundaryOutputBytes = logicalBytesPerBatch(hybridWriteVarIdxs, widths, nstates);
-    hybridActualH2dBytes = bytes;
-    hybridActualD2hBytes = bytes;
+    hybridActualH2dBytes = compactTransferBytes(hybridReadFromOutputVarIdxs, nstates);
+    hybridActualD2hBytes = compactTransferBytes(hybridWriteVarIdxs, nstates);
   } else if (hybridMode == "single-cluster") {
     hybridReadVarIdxs = loadPartitionVarIdxs(hybridClusterIndex, sim_accel_eval_cluster_read_count,
                                              sim_accel_eval_cluster_read_var_index);
+    hybridReadFromOutputVarIdxs
+        = loadPartitionVarIdxs(hybridClusterIndex,
+                               sim_accel_eval_cluster_read_from_output_count,
+                               sim_accel_eval_cluster_read_from_output_var_index);
+    hybridReadInputVarIdxs
+        = subtractOrderedVarIdxs(hybridReadVarIdxs, hybridReadFromOutputVarIdxs, nvars);
     hybridWriteVarIdxs = loadPartitionVarIdxs(hybridClusterIndex,
                                               sim_accel_eval_cluster_write_count,
                                               sim_accel_eval_cluster_write_var_index);
     hybridBoundaryInputBytes = logicalBytesPerBatch(hybridReadVarIdxs, widths, nstates);
     hybridBoundaryOutputBytes = logicalBytesPerBatch(hybridWriteVarIdxs, widths, nstates);
-    hybridActualH2dBytes = bytes;
-    hybridActualD2hBytes = bytes;
+    hybridActualH2dBytes = compactTransferBytes(hybridReadFromOutputVarIdxs, nstates);
+    hybridActualD2hBytes = compactTransferBytes(hybridWriteVarIdxs, nstates);
   }
   for (uint32_t idx = 0; idx < nvars; ++idx) {
     const size_t base = static_cast<size_t>(idx) * nstates;
@@ -1160,6 +1214,12 @@ int main(int argc, char** argv) {
   uint32_t* d_outputVarIdxs = nullptr;
   uint32_t* d_in_compact = nullptr;
   uint32_t* d_out_compact = nullptr;
+  uint32_t* d_hybridInputVarIdxs = nullptr;
+  uint32_t* d_hybridInputCompact = nullptr;
+  uint32_t* d_hybridReadOutputVarIdxs = nullptr;
+  uint32_t* d_hybridReadOutputCompact = nullptr;
+  uint32_t* d_hybridWriteVarIdxs = nullptr;
+  uint32_t* d_hybridWriteCompact = nullptr;
   uint32_t* d_in = nullptr;
   uint32_t* d_out = nullptr;
   if (!inputVarIdxs.empty()) {
@@ -1195,6 +1255,61 @@ int main(int argc, char** argv) {
     checkCuda(cudaDeviceSynchronize(), "scatter sync");
   }
 
+  std::vector<uint32_t> h_hybridInputCompact;
+  std::vector<uint32_t> h_hybridReadOutputCompact;
+  std::vector<uint32_t> h_hybridWriteCompact;
+  if (hybridMode != "off") {
+    if (!hybridReadInputVarIdxs.empty()) {
+      h_hybridInputCompact = gatherSlotsVarMajor(h_in_varmajor, hybridReadInputVarIdxs, nstates);
+      checkCuda(cudaMalloc(&d_hybridInputVarIdxs,
+                           hybridReadInputVarIdxs.size() * sizeof(uint32_t)),
+                "cudaMalloc d_hybridInputVarIdxs");
+      checkCuda(cudaMemcpy(d_hybridInputVarIdxs, hybridReadInputVarIdxs.data(),
+                           hybridReadInputVarIdxs.size() * sizeof(uint32_t), cudaMemcpyHostToDevice),
+                "H2D hybrid input var idxs");
+      checkCuda(cudaMalloc(&d_hybridInputCompact,
+                           static_cast<size_t>(hybridReadInputVarIdxs.size()) * nstates * sizeof(uint32_t)),
+                "cudaMalloc d_hybridInputCompact");
+      checkCuda(cudaMemcpy(d_hybridInputCompact, h_hybridInputCompact.data(),
+                           static_cast<size_t>(hybridReadInputVarIdxs.size()) * nstates * sizeof(uint32_t),
+                           cudaMemcpyHostToDevice),
+                "H2D hybrid input compact");
+      const int scatterBlock = static_cast<int>(blockSize);
+      const int scatterGrid = static_cast<int>((nstates + scatterBlock - 1) / scatterBlock);
+      sim_accel_scatter_inputs_u32<<<scatterGrid, scatterBlock>>>(
+          d_hybridInputCompact, d_hybridInputVarIdxs,
+          static_cast<uint32_t>(hybridReadInputVarIdxs.size()), d_in, nvars, nstates, 0);
+      checkCuda(cudaGetLastError(), "hybrid input scatter launch");
+      checkCuda(cudaDeviceSynchronize(), "hybrid input scatter sync");
+    }
+    if (!hybridReadFromOutputVarIdxs.empty()) {
+      checkCuda(cudaMalloc(&d_hybridReadOutputVarIdxs,
+                           hybridReadFromOutputVarIdxs.size() * sizeof(uint32_t)),
+                "cudaMalloc d_hybridReadOutputVarIdxs");
+      checkCuda(cudaMemcpy(d_hybridReadOutputVarIdxs, hybridReadFromOutputVarIdxs.data(),
+                           hybridReadFromOutputVarIdxs.size() * sizeof(uint32_t),
+                           cudaMemcpyHostToDevice),
+                "H2D hybrid read-output var idxs");
+      checkCuda(cudaMalloc(&d_hybridReadOutputCompact,
+                           static_cast<size_t>(hybridReadFromOutputVarIdxs.size()) * nstates
+                               * sizeof(uint32_t)),
+                "cudaMalloc d_hybridReadOutputCompact");
+      h_hybridReadOutputCompact.assign(
+          static_cast<size_t>(hybridReadFromOutputVarIdxs.size()) * nstates, 0u);
+    }
+    if (!hybridWriteVarIdxs.empty()) {
+      checkCuda(cudaMalloc(&d_hybridWriteVarIdxs, hybridWriteVarIdxs.size() * sizeof(uint32_t)),
+                "cudaMalloc d_hybridWriteVarIdxs");
+      checkCuda(cudaMemcpy(d_hybridWriteVarIdxs, hybridWriteVarIdxs.data(),
+                           hybridWriteVarIdxs.size() * sizeof(uint32_t), cudaMemcpyHostToDevice),
+                "H2D hybrid write var idxs");
+      checkCuda(cudaMalloc(&d_hybridWriteCompact,
+                           static_cast<size_t>(hybridWriteVarIdxs.size()) * nstates * sizeof(uint32_t)),
+                "cudaMalloc d_hybridWriteCompact");
+      h_hybridWriteCompact.assign(static_cast<size_t>(hybridWriteVarIdxs.size()) * nstates, 0u);
+    }
+  }
+
   auto runCpuPartitionPass = [&](std::vector<uint32_t>& stateOut) {
     stateOut = h_in_varmajor;
     for (uint32_t partitionIdx = 0; partitionIdx < partitionCount; ++partitionIdx) {
@@ -1215,14 +1330,39 @@ int main(int argc, char** argv) {
     stateOut = h_in_varmajor;
     for (uint32_t partitionIdx = 0; partitionIdx < partitionCount; ++partitionIdx) {
       if (partitionIdx == hybridPartitionIndex) {
-        checkCuda(cudaMemcpy(d_out, stateOut.data(), bytes, cudaMemcpyHostToDevice),
-                  "H2D hybrid state_out");
+        if (!hybridReadFromOutputVarIdxs.empty()) {
+          gatherSlotsVarMajorInto(stateOut, hybridReadFromOutputVarIdxs, nstates,
+                                  &h_hybridReadOutputCompact);
+          checkCuda(cudaMemcpy(d_hybridReadOutputCompact, h_hybridReadOutputCompact.data(),
+                               h_hybridReadOutputCompact.size() * sizeof(uint32_t),
+                               cudaMemcpyHostToDevice),
+                    "H2D hybrid partition read-output compact");
+          const int scatterBlock = static_cast<int>(blockSize);
+          const int scatterGrid = static_cast<int>((nstates + scatterBlock - 1) / scatterBlock);
+          sim_accel_scatter_inputs_u32<<<scatterGrid, scatterBlock>>>(
+              d_hybridReadOutputCompact, d_hybridReadOutputVarIdxs,
+              static_cast<uint32_t>(hybridReadFromOutputVarIdxs.size()), d_out, nvars, nstates, 0);
+          checkCuda(cudaGetLastError(), "hybrid partition read-output scatter launch");
+          checkCuda(cudaDeviceSynchronize(), "hybrid partition read-output scatter sync");
+        }
         checkCuda(sim_accel_eval_assignw_launch_partition(partitionIdx, d_in, d_out, nstates,
                                                           blockSize),
                   "launch_partition hybrid");
         checkCuda(cudaDeviceSynchronize(), "hybrid partition sync");
-        checkCuda(cudaMemcpy(stateOut.data(), d_out, bytes, cudaMemcpyDeviceToHost),
-                  "D2H hybrid state_out");
+        if (!hybridWriteVarIdxs.empty()) {
+          const int gatherBlock = static_cast<int>(blockSize);
+          const int gatherGrid = static_cast<int>((nstates + gatherBlock - 1) / gatherBlock);
+          sim_accel_gather_outputs_u32<<<gatherGrid, gatherBlock>>>(
+              d_out, d_hybridWriteVarIdxs, static_cast<uint32_t>(hybridWriteVarIdxs.size()),
+              d_hybridWriteCompact, nvars, nstates, 0);
+          checkCuda(cudaGetLastError(), "hybrid partition write gather launch");
+          checkCuda(cudaDeviceSynchronize(), "hybrid partition write gather sync");
+          checkCuda(cudaMemcpy(h_hybridWriteCompact.data(), d_hybridWriteCompact,
+                               h_hybridWriteCompact.size() * sizeof(uint32_t),
+                               cudaMemcpyDeviceToHost),
+                    "D2H hybrid partition write compact");
+          scatterSlotsVarMajor(stateOut, h_hybridWriteCompact, hybridWriteVarIdxs, nstates);
+        }
       } else {
         sim_accel_eval_assignw_cpu_partition(partitionIdx, h_in_varmajor.data(), stateOut.data(),
                                              nstates);
@@ -1234,13 +1374,38 @@ int main(int argc, char** argv) {
     stateOut = h_in_varmajor;
     for (uint32_t clusterIdx : clusterTopoOrder) {
       if (clusterIdx == hybridClusterIndex) {
-        checkCuda(cudaMemcpy(d_out, stateOut.data(), bytes, cudaMemcpyHostToDevice),
-                  "H2D hybrid cluster state_out");
+        if (!hybridReadFromOutputVarIdxs.empty()) {
+          gatherSlotsVarMajorInto(stateOut, hybridReadFromOutputVarIdxs, nstates,
+                                  &h_hybridReadOutputCompact);
+          checkCuda(cudaMemcpy(d_hybridReadOutputCompact, h_hybridReadOutputCompact.data(),
+                               h_hybridReadOutputCompact.size() * sizeof(uint32_t),
+                               cudaMemcpyHostToDevice),
+                    "H2D hybrid cluster read-output compact");
+          const int scatterBlock = static_cast<int>(blockSize);
+          const int scatterGrid = static_cast<int>((nstates + scatterBlock - 1) / scatterBlock);
+          sim_accel_scatter_inputs_u32<<<scatterGrid, scatterBlock>>>(
+              d_hybridReadOutputCompact, d_hybridReadOutputVarIdxs,
+              static_cast<uint32_t>(hybridReadFromOutputVarIdxs.size()), d_out, nvars, nstates, 0);
+          checkCuda(cudaGetLastError(), "hybrid cluster read-output scatter launch");
+          checkCuda(cudaDeviceSynchronize(), "hybrid cluster read-output scatter sync");
+        }
         checkCuda(sim_accel_eval_assignw_launch_cluster(clusterIdx, d_in, d_out, nstates, blockSize),
                   "launch_cluster hybrid");
         checkCuda(cudaDeviceSynchronize(), "hybrid cluster sync");
-        checkCuda(cudaMemcpy(stateOut.data(), d_out, bytes, cudaMemcpyDeviceToHost),
-                  "D2H hybrid cluster state_out");
+        if (!hybridWriteVarIdxs.empty()) {
+          const int gatherBlock = static_cast<int>(blockSize);
+          const int gatherGrid = static_cast<int>((nstates + gatherBlock - 1) / gatherBlock);
+          sim_accel_gather_outputs_u32<<<gatherGrid, gatherBlock>>>(
+              d_out, d_hybridWriteVarIdxs, static_cast<uint32_t>(hybridWriteVarIdxs.size()),
+              d_hybridWriteCompact, nvars, nstates, 0);
+          checkCuda(cudaGetLastError(), "hybrid cluster write gather launch");
+          checkCuda(cudaDeviceSynchronize(), "hybrid cluster write gather sync");
+          checkCuda(cudaMemcpy(h_hybridWriteCompact.data(), d_hybridWriteCompact,
+                               h_hybridWriteCompact.size() * sizeof(uint32_t),
+                               cudaMemcpyDeviceToHost),
+                    "D2H hybrid cluster write compact");
+          scatterSlotsVarMajor(stateOut, h_hybridWriteCompact, hybridWriteVarIdxs, nstates);
+        }
       } else {
         sim_accel_eval_assignw_cpu_cluster_dispatch(clusterIdx, h_in_varmajor.data(),
                                                     stateOut.data(), nstates);
@@ -1464,6 +1629,12 @@ int main(int argc, char** argv) {
   if (d_outputVarIdxs) cudaFree(d_outputVarIdxs);
   if (d_in_compact) cudaFree(d_in_compact);
   if (d_out_compact) cudaFree(d_out_compact);
+  if (d_hybridInputVarIdxs) cudaFree(d_hybridInputVarIdxs);
+  if (d_hybridInputCompact) cudaFree(d_hybridInputCompact);
+  if (d_hybridReadOutputVarIdxs) cudaFree(d_hybridReadOutputVarIdxs);
+  if (d_hybridReadOutputCompact) cudaFree(d_hybridReadOutputCompact);
+  if (d_hybridWriteVarIdxs) cudaFree(d_hybridWriteVarIdxs);
+  if (d_hybridWriteCompact) cudaFree(d_hybridWriteCompact);
   cudaFree(d_in);
   cudaFree(d_out);
   return (hybridMode == "off") ? (mismatch == 0 ? 0 : 1) : (hybridMismatch == 0 ? 0 : 1);

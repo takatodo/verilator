@@ -90,7 +90,7 @@ bench_cmd_hybrid = (
     + " --cpu-reps 2"
     + " --assigns-per-kernel 2"
     + " --hybrid-mode single-partition"
-    + " --hybrid-partition-index 0"
+    + " --hybrid-partition-index 1"
     + " --compile-cache-dir " + cache_dir
     + " -- "
     + test.t_dir + "/t_sim_accel_bench_exec.v")
@@ -135,13 +135,13 @@ test.file_grep(bench_run_log, r"compact_mismatch=0")
 test.file_grep(bench_objhit_log, r"mismatch=0")
 test.file_grep(bench_objhit_log, r"compact_mismatch=0")
 test.file_grep(bench_hybrid_log, r"hybrid_mode=single-partition")
-test.file_grep(bench_hybrid_log, r"hybrid_partition_index=0")
+test.file_grep(bench_hybrid_log, r"hybrid_partition_index=1")
 test.file_grep(bench_hybrid_log, r"hybrid_partition_assign_count=")
 test.file_grep(bench_hybrid_log, r"hybrid_partition_read_vars=")
 test.file_grep(bench_hybrid_log, r"hybrid_partition_write_vars=")
 test.file_grep(bench_hybrid_log, r"hybrid_partition_input_bytes_per_batch=")
 test.file_grep(bench_hybrid_log, r"hybrid_partition_output_bytes_per_batch=")
-test.file_grep(bench_hybrid_log, r"hybrid_actual_h2d_bytes_per_batch=")
+test.file_grep(bench_hybrid_log, r"hybrid_actual_h2d_bytes_per_batch=[1-9][0-9]*")
 test.file_grep(bench_hybrid_log, r"hybrid_actual_d2h_bytes_per_batch=")
 test.file_grep(bench_hybrid_log, r"hybrid_gpu_ms_per_rep=")
 test.file_grep(bench_hybrid_log, r"hybrid_cpu_ms_per_rep=")
