@@ -310,7 +310,7 @@ if (( ${#SELECTED_LINES[@]} == 0 )); then
   exit 2
 fi
 
-printf 'cluster_indices\tcluster_group_size\tgroup_assign_count\tgroup_operator_count\tgroup_input_signature_bits\towner_hint\ttopo_rank\ttopo_span\tdominant_hierarchy\tgroup_expr_kind_counts\thybrid_gpu_ms_per_rep\thybrid_cpu_ms_per_rep\thybrid_speedup_gpu_over_cpu\thybrid_margin_ms\thybrid_setup_h2d_ms\thybrid_dynamic_h2d_ms_per_rep\thybrid_kernel_ms_per_rep\thybrid_d2h_ms_per_rep\thybrid_transfer_ms_per_rep\thybrid_cpu_dispatch_ms_per_rep\thybrid_static_h2d_bytes_per_batch\thybrid_dynamic_h2d_bytes_per_batch\thybrid_actual_h2d_bytes_per_batch\thybrid_actual_d2h_bytes_per_batch\thybrid_transfer_total_bytes_per_batch\tassigns_per_kib_transferred\toffload_score\toffload_worthy\thybrid_mismatch\tnvcc_compile_s\tbench_run_s\ttotal_elapsed_s\n' > "$SUMMARY_TSV"
+printf 'cluster_indices\tcluster_group_size\tgroup_assign_count\tgroup_operator_count\tgroup_weighted_operator_count\tgroup_input_signature_bits\towner_hint\ttopo_rank\ttopo_span\tdominant_hierarchy\tgroup_expr_kind_counts\thybrid_gpu_ms_per_rep\thybrid_cpu_ms_per_rep\thybrid_speedup_gpu_over_cpu\thybrid_margin_ms\thybrid_setup_h2d_ms\thybrid_dynamic_h2d_ms_per_rep\thybrid_kernel_ms_per_rep\thybrid_d2h_ms_per_rep\thybrid_transfer_ms_per_rep\thybrid_cpu_dispatch_ms_per_rep\thybrid_static_h2d_bytes_per_batch\thybrid_dynamic_h2d_bytes_per_batch\thybrid_actual_h2d_bytes_per_batch\thybrid_actual_d2h_bytes_per_batch\thybrid_transfer_total_bytes_per_batch\tassigns_per_kib_transferred\tweighted_ops_per_kib_transferred\toffload_score\toffload_worthy\thybrid_mismatch\tnvcc_compile_s\tbench_run_s\ttotal_elapsed_s\n' > "$SUMMARY_TSV"
 
 echo "[3/3] Running cluster benches..."
 for line in "${SELECTED_LINES[@]}"; do
@@ -341,6 +341,43 @@ for line in "${SELECTED_LINES[@]}"; do
     "$WORTHY_MIN_MARGIN_MS" <<'PY'
 import sys
 log_path, out_tsv, cluster_indices, group_size, assign_count, operator_count, input_bits, owner_hint, topo_rank, topo_span, dom_hier, expr_kind_counts, worthy_min_speedup, worthy_min_margin_ms = sys.argv[1:15]
+WEIGHTS = {
+    'and': 1.0,
+    'or': 1.0,
+    'xor': 1.0,
+    'logand': 1.0,
+    'logor': 1.0,
+    'lognot': 1.0,
+    'not': 1.0,
+    'ccast': 1.0,
+    'extend': 1.0,
+    'extends': 1.0,
+    'eq': 2.0,
+    'neq': 2.0,
+    'cond': 2.5,
+    'sel': 2.5,
+    'concat': 2.0,
+    'add': 3.0,
+    'sub': 3.0,
+    'shiftl': 3.0,
+    'shiftlovr': 3.0,
+    'shiftr': 3.0,
+    'shiftrovr': 3.0,
+}
+
+def parse_expr_kind_counts(raw):
+    counts = {}
+    if not raw or raw == '-':
+        return counts
+    for item in raw.split(';'):
+        if not item:
+            continue
+        key, sep, value = item.partition('=')
+        if not sep:
+            continue
+        counts[key] = int(value)
+    return counts
+
 want = {
     'hybrid_gpu_ms_per_rep': '',
     'hybrid_cpu_ms_per_rep': '',
@@ -375,10 +412,15 @@ actual_h2d = int(want['hybrid_actual_h2d_bytes_per_batch'] or 0)
 actual_d2h = int(want['hybrid_actual_d2h_bytes_per_batch'] or 0)
 transfer_total = actual_h2d + actual_d2h
 assign_count_i = int(assign_count)
+expr_counts = parse_expr_kind_counts(expr_kind_counts)
+weighted_operator_count = sum(count * WEIGHTS.get(kind, 1.0)
+                              for kind, count in expr_counts.items()
+                              if kind not in ('var', 'const'))
 speedup = (cpu_ms / gpu_ms) if gpu_ms > 0.0 else 0.0
 margin_ms = cpu_ms - gpu_ms
 assigns_per_kib = (assign_count_i * 1024.0 / transfer_total) if transfer_total > 0 else 0.0
-score = margin_ms * assigns_per_kib
+weighted_ops_per_kib = (weighted_operator_count * 1024.0 / transfer_total) if transfer_total > 0 else 0.0
+score = margin_ms * weighted_ops_per_kib
 offload_worthy = (
     want['hybrid_mismatch'] == '0'
     and speedup >= float(worthy_min_speedup)
@@ -386,7 +428,7 @@ offload_worthy = (
 )
 with open(out_tsv, 'a', encoding='utf-8') as fh:
     fh.write('\t'.join([
-        cluster_indices, group_size, assign_count, operator_count, input_bits, owner_hint, topo_rank, topo_span, dom_hier, expr_kind_counts,
+        cluster_indices, group_size, assign_count, operator_count, f"{weighted_operator_count:.3f}", input_bits, owner_hint, topo_rank, topo_span, dom_hier, expr_kind_counts,
         want['hybrid_gpu_ms_per_rep'], want['hybrid_cpu_ms_per_rep'],
         f"{speedup:.6f}", f"{margin_ms:.6f}",
         want['hybrid_setup_h2d_ms'], want['hybrid_dynamic_h2d_ms_per_rep'],
@@ -394,7 +436,7 @@ with open(out_tsv, 'a', encoding='utf-8') as fh:
         want['hybrid_transfer_ms_per_rep'], want['hybrid_cpu_dispatch_ms_per_rep'],
         want['hybrid_static_h2d_bytes_per_batch'], want['hybrid_dynamic_h2d_bytes_per_batch'],
         want['hybrid_actual_h2d_bytes_per_batch'], want['hybrid_actual_d2h_bytes_per_batch'],
-        str(transfer_total), f"{assigns_per_kib:.6f}", f"{score:.6f}",
+        str(transfer_total), f"{assigns_per_kib:.6f}", f"{weighted_ops_per_kib:.6f}", f"{score:.6f}",
         '1' if offload_worthy else '0',
         want['hybrid_mismatch'], want['nvcc_compile_s'], want['bench_run_s'],
         want['total_elapsed_s'],
@@ -417,6 +459,7 @@ for row in rows:
     row['cluster_group_size'] = int(row['cluster_group_size'])
     row['group_assign_count'] = int(row['group_assign_count'])
     row['group_operator_count'] = int(row['group_operator_count'])
+    row['group_weighted_operator_count'] = float(row['group_weighted_operator_count'])
     row['group_input_signature_bits'] = int(row['group_input_signature_bits'])
     row['hybrid_gpu_ms_per_rep'] = float(row['hybrid_gpu_ms_per_rep'])
     row['hybrid_cpu_ms_per_rep'] = float(row['hybrid_cpu_ms_per_rep'])
@@ -432,6 +475,7 @@ for row in rows:
     row['hybrid_actual_d2h_bytes_per_batch'] = int(row['hybrid_actual_d2h_bytes_per_batch'])
     row['hybrid_transfer_total_bytes_per_batch'] = int(row['hybrid_transfer_total_bytes_per_batch'])
     row['assigns_per_kib_transferred'] = float(row['assigns_per_kib_transferred'])
+    row['weighted_ops_per_kib_transferred'] = float(row['weighted_ops_per_kib_transferred'])
     row['offload_score'] = float(row['offload_score'])
     row['offload_worthy'] = (row['offload_worthy'] == '1')
     row['hybrid_mismatch'] = int(row['hybrid_mismatch'])
@@ -443,7 +487,13 @@ payload = {
     'heuristic': {
         'worthy_min_speedup': float(worthy_min_speedup),
         'worthy_min_margin_ms': float(worthy_min_margin_ms),
-        'score_definition': 'score = (cpu_ms - gpu_ms) * (assign_count / (transfer_total_bytes / 1024))',
+        'operator_weighting': {
+            'bitwise_bool_cast': 1.0,
+            'compare_concat': 2.0,
+            'cond_sel': 2.5,
+            'arith_shift': 3.0,
+        },
+        'score_definition': 'score = (cpu_ms - gpu_ms) * (weighted_operator_count / (transfer_total_bytes / 1024))',
     },
     'cluster_count': len(rows),
     'worthy_cluster_count': len(worthy),
