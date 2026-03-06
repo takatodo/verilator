@@ -21,6 +21,8 @@ Options:
   --init-seed N        Seed for random init mode (default: 1)
   --init-file PATH     Optional init override file (index/name based)
   --assigns-per-kernel N  Limit emitted assigns per generated CUDA kernel partition (default: 0)
+  --hybrid-mode MODE   Runtime path: off|single-partition (default: off)
+  --hybrid-partition-index N  Selected partition for --hybrid-mode single-partition
   --compile-cache-dir DIR  Reuse compiled bench binaries across runs
                            (default: /tmp/verilator-sim-accel-compile-cache)
   --no-compile-cache   Disable compiled bench cache reuse
@@ -58,6 +60,8 @@ INIT_SEED=1
 INIT_FILE=""
 INIT_FILE_ABS=""
 ASSIGNS_PER_KERNEL=0
+HYBRID_MODE="off"
+HYBRID_PARTITION_INDEX=""
 COMPILE_CACHE_DIR="${SIM_ACCEL_COMPILE_CACHE_DIR:-/tmp/verilator-sim-accel-compile-cache}"
 COMPILE_CACHE_ENABLED=1
 declare -a SOURCES=()
@@ -89,6 +93,10 @@ while [[ $# -gt 0 ]]; do
       INIT_FILE="$2"; shift 2 ;;
     --assigns-per-kernel)
       ASSIGNS_PER_KERNEL="$2"; shift 2 ;;
+    --hybrid-mode)
+      HYBRID_MODE="$2"; shift 2 ;;
+    --hybrid-partition-index)
+      HYBRID_PARTITION_INDEX="$2"; shift 2 ;;
     --compile-cache-dir)
       COMPILE_CACHE_DIR="$2"; shift 2 ;;
     --no-compile-cache)
@@ -129,6 +137,27 @@ fi
 if ! [[ "$ASSIGNS_PER_KERNEL" =~ ^[0-9]+$ ]]; then
   echo "Invalid --assigns-per-kernel: $ASSIGNS_PER_KERNEL (expected integer >= 0)" >&2
   exit 2
+fi
+case "$HYBRID_MODE" in
+  off|single-partition) ;;
+  *)
+    echo "Invalid --hybrid-mode: $HYBRID_MODE (expected off|single-partition)" >&2
+    exit 2 ;;
+esac
+if [[ "$HYBRID_MODE" == "single-partition" ]]; then
+  if [[ -z "$HYBRID_PARTITION_INDEX" ]]; then
+    echo "--hybrid-partition-index is required with --hybrid-mode single-partition" >&2
+    exit 2
+  fi
+  if ! [[ "$HYBRID_PARTITION_INDEX" =~ ^[0-9]+$ ]]; then
+    echo "Invalid --hybrid-partition-index: $HYBRID_PARTITION_INDEX (expected integer >= 0)" >&2
+    exit 2
+  fi
+else
+  if [[ -n "$HYBRID_PARTITION_INDEX" ]]; then
+    echo "--hybrid-partition-index requires --hybrid-mode single-partition" >&2
+    exit 2
+  fi
 fi
 
 case "$INIT_MODE" in
@@ -654,6 +683,25 @@ static std::vector<uint32_t> loadCommVarIdxs(uint32_t (*countFn)(), uint32_t (*i
   return out;
 }
 
+static std::vector<uint32_t> loadPartitionVarIdxs(uint32_t partitionIndex,
+                                                  uint32_t (*countFn)(uint32_t),
+                                                  uint32_t (*indexFn)(uint32_t, uint32_t)) {
+  const uint32_t count = countFn(partitionIndex);
+  std::vector<uint32_t> out(count, 0);
+  for (uint32_t i = 0; i < count; ++i) out[i] = indexFn(partitionIndex, i);
+  return out;
+}
+
+static size_t logicalBytesPerBatch(const std::vector<uint32_t>& varIdxs,
+                                   const std::vector<uint32_t>& widths, uint32_t nstates) {
+  size_t perStateBytes = 0;
+  for (uint32_t varIdx : varIdxs) {
+    const uint32_t width = (varIdx < widths.size()) ? widths[varIdx] : 32U;
+    perStateBytes += (static_cast<size_t>(width) + 7u) / 8u;
+  }
+  return perStateBytes * static_cast<size_t>(nstates);
+}
+
 static std::vector<uint32_t> gatherSlotsVarMajor(const std::vector<uint32_t>& stateVarMajor,
                                                  const std::vector<uint32_t>& varIdxs,
                                                  uint32_t nstates) {
@@ -865,7 +913,8 @@ static void printUsageAndExit(const char* argv0) {
   std::cerr << "Usage: " << argv0
               << " [--init-mode random|zero|ones|counter] [--init-seed N] [--init-file PATH]"
             << " --nstates N --gpu-reps N --cpu-reps N"
-            << " [--state-chunk N] [--block-size N]\n";
+            << " [--state-chunk N] [--block-size N]"
+            << " [--hybrid-mode off|single-partition] [--hybrid-partition-index N]\n";
   std::exit(2);
 }
 
@@ -878,6 +927,9 @@ int main(int argc, char** argv) {
   int cpu_reps = 0;
   uint32_t stateChunk = 0;
   uint32_t blockSize = 256;
+  std::string hybridMode = "off";
+  bool hybridPartitionIndexSet = false;
+  uint32_t hybridPartitionIndex = 0;
 
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -917,6 +969,15 @@ int main(int argc, char** argv) {
       uint64_t bs = 0;
       if (!parseU64(argv[++i], &bs) || bs == 0 || bs > 1024) printUsageAndExit(argv[0]);
       blockSize = static_cast<uint32_t>(bs);
+    } else if (a == "--hybrid-mode") {
+      if (i + 1 >= argc) printUsageAndExit(argv[0]);
+      hybridMode = argv[++i];
+    } else if (a == "--hybrid-partition-index") {
+      if (i + 1 >= argc) printUsageAndExit(argv[0]);
+      uint64_t raw = 0;
+      if (!parseU64(argv[++i], &raw) || raw > 0xffffffffULL) printUsageAndExit(argv[0]);
+      hybridPartitionIndex = static_cast<uint32_t>(raw);
+      hybridPartitionIndexSet = true;
     } else {
       printUsageAndExit(argv[0]);
     }
@@ -927,15 +988,36 @@ int main(int argc, char** argv) {
     return 2;
   }
   if (nstates == 0 || gpu_reps <= 0 || cpu_reps <= 0) printUsageAndExit(argv[0]);
+  if (hybridMode != "off" && hybridMode != "single-partition") {
+    std::cerr << "Invalid --hybrid-mode: " << hybridMode << "\n";
+    return 2;
+  }
+  if (hybridMode == "single-partition" && !hybridPartitionIndexSet) {
+    std::cerr << "--hybrid-partition-index is required with --hybrid-mode single-partition\n";
+    return 2;
+  }
+  if (hybridMode == "off" && hybridPartitionIndexSet) {
+    std::cerr << "--hybrid-partition-index requires --hybrid-mode single-partition\n";
+    return 2;
+  }
 
   const uint32_t nvars = sim_accel_eval_var_count();
   const uint32_t partitionCount = sim_accel_eval_partition_count();
+  if (hybridMode == "single-partition" && hybridPartitionIndex >= partitionCount) {
+    std::cerr << "Invalid --hybrid-partition-index: " << hybridPartitionIndex
+              << " (partition_count=" << partitionCount << ")\n";
+    return 2;
+  }
   const std::vector<uint32_t> inputVarIdxs
       = loadCommVarIdxs(sim_accel_eval_input_count, sim_accel_eval_input_var_index);
   const std::vector<uint32_t> outputVarIdxs
       = loadCommVarIdxs(sim_accel_eval_output_count, sim_accel_eval_output_var_index);
   if (stateChunk > nstates) stateChunk = nstates;
   const bool useChunkLayout = (stateChunk > 0 && stateChunk < nstates);
+  if (hybridMode != "off" && useChunkLayout) {
+    std::cerr << "Hybrid mode is not supported with --state-chunk in this prototype\n";
+    return 2;
+  }
   const uint32_t nchunks = useChunkLayout ? ((nstates + stateChunk - 1) / stateChunk) : 1;
   const uint32_t paddedStates = useChunkLayout ? (nchunks * stateChunk) : nstates;
 
@@ -963,6 +1045,24 @@ int main(int argc, char** argv) {
     initStats = applyInitFile(h_seed_varmajor, nvars, nstates, "kernel_generated.vars.tsv", initFile);
   }
   const auto widths = loadVarWidths("kernel_generated.vars.tsv", nvars);
+  std::vector<uint32_t> hybridReadVarIdxs;
+  std::vector<uint32_t> hybridWriteVarIdxs;
+  size_t hybridBoundaryInputBytes = 0;
+  size_t hybridBoundaryOutputBytes = 0;
+  size_t hybridActualH2dBytes = 0;
+  size_t hybridActualD2hBytes = 0;
+  if (hybridMode == "single-partition") {
+    hybridReadVarIdxs = loadPartitionVarIdxs(hybridPartitionIndex,
+                                             sim_accel_eval_partition_read_count,
+                                             sim_accel_eval_partition_read_var_index);
+    hybridWriteVarIdxs = loadPartitionVarIdxs(hybridPartitionIndex,
+                                              sim_accel_eval_partition_write_count,
+                                              sim_accel_eval_partition_write_var_index);
+    hybridBoundaryInputBytes = logicalBytesPerBatch(hybridReadVarIdxs, widths, nstates);
+    hybridBoundaryOutputBytes = logicalBytesPerBatch(hybridWriteVarIdxs, widths, nstates);
+    hybridActualH2dBytes = bytes;
+    hybridActualD2hBytes = bytes;
+  }
   for (uint32_t idx = 0; idx < nvars; ++idx) {
     const size_t base = static_cast<size_t>(idx) * nstates;
     for (uint32_t tid = 0; tid < nstates; ++tid) {
@@ -1015,61 +1115,108 @@ int main(int argc, char** argv) {
     checkCuda(cudaDeviceSynchronize(), "scatter sync");
   }
 
-  for (int i = 0; i < 10; ++i) {
-    if (!useChunkLayout) {
-      checkCuda(sim_accel_eval_assignw_launch_all(d_in, d_out, nstates, blockSize),
-                "launch_all warmup");
-    } else {
-      const size_t chunkElems = static_cast<size_t>(nvars) * stateChunk;
-      for (uint32_t chunkId = 0; chunkId < nchunks; ++chunkId) {
-        const size_t off = static_cast<size_t>(chunkId) * chunkElems;
-        checkCuda(sim_accel_eval_assignw_launch_all(d_in + off, d_out + off, stateChunk, blockSize),
-                  "launch_all warmup chunk");
+  auto runCpuPartitionPass = [&](std::vector<uint32_t>& stateOut) {
+    stateOut = h_in_varmajor;
+    for (uint32_t partitionIdx = 0; partitionIdx < partitionCount; ++partitionIdx) {
+      sim_accel_eval_assignw_cpu_partition(partitionIdx, h_in_varmajor.data(), stateOut.data(),
+                                           nstates);
+    }
+  };
+
+  auto runHybridPartitionPass = [&](std::vector<uint32_t>& stateOut) {
+    stateOut = h_in_varmajor;
+    for (uint32_t partitionIdx = 0; partitionIdx < partitionCount; ++partitionIdx) {
+      if (partitionIdx == hybridPartitionIndex) {
+        checkCuda(cudaMemcpy(d_out, stateOut.data(), bytes, cudaMemcpyHostToDevice),
+                  "H2D hybrid state_out");
+        checkCuda(sim_accel_eval_assignw_launch_partition(partitionIdx, d_in, d_out, nstates,
+                                                          blockSize),
+                  "launch_partition hybrid");
+        checkCuda(cudaDeviceSynchronize(), "hybrid partition sync");
+        checkCuda(cudaMemcpy(stateOut.data(), d_out, bytes, cudaMemcpyDeviceToHost),
+                  "D2H hybrid state_out");
+      } else {
+        sim_accel_eval_assignw_cpu_partition(partitionIdx, h_in_varmajor.data(), stateOut.data(),
+                                             nstates);
       }
     }
-  }
-  checkCuda(cudaDeviceSynchronize(), "warmup sync");
+  };
 
-  cudaEvent_t evStart, evStop;
-  checkCuda(cudaEventCreate(&evStart), "event create start");
-  checkCuda(cudaEventCreate(&evStop), "event create stop");
-  checkCuda(cudaEventRecord(evStart), "event record start");
-  for (int i = 0; i < gpu_reps; ++i) {
-    if (!useChunkLayout) {
-      checkCuda(sim_accel_eval_assignw_launch_all(d_in, d_out, nstates, blockSize),
-                "launch_all timed");
-    } else {
-      const size_t chunkElems = static_cast<size_t>(nvars) * stateChunk;
-      for (uint32_t chunkId = 0; chunkId < nchunks; ++chunkId) {
-        const size_t off = static_cast<size_t>(chunkId) * chunkElems;
-        checkCuda(sim_accel_eval_assignw_launch_all(d_in + off, d_out + off, stateChunk, blockSize),
-                  "launch_all timed chunk");
-      }
-    }
-  }
-  checkCuda(cudaEventRecord(evStop), "event record stop");
-  checkCuda(cudaEventSynchronize(evStop), "event sync stop");
-
+  std::vector<uint32_t> h_out_gpu_varmajor;
+  std::vector<uint32_t> h_out_hybrid_varmajor(elems, 0u);
   float gpu_ms = 0.0f;
-  checkCuda(cudaEventElapsedTime(&gpu_ms, evStart, evStop), "elapsed");
-  if (!outputVarIdxs.empty()) {
-    const int gatherBlock = static_cast<int>(blockSize);
-    const int gatherGrid = static_cast<int>((nstates + gatherBlock - 1) / gatherBlock);
-    sim_accel_gather_outputs_u32<<<gatherGrid, gatherBlock>>>(
-        d_out, d_outputVarIdxs, static_cast<uint32_t>(outputVarIdxs.size()), d_out_compact, nvars,
-        nstates, stateChunk);
-    checkCuda(cudaGetLastError(), "gather launch");
-    checkCuda(cudaDeviceSynchronize(), "gather sync");
-    checkCuda(cudaMemcpy(h_out_gpu_compact.data(), d_out_compact, compactOutputBytes,
-                         cudaMemcpyDeviceToHost),
-              "D2H compact out");
+  double hybrid_ms = 0.0;
+  double hybrid_cpu_ms = 0.0;
+
+  if (hybridMode == "off") {
+    for (int i = 0; i < 10; ++i) {
+      if (!useChunkLayout) {
+        checkCuda(sim_accel_eval_assignw_launch_all(d_in, d_out, nstates, blockSize),
+                  "launch_all warmup");
+      } else {
+        const size_t chunkElems = static_cast<size_t>(nvars) * stateChunk;
+        for (uint32_t chunkId = 0; chunkId < nchunks; ++chunkId) {
+          const size_t off = static_cast<size_t>(chunkId) * chunkElems;
+          checkCuda(sim_accel_eval_assignw_launch_all(d_in + off, d_out + off, stateChunk, blockSize),
+                    "launch_all warmup chunk");
+        }
+      }
+    }
+    checkCuda(cudaDeviceSynchronize(), "warmup sync");
+
+    cudaEvent_t evStart, evStop;
+    checkCuda(cudaEventCreate(&evStart), "event create start");
+    checkCuda(cudaEventCreate(&evStop), "event create stop");
+    checkCuda(cudaEventRecord(evStart), "event record start");
+    for (int i = 0; i < gpu_reps; ++i) {
+      if (!useChunkLayout) {
+        checkCuda(sim_accel_eval_assignw_launch_all(d_in, d_out, nstates, blockSize),
+                  "launch_all timed");
+      } else {
+        const size_t chunkElems = static_cast<size_t>(nvars) * stateChunk;
+        for (uint32_t chunkId = 0; chunkId < nchunks; ++chunkId) {
+          const size_t off = static_cast<size_t>(chunkId) * chunkElems;
+          checkCuda(sim_accel_eval_assignw_launch_all(d_in + off, d_out + off, stateChunk, blockSize),
+                    "launch_all timed chunk");
+        }
+      }
+    }
+    checkCuda(cudaEventRecord(evStop), "event record stop");
+    checkCuda(cudaEventSynchronize(evStop), "event sync stop");
+    checkCuda(cudaEventElapsedTime(&gpu_ms, evStart, evStop), "elapsed");
+    if (!outputVarIdxs.empty()) {
+      const int gatherBlock = static_cast<int>(blockSize);
+      const int gatherGrid = static_cast<int>((nstates + gatherBlock - 1) / gatherBlock);
+      sim_accel_gather_outputs_u32<<<gatherGrid, gatherBlock>>>(
+          d_out, d_outputVarIdxs, static_cast<uint32_t>(outputVarIdxs.size()), d_out_compact, nvars,
+          nstates, stateChunk);
+      checkCuda(cudaGetLastError(), "gather launch");
+      checkCuda(cudaDeviceSynchronize(), "gather sync");
+      checkCuda(cudaMemcpy(h_out_gpu_compact.data(), d_out_compact, compactOutputBytes,
+                           cudaMemcpyDeviceToHost),
+                "D2H compact out");
+    }
+    checkCuda(cudaMemcpy(h_out_gpu_verify.data(), d_out, bytes, cudaMemcpyDeviceToHost),
+              "D2H verify full out");
+    h_out_gpu_varmajor = useChunkLayout ? unchunkToVarMajor(h_out_gpu_verify, nvars, nstates, stateChunk)
+                                        : std::vector<uint32_t>(h_out_gpu_verify.begin(),
+                                                                h_out_gpu_verify.begin() + elems);
+    cudaEventDestroy(evStart);
+    cudaEventDestroy(evStop);
+  } else {
+    std::vector<uint32_t> hybridWarmup(elems, 0u);
+    for (int i = 0; i < 3; ++i) runHybridPartitionPass(hybridWarmup);
+    auto hybrid_t0 = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < gpu_reps; ++i) runHybridPartitionPass(h_out_hybrid_varmajor);
+    auto hybrid_t1 = std::chrono::high_resolution_clock::now();
+    hybrid_ms = std::chrono::duration<double, std::milli>(hybrid_t1 - hybrid_t0).count();
+
+    std::vector<uint32_t> h_out_cpu_partition_varmajor(elems, 0u);
+    auto hybrid_cpu_t0 = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < cpu_reps; ++i) runCpuPartitionPass(h_out_cpu_partition_varmajor);
+    auto hybrid_cpu_t1 = std::chrono::high_resolution_clock::now();
+    hybrid_cpu_ms = std::chrono::duration<double, std::milli>(hybrid_cpu_t1 - hybrid_cpu_t0).count();
   }
-  checkCuda(cudaMemcpy(h_out_gpu_verify.data(), d_out, bytes, cudaMemcpyDeviceToHost),
-            "D2H verify full out");
-  const std::vector<uint32_t> h_out_gpu_varmajor
-      = useChunkLayout ? unchunkToVarMajor(h_out_gpu_verify, nvars, nstates, stateChunk)
-                       : std::vector<uint32_t>(h_out_gpu_verify.begin(),
-                                              h_out_gpu_verify.begin() + elems);
 
   auto cpu_t0 = std::chrono::high_resolution_clock::now();
   for (int i = 0; i < cpu_reps; ++i) {
@@ -1080,19 +1227,30 @@ int main(int argc, char** argv) {
 
   sim_accel_eval_assignw_cpu(h_in_varmajor.data(), h_out_cpu_varmajor.data(), nstates);
   size_t mismatch = 0;
-  for (size_t i = 0; i < elems; ++i) {
-    if (h_out_cpu_varmajor[i] != h_out_gpu_varmajor[i]) ++mismatch;
-  }
   const std::vector<uint32_t> h_out_cpu_compact
       = gatherSlotsVarMajor(h_out_cpu_varmajor, outputVarIdxs, nstates);
   size_t compactMismatch = 0;
-  for (size_t i = 0; i < h_out_cpu_compact.size(); ++i) {
-    if (h_out_cpu_compact[i] != h_out_gpu_compact[i]) ++compactMismatch;
+  size_t hybridMismatch = 0;
+  if (hybridMode == "off") {
+    for (size_t i = 0; i < elems; ++i) {
+      if (h_out_cpu_varmajor[i] != h_out_gpu_varmajor[i]) ++mismatch;
+    }
+    for (size_t i = 0; i < h_out_cpu_compact.size(); ++i) {
+      if (h_out_cpu_compact[i] != h_out_gpu_compact[i]) ++compactMismatch;
+    }
+  } else {
+    for (size_t i = 0; i < elems; ++i) {
+      if (h_out_cpu_varmajor[i] != h_out_hybrid_varmajor[i]) ++hybridMismatch;
+    }
   }
 
-  const double gpu_ms_per_rep = gpu_ms / gpu_reps;
+  const double gpu_ms_per_rep = (hybridMode == "off") ? (gpu_ms / gpu_reps) : 0.0;
   const double cpu_ms_per_rep = cpu_ms / cpu_reps;
-  const double speedup = cpu_ms_per_rep / gpu_ms_per_rep;
+  const double hybrid_ms_per_rep = (hybridMode == "off") ? 0.0 : (hybrid_ms / gpu_reps);
+  const double hybrid_cpu_ms_per_rep = (hybridMode == "off") ? 0.0 : (hybrid_cpu_ms / cpu_reps);
+  const double speedup = (hybridMode == "off" && gpu_ms_per_rep > 0.0)
+                             ? (cpu_ms_per_rep / gpu_ms_per_rep)
+                             : 0.0;
   const double eps = 0.05;
 
   std::cout << std::fixed << std::setprecision(6);
@@ -1110,9 +1268,25 @@ int main(int argc, char** argv) {
     std::cout << "init_file_values_applied=" << initStats.values_applied << "\n";
     std::cout << "init_file_lines_ignored=" << initStats.lines_ignored << "\n";
   }
+  std::cout << "hybrid_mode=" << hybridMode << "\n";
   std::cout << "gpu_ms_per_rep=" << gpu_ms_per_rep << "\n";
   std::cout << "cpu_ms_per_rep=" << cpu_ms_per_rep << "\n";
-  std::cout << "speedup_gpu_over_cpu=" << speedup << "x\n";
+  if (hybridMode == "off") {
+    std::cout << "speedup_gpu_over_cpu=" << speedup << "x\n";
+  } else {
+    std::cout << "hybrid_partition_index=" << hybridPartitionIndex << "\n";
+    std::cout << "hybrid_partition_assign_count="
+              << sim_accel_eval_partition_assign_count(hybridPartitionIndex) << "\n";
+    std::cout << "hybrid_partition_read_vars=" << hybridReadVarIdxs.size() << "\n";
+    std::cout << "hybrid_partition_write_vars=" << hybridWriteVarIdxs.size() << "\n";
+    std::cout << "hybrid_partition_input_bytes_per_batch=" << hybridBoundaryInputBytes << "\n";
+    std::cout << "hybrid_partition_output_bytes_per_batch=" << hybridBoundaryOutputBytes << "\n";
+    std::cout << "hybrid_actual_h2d_bytes_per_batch=" << hybridActualH2dBytes << "\n";
+    std::cout << "hybrid_actual_d2h_bytes_per_batch=" << hybridActualD2hBytes << "\n";
+    std::cout << "hybrid_gpu_ms_per_rep=" << hybrid_ms_per_rep << "\n";
+    std::cout << "hybrid_cpu_ms_per_rep=" << hybrid_cpu_ms_per_rep << "\n";
+    std::cout << "hybrid_mismatch=" << hybridMismatch << "\n";
+  }
   std::cout << "mismatch=" << mismatch << "\n";
   std::cout << "compact_mismatch=" << compactMismatch << "\n";
   std::cout << "comm_input_vars=" << inputVarIdxs.size() << "\n";
@@ -1128,15 +1302,20 @@ int main(int argc, char** argv) {
                          / static_cast<double>(fullRoundtripBytes);
     std::cout << "comm_roundtrip_ratio_pct=" << ratio << "\n";
   }
-  if (speedup > (1.0 + eps)) {
-    std::cout << "auto_parallel_judgement=parallel\n";
-    std::cout << "auto_engine_recommendation=gpu\n";
-  } else if (speedup < (1.0 - eps)) {
-    std::cout << "auto_parallel_judgement=non_parallel\n";
-    std::cout << "auto_engine_recommendation=cpu\n";
+  if (hybridMode == "off") {
+    if (speedup > (1.0 + eps)) {
+      std::cout << "auto_parallel_judgement=parallel\n";
+      std::cout << "auto_engine_recommendation=gpu\n";
+    } else if (speedup < (1.0 - eps)) {
+      std::cout << "auto_parallel_judgement=non_parallel\n";
+      std::cout << "auto_engine_recommendation=cpu\n";
+    } else {
+      std::cout << "auto_parallel_judgement=borderline\n";
+      std::cout << "auto_engine_recommendation=tie\n";
+    }
   } else {
-    std::cout << "auto_parallel_judgement=borderline\n";
-    std::cout << "auto_engine_recommendation=tie\n";
+    std::cout << "auto_parallel_judgement=hybrid\n";
+    std::cout << "auto_engine_recommendation=hybrid\n";
   }
 
   if (d_inputVarIdxs) cudaFree(d_inputVarIdxs);
@@ -1145,9 +1324,7 @@ int main(int argc, char** argv) {
   if (d_out_compact) cudaFree(d_out_compact);
   cudaFree(d_in);
   cudaFree(d_out);
-  cudaEventDestroy(evStart);
-  cudaEventDestroy(evStop);
-  return mismatch == 0 ? 0 : 1;
+  return (hybridMode == "off") ? (mismatch == 0 ? 0 : 1) : (hybridMismatch == 0 ? 0 : 1);
 }
 CU
 
@@ -1302,6 +1479,9 @@ echo "[4/4] Running benchmark..."
   BENCH_CMD=(./bench_kernel --nstates "$NSTATES" --gpu-reps "$GPU_REPS" --cpu-reps "$CPU_REPS"
              --init-mode "$INIT_MODE" --init-seed "$INIT_SEED"
              --state-chunk "$STATE_CHUNK" --block-size "$BLOCK_SIZE")
+  if [[ "$HYBRID_MODE" != "off" ]]; then
+    BENCH_CMD+=(--hybrid-mode "$HYBRID_MODE" --hybrid-partition-index "$HYBRID_PARTITION_INDEX")
+  fi
   if [[ -n "$INIT_FILE_ABS" ]]; then
     BENCH_CMD+=(--init-file "$INIT_FILE_ABS")
   fi

@@ -274,6 +274,42 @@ void emitCpuReference(std::ofstream& of, const V3SimAccelProgram& program,
        << "}\n\n";
 }
 
+void emitPartitionCpuHelpers(std::ofstream& of, const V3SimAccelProgram& program,
+                             const std::vector<AssignPartition>& partitions) {
+    for (size_t partitionIdx = 0; partitionIdx < partitions.size(); ++partitionIdx) {
+        const AssignPartition& partition = partitions.at(partitionIdx);
+        of << "extern \"C\" __host__ void sim_accel_eval_assignw_cpu_part" << partitionIdx
+           << "(const uint32_t* state_in,\n"
+           << "                                                       uint32_t* state_out,\n"
+           << "                                                       uint32_t nstates) {\n"
+           << "    for (uint32_t tid = 0; tid < nstates; ++tid) {\n";
+        emitVarLoads(of, program, partition.m_readVarIdxs, partition.m_writtenVarIdxs,
+                     &partition.m_writtenBeforeIdxs, "state_in", "state_out");
+        of << "\n";
+        emitAssignStatements(of, partition.m_assigns);
+        of << "\n";
+        emitPartitionStores(of, program, partition.m_writtenVarIdxs, "state_out");
+        of << "    }\n"
+           << "}\n\n";
+    }
+
+    of << "extern \"C\" __host__ void sim_accel_eval_assignw_cpu_partition(uint32_t index,\n"
+       << "                                                            const uint32_t* state_in,\n"
+       << "                                                            uint32_t* state_out,\n"
+       << "                                                            uint32_t nstates) {\n"
+       << "    switch (index) {\n";
+    for (size_t i = 0; i < partitions.size(); ++i) {
+        of << "    case " << i << "U:\n"
+           << "        sim_accel_eval_assignw_cpu_part" << i
+           << "(state_in, state_out, nstates);\n"
+           << "        return;\n";
+    }
+    of << "    default:\n"
+       << "        return;\n"
+       << "    }\n"
+       << "}\n\n";
+}
+
 void emitPartitionKernel(std::ofstream& of, const V3SimAccelProgram& program,
                          const AssignPartition& partition, size_t partitionIdx) {
     of << "extern \"C\" __global__ void sim_accel_eval_assignw_u32_part" << partitionIdx
@@ -306,6 +342,78 @@ void emitPartitionLaunchHelpers(std::ofstream& of, const V3SimAccelProgram& prog
        << "    }\n"
        << "}\n\n";
 
+    of << "extern \"C\" __host__ uint32_t sim_accel_eval_partition_read_count(uint32_t index) {\n"
+       << "    switch (index) {\n";
+    for (size_t i = 0; i < partitions.size(); ++i) {
+        of << "    case " << i << "U: return " << partitions.at(i).m_readVarIdxs.size() << "U;\n";
+    }
+    of << "    default: return 0U;\n"
+       << "    }\n"
+       << "}\n\n";
+
+    of << "extern \"C\" __host__ uint32_t sim_accel_eval_partition_read_var_index(uint32_t index,\n"
+       << "                                                               uint32_t slot) {\n"
+       << "    switch (index) {\n";
+    for (size_t i = 0; i < partitions.size(); ++i) {
+        of << "    case " << i << "U:\n"
+           << "        switch (slot) {\n";
+        for (size_t slot = 0; slot < partitions.at(i).m_readVarIdxs.size(); ++slot) {
+            of << "        case " << slot << "U: return "
+               << partitions.at(i).m_readVarIdxs.at(slot) << "U;\n";
+        }
+        of << "        default: return 0xffffffffU;\n"
+           << "        }\n";
+    }
+    of << "    default: return 0xffffffffU;\n"
+       << "    }\n"
+       << "}\n\n";
+
+    of << "extern \"C\" __host__ uint32_t sim_accel_eval_partition_write_count(uint32_t index) {\n"
+       << "    switch (index) {\n";
+    for (size_t i = 0; i < partitions.size(); ++i) {
+        of << "    case " << i << "U: return " << partitions.at(i).m_writtenVarIdxs.size()
+           << "U;\n";
+    }
+    of << "    default: return 0U;\n"
+       << "    }\n"
+       << "}\n\n";
+
+    of << "extern \"C\" __host__ uint32_t sim_accel_eval_partition_write_var_index(uint32_t index,\n"
+       << "                                                                uint32_t slot) {\n"
+       << "    switch (index) {\n";
+    for (size_t i = 0; i < partitions.size(); ++i) {
+        of << "    case " << i << "U:\n"
+           << "        switch (slot) {\n";
+        for (size_t slot = 0; slot < partitions.at(i).m_writtenVarIdxs.size(); ++slot) {
+            of << "        case " << slot << "U: return "
+               << partitions.at(i).m_writtenVarIdxs.at(slot) << "U;\n";
+        }
+        of << "        default: return 0xffffffffU;\n"
+           << "        }\n";
+    }
+    of << "    default: return 0xffffffffU;\n"
+       << "    }\n"
+       << "}\n\n";
+
+    of << "extern \"C\" __host__ cudaError_t sim_accel_eval_assignw_launch_partition(uint32_t index,\n"
+       << "                                                                 const uint32_t* state_in,\n"
+       << "                                                                 uint32_t* state_out,\n"
+       << "                                                                 uint32_t nstates,\n"
+       << "                                                                 uint32_t block_size) {\n"
+       << "    const uint32_t block = block_size ? block_size : 256U;\n"
+       << "    const uint32_t grid = (nstates + block - 1U) / block;\n"
+       << "    switch (index) {\n";
+    for (size_t i = 0; i < partitions.size(); ++i) {
+        of << "    case " << i << "U:\n"
+           << "        sim_accel_eval_assignw_u32_part" << i
+           << "<<<grid, block>>>(state_in, state_out, nstates);\n"
+           << "        return cudaGetLastError();\n";
+    }
+    of << "    default:\n"
+       << "        return cudaErrorInvalidValue;\n"
+       << "    }\n"
+       << "}\n\n";
+
     of << "extern \"C\" __host__ cudaError_t sim_accel_eval_assignw_launch_all(const uint32_t* state_in,\n"
        << "                                                           uint32_t* state_out,\n"
        << "                                                           uint32_t nstates,\n"
@@ -316,7 +424,8 @@ void emitPartitionLaunchHelpers(std::ofstream& of, const V3SimAccelProgram& prog
        << "U * static_cast<size_t>(nstates) * sizeof(uint32_t), cudaMemcpyDeviceToDevice);\n"
        << "    if (status != cudaSuccess) return status;\n";
     for (size_t i = 0; i < partitions.size(); ++i) {
-        of << "    sim_accel_eval_assignw_u32_part" << i << "<<<grid, block>>>(state_in, state_out, nstates);\n";
+        of << "    sim_accel_eval_assignw_u32_part" << i
+           << "<<<grid, block>>>(state_in, state_out, nstates);\n";
         of << "    status = cudaGetLastError();\n";
         of << "    if (status != cudaSuccess) return status;\n";
     }
@@ -386,12 +495,27 @@ void emitApiHeader(const string& filename, const std::vector<AssignPartition>& p
        << "extern \"C\" void sim_accel_eval_assignw_cpu_ref(const uint32_t* state_in,\n"
        << "                                                  uint32_t* state_out,\n"
        << "                                                  uint32_t nstates);\n"
+       << "extern \"C\" void sim_accel_eval_assignw_cpu_partition(uint32_t index,\n"
+       << "                                                        const uint32_t* state_in,\n"
+       << "                                                        uint32_t* state_out,\n"
+       << "                                                        uint32_t nstates);\n"
+       << "extern \"C\" cudaError_t sim_accel_eval_assignw_launch_partition(uint32_t index,\n"
+       << "                                                                 const uint32_t* state_in,\n"
+       << "                                                                 uint32_t* state_out,\n"
+       << "                                                                 uint32_t nstates,\n"
+       << "                                                                 uint32_t block_size);\n"
        << "extern \"C\" cudaError_t sim_accel_eval_assignw_launch_all(const uint32_t* state_in,\n"
        << "                                                           uint32_t* state_out,\n"
        << "                                                           uint32_t nstates,\n"
        << "                                                           uint32_t block_size);\n"
        << "extern \"C\" uint32_t sim_accel_eval_partition_count();\n"
        << "extern \"C\" uint32_t sim_accel_eval_partition_assign_count(uint32_t index);\n"
+       << "extern \"C\" uint32_t sim_accel_eval_partition_read_count(uint32_t index);\n"
+       << "extern \"C\" uint32_t sim_accel_eval_partition_read_var_index(uint32_t index,\n"
+       << "                                                              uint32_t slot);\n"
+       << "extern \"C\" uint32_t sim_accel_eval_partition_write_count(uint32_t index);\n"
+       << "extern \"C\" uint32_t sim_accel_eval_partition_write_var_index(uint32_t index,\n"
+       << "                                                               uint32_t slot);\n"
        << "extern \"C\" uint32_t sim_accel_eval_var_count();\n"
        << "extern \"C\" const char* sim_accel_eval_var_name(uint32_t index);\n"
        << "extern \"C\" uint32_t sim_accel_eval_input_count();\n"
@@ -417,6 +541,7 @@ void emitPartitionedAuxFiles(const string& filename, const V3SimAccelProgram& pr
             << "# define __host__\n"
             << "#endif\n\n";
         emitCpuReference(cpu, program, emittedAssigns, readVarIdxs, writtenVarIdxs);
+        emitPartitionCpuHelpers(cpu, program, partitions);
     }
 
     {
@@ -503,6 +628,7 @@ size_t V3SimAccelBackendCudaWriter::write(const string& filename,
     const std::vector<AssignPartition> partitions = buildPartitions(program, emittedAssigns,
                                                                     assignsPerKernel);
     emitCpuReference(of, program, emittedAssigns, readVarIdxs, writtenVarIdxs);
+    emitPartitionCpuHelpers(of, program, partitions);
     for (size_t partitionIdx = 0; partitionIdx < partitions.size(); ++partitionIdx) {
         emitPartitionKernel(of, program, partitions.at(partitionIdx), partitionIdx);
     }
