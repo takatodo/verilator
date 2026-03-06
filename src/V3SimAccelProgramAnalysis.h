@@ -50,15 +50,24 @@ public:
         std::vector<size_t> m_boundaryInputVarIdxs;
         std::vector<size_t> m_boundaryOutputVarIdxs;
         std::vector<size_t> m_internalVarIdxs;
+        std::vector<size_t> m_dependencyClusterIdxs;
+        std::vector<size_t> m_dependentClusterIdxs;
+        std::vector<size_t> m_cpuBoundaryInputVarIdxs;
+        std::vector<size_t> m_gpuInternalInputVarIdxs;
+        std::vector<size_t> m_cpuBoundaryOutputVarIdxs;
+        std::vector<size_t> m_gpuInternalOutputVarIdxs;
         std::vector<SpecFrontierCandidate> m_specFrontierCandidates;
         size_t m_assignCount = 0;
+        size_t m_inputSignatureVarCount = 0;
         size_t m_boundaryInputVarCount = 0;
         size_t m_boundaryOutputVarCount = 0;
         size_t m_internalVarCount = 0;
+        size_t m_topoRank = 0;
         size_t m_specFrontierCandidateCount = 0;
         size_t m_specFrontierPreferredZeroCount = 0;
         size_t m_specFrontierPreferredOneCount = 0;
         size_t m_specFrontierUnknownPreferenceCount = 0;
+        uint64_t m_inputSignatureBitCount = 0;
         uint64_t m_boundaryInputBitCount = 0;
         uint64_t m_boundaryOutputBitCount = 0;
         uint64_t m_internalBitCount = 0;
@@ -66,30 +75,39 @@ public:
         size_t m_activatorInputVarCount = 0;
         string m_dominantHierarchy;
         size_t m_uniqueHierarchyCount = 0;
+        string m_hybridOwnerHint;
     };
 
     struct ApproxRegCutSummary final {
         size_t m_clusterCount = 0;
         size_t m_assignCount = 0;
+        size_t m_inputSignatureVarCount = 0;
         size_t m_boundaryInputVarCount = 0;
         size_t m_boundaryOutputVarCount = 0;
         size_t m_internalVarCount = 0;
         size_t m_uniqueBoundaryInputVarCount = 0;
         size_t m_uniqueBoundaryOutputVarCount = 0;
         size_t m_uniqueInternalVarCount = 0;
+        uint64_t m_inputSignatureBitCount = 0;
         uint64_t m_boundaryInputBitCount = 0;
         uint64_t m_boundaryOutputBitCount = 0;
         uint64_t m_internalBitCount = 0;
         size_t m_activatorInputVarCount = 0;
         size_t m_maxAssignCount = 0;
+        size_t m_maxInputSignatureVarCount = 0;
         size_t m_maxBoundaryInputVarCount = 0;
         size_t m_maxBoundaryOutputVarCount = 0;
         size_t m_maxInternalVarCount = 0;
+        uint64_t m_maxInputSignatureBitCount = 0;
     };
 
     struct ApproxRegCutAnalysis final {
         ApproxRegCutSummary m_summary;
         SpecFrontierSummary m_specFrontierSummary;
+        size_t m_gpuCandidateClusterCount = 0;
+        size_t m_cpuBoundaryHeavyClusterCount = 0;
+        size_t m_cpuOnlyBlockedClusterCount = 0;
+        std::vector<size_t> m_clusterTopoOrder;
         std::vector<ApproxRegCutCluster> m_clusters;
     };
 

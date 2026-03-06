@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -71,6 +72,12 @@ uint64_t sumVarWidths(const V3SimAccelProgram& program, const std::unordered_set
     uint64_t total = 0;
     for (const size_t varIdx : varIdxs) total += program.m_vars.at(varIdx).m_width;
     return total;
+}
+
+std::vector<size_t> sortedVectorOf(const std::unordered_set<size_t>& varIdxs) {
+    std::vector<size_t> out{varIdxs.begin(), varIdxs.end()};
+    std::sort(out.begin(), out.end());
+    return out;
 }
 
 void accumulateSpecBias(const V3SimAccelProgram& program, size_t exprIdx,
@@ -250,23 +257,42 @@ V3SimAccelProgramAnalysis::analyzeApproxRegCut(const V3SimAccelProgram& program)
         ApproxRegCutCluster clusterSummary;
         clusterSummary.m_clusterIdx = clusterIdx;
         clusterSummary.m_assignCount = cluster.m_assignCount;
+        clusterSummary.m_inputSignatureVarCount = boundaryInputs.size();
         clusterSummary.m_boundaryInputVarCount = boundaryInputs.size();
         clusterSummary.m_boundaryOutputVarCount = boundaryOutputs.size();
         clusterSummary.m_internalVarCount = internalVars.size();
+        clusterSummary.m_inputSignatureBitCount = sumVarWidths(program, boundaryInputs);
         clusterSummary.m_boundaryInputBitCount = sumVarWidths(program, boundaryInputs);
         clusterSummary.m_boundaryOutputBitCount = sumVarWidths(program, boundaryOutputs);
         clusterSummary.m_internalBitCount = sumVarWidths(program, internalVars);
-        clusterSummary.m_boundaryInputVarIdxs.assign(boundaryInputs.begin(), boundaryInputs.end());
-        clusterSummary.m_boundaryOutputVarIdxs.assign(boundaryOutputs.begin(), boundaryOutputs.end());
-        clusterSummary.m_internalVarIdxs.assign(internalVars.begin(), internalVars.end());
-        std::sort(clusterSummary.m_boundaryInputVarIdxs.begin(),
-                  clusterSummary.m_boundaryInputVarIdxs.end());
-        std::sort(clusterSummary.m_boundaryOutputVarIdxs.begin(),
-                  clusterSummary.m_boundaryOutputVarIdxs.end());
-        std::sort(clusterSummary.m_internalVarIdxs.begin(), clusterSummary.m_internalVarIdxs.end());
+        clusterSummary.m_boundaryInputVarIdxs = sortedVectorOf(boundaryInputs);
+        clusterSummary.m_boundaryOutputVarIdxs = sortedVectorOf(boundaryOutputs);
+        clusterSummary.m_internalVarIdxs = sortedVectorOf(internalVars);
         for (const size_t varIdx : boundaryInputs) {
             if (program.m_vars.at(varIdx).m_isActivator) ++clusterSummary.m_activatorInputVarCount;
+            const auto wit = writerClustersByVar.find(varIdx);
+            if (wit == writerClustersByVar.end() || wit->second.empty()) {
+                clusterSummary.m_cpuBoundaryInputVarIdxs.push_back(varIdx);
+            } else {
+                clusterSummary.m_gpuInternalInputVarIdxs.push_back(varIdx);
+            }
         }
+        for (const size_t varIdx : boundaryOutputs) {
+            const V3SimAccelProgram::Var& var = program.m_vars.at(varIdx);
+            if (var.m_isGpuOutput || var.m_isCpuVisible) {
+                clusterSummary.m_cpuBoundaryOutputVarIdxs.push_back(varIdx);
+            } else {
+                clusterSummary.m_gpuInternalOutputVarIdxs.push_back(varIdx);
+            }
+        }
+        std::sort(clusterSummary.m_cpuBoundaryInputVarIdxs.begin(),
+                  clusterSummary.m_cpuBoundaryInputVarIdxs.end());
+        std::sort(clusterSummary.m_gpuInternalInputVarIdxs.begin(),
+                  clusterSummary.m_gpuInternalInputVarIdxs.end());
+        std::sort(clusterSummary.m_cpuBoundaryOutputVarIdxs.begin(),
+                  clusterSummary.m_cpuBoundaryOutputVarIdxs.end());
+        std::sort(clusterSummary.m_gpuInternalOutputVarIdxs.begin(),
+                  clusterSummary.m_gpuInternalOutputVarIdxs.end());
         clusterSummary.m_uniqueHierarchyCount = cluster.m_hierarchyCounts.size();
         for (const auto& it : cluster.m_hierarchyCounts) {
             if (clusterSummary.m_dominantHierarchy.empty() || it.second > cluster.m_hierarchyCounts.at(clusterSummary.m_dominantHierarchy)
@@ -356,25 +382,88 @@ V3SimAccelProgramAnalysis::analyzeApproxRegCut(const V3SimAccelProgram& program)
             = std::max(frontierSummary.m_maxCandidateCount,
                        clusterSummary.m_specFrontierCandidateCount);
 
+        if (!clusterSummary.m_cpuBoundaryOutputVarIdxs.empty()
+            || clusterSummary.m_inputSignatureBitCount > 128
+            || (clusterSummary.m_boundaryInputVarCount > 0
+                && clusterSummary.m_cpuBoundaryInputVarIdxs.size() * 2
+                       >= clusterSummary.m_boundaryInputVarCount)) {
+            clusterSummary.m_hybridOwnerHint = "cpu_boundary_heavy";
+            ++analysis.m_cpuBoundaryHeavyClusterCount;
+        } else {
+            clusterSummary.m_hybridOwnerHint = "gpu_candidate";
+            ++analysis.m_gpuCandidateClusterCount;
+        }
+
+        summary.m_inputSignatureVarCount += clusterSummary.m_inputSignatureVarCount;
         summary.m_boundaryInputVarCount += clusterSummary.m_boundaryInputVarCount;
         summary.m_boundaryOutputVarCount += clusterSummary.m_boundaryOutputVarCount;
         summary.m_internalVarCount += clusterSummary.m_internalVarCount;
+        summary.m_inputSignatureBitCount += clusterSummary.m_inputSignatureBitCount;
         summary.m_boundaryInputBitCount += clusterSummary.m_boundaryInputBitCount;
         summary.m_boundaryOutputBitCount += clusterSummary.m_boundaryOutputBitCount;
         summary.m_internalBitCount += clusterSummary.m_internalBitCount;
         summary.m_activatorInputVarCount += clusterSummary.m_activatorInputVarCount;
         summary.m_maxAssignCount = std::max(summary.m_maxAssignCount, clusterSummary.m_assignCount);
+        summary.m_maxInputSignatureVarCount
+            = std::max(summary.m_maxInputSignatureVarCount, clusterSummary.m_inputSignatureVarCount);
         summary.m_maxBoundaryInputVarCount
             = std::max(summary.m_maxBoundaryInputVarCount, clusterSummary.m_boundaryInputVarCount);
         summary.m_maxBoundaryOutputVarCount
             = std::max(summary.m_maxBoundaryOutputVarCount, clusterSummary.m_boundaryOutputVarCount);
         summary.m_maxInternalVarCount
             = std::max(summary.m_maxInternalVarCount, clusterSummary.m_internalVarCount);
+        summary.m_maxInputSignatureBitCount
+            = std::max(summary.m_maxInputSignatureBitCount, clusterSummary.m_inputSignatureBitCount);
 
         uniqueBoundaryInputs.insert(boundaryInputs.begin(), boundaryInputs.end());
         uniqueBoundaryOutputs.insert(boundaryOutputs.begin(), boundaryOutputs.end());
         uniqueInternalVars.insert(internalVars.begin(), internalVars.end());
         analysis.m_clusters.push_back(std::move(clusterSummary));
+    }
+
+    std::vector<std::unordered_set<size_t>> dependencySets(analysis.m_clusters.size());
+    std::vector<std::unordered_set<size_t>> dependentSets(analysis.m_clusters.size());
+    for (size_t clusterIdx = 0; clusterIdx < analysis.m_clusters.size(); ++clusterIdx) {
+        for (const size_t varIdx : analysis.m_clusters.at(clusterIdx).m_boundaryInputVarIdxs) {
+            const auto wit = writerClustersByVar.find(varIdx);
+            if (wit == writerClustersByVar.end()) continue;
+            for (const size_t producerIdx : wit->second) {
+                if (producerIdx == clusterIdx) continue;
+                dependencySets.at(clusterIdx).emplace(producerIdx);
+                dependentSets.at(producerIdx).emplace(clusterIdx);
+            }
+        }
+    }
+
+    std::vector<size_t> indegree(analysis.m_clusters.size(), 0);
+    for (size_t clusterIdx = 0; clusterIdx < analysis.m_clusters.size(); ++clusterIdx) {
+        indegree.at(clusterIdx) = dependencySets.at(clusterIdx).size();
+        analysis.m_clusters.at(clusterIdx).m_dependencyClusterIdxs
+            = sortedVectorOf(dependencySets.at(clusterIdx));
+        analysis.m_clusters.at(clusterIdx).m_dependentClusterIdxs
+            = sortedVectorOf(dependentSets.at(clusterIdx));
+    }
+    std::set<size_t> ready;
+    for (size_t clusterIdx = 0; clusterIdx < indegree.size(); ++clusterIdx) {
+        if (indegree.at(clusterIdx) == 0) ready.insert(clusterIdx);
+    }
+    while (!ready.empty()) {
+        const size_t clusterIdx = *ready.begin();
+        ready.erase(ready.begin());
+        analysis.m_clusters.at(clusterIdx).m_topoRank = analysis.m_clusterTopoOrder.size();
+        analysis.m_clusterTopoOrder.push_back(clusterIdx);
+        for (const size_t dependentIdx : analysis.m_clusters.at(clusterIdx).m_dependentClusterIdxs) {
+            if (indegree.at(dependentIdx) == 0) continue;
+            --indegree.at(dependentIdx);
+            if (indegree.at(dependentIdx) == 0) ready.insert(dependentIdx);
+        }
+    }
+    if (analysis.m_clusterTopoOrder.size() != analysis.m_clusters.size()) {
+        analysis.m_clusterTopoOrder.clear();
+        for (size_t clusterIdx = 0; clusterIdx < analysis.m_clusters.size(); ++clusterIdx) {
+            analysis.m_clusters.at(clusterIdx).m_topoRank = clusterIdx;
+            analysis.m_clusterTopoOrder.push_back(clusterIdx);
+        }
     }
 
     summary.m_uniqueBoundaryInputVarCount = uniqueBoundaryInputs.size();

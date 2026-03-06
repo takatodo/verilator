@@ -56,6 +56,8 @@ void emitStats(const V3SimAccelProgram& program, size_t emittedUniqueAssignw,
     v3info("--sim-accel-only approx_regcut "
            << "cluster_count=" << approxRegCutSummary.m_clusterCount << " "
            << "assign_count=" << approxRegCutSummary.m_assignCount << " "
+           << "input_signature_vars=" << approxRegCutSummary.m_inputSignatureVarCount << " "
+           << "input_signature_bits=" << approxRegCutSummary.m_inputSignatureBitCount << " "
            << "boundary_input_vars=" << approxRegCutSummary.m_boundaryInputVarCount << " "
            << "boundary_output_vars=" << approxRegCutSummary.m_boundaryOutputVarCount << " "
            << "internal_vars=" << approxRegCutSummary.m_internalVarCount << " "
@@ -65,6 +67,10 @@ void emitStats(const V3SimAccelProgram& program, size_t emittedUniqueAssignw,
            << " "
            << "activator_input_vars=" << approxRegCutSummary.m_activatorInputVarCount << " "
            << "max_assigns=" << approxRegCutSummary.m_maxAssignCount << " "
+           << "max_input_signature_vars=" << approxRegCutSummary.m_maxInputSignatureVarCount
+           << " "
+           << "max_input_signature_bits=" << approxRegCutSummary.m_maxInputSignatureBitCount
+           << " "
            << "max_boundary_input_vars=" << approxRegCutSummary.m_maxBoundaryInputVarCount
            << " "
            << "max_boundary_output_vars=" << approxRegCutSummary.m_maxBoundaryOutputVarCount);
@@ -80,6 +86,11 @@ void emitStats(const V3SimAccelProgram& program, size_t emittedUniqueAssignw,
            << "activator_candidates=" << specFrontierSummary.m_activatorCandidateCount << " "
            << "max_candidate_count=" << specFrontierSummary.m_maxCandidateCount << " "
            << "max_spec_score=" << specFrontierSummary.m_maxSpecScore);
+    v3info("--sim-accel-only hybrid_clusters "
+           << "gpu_candidate_clusters=" << approxRegCut.m_gpuCandidateClusterCount << " "
+           << "cpu_boundary_heavy_clusters=" << approxRegCut.m_cpuBoundaryHeavyClusterCount
+           << " "
+           << "cpu_only_blocked_clusters=" << approxRegCut.m_cpuOnlyBlockedClusterCount);
 }
 
 }  // namespace

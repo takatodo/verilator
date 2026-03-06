@@ -201,6 +201,10 @@ void V3SimAccelProgramJson::write(const string& filename, const V3SimAccelProgra
     of << "  \"approx_regcut_analysis\": {\n";
     of << "    \"cluster_count\": " << approxRegCutSummary.m_clusterCount << ",\n";
     of << "    \"assign_count\": " << approxRegCutSummary.m_assignCount << ",\n";
+    of << "    \"input_signature_var_count\": " << approxRegCutSummary.m_inputSignatureVarCount
+       << ",\n";
+    of << "    \"input_signature_bit_count\": " << approxRegCutSummary.m_inputSignatureBitCount
+       << ",\n";
     of << "    \"boundary_input_var_count\": " << approxRegCutSummary.m_boundaryInputVarCount
        << ",\n";
     of << "    \"boundary_output_var_count\": " << approxRegCutSummary.m_boundaryOutputVarCount
@@ -220,6 +224,10 @@ void V3SimAccelProgramJson::write(const string& filename, const V3SimAccelProgra
     of << "    \"activator_input_var_count\": " << approxRegCutSummary.m_activatorInputVarCount
        << ",\n";
     of << "    \"max_assign_count\": " << approxRegCutSummary.m_maxAssignCount << ",\n";
+    of << "    \"max_input_signature_var_count\": "
+       << approxRegCutSummary.m_maxInputSignatureVarCount << ",\n";
+    of << "    \"max_input_signature_bit_count\": "
+       << approxRegCutSummary.m_maxInputSignatureBitCount << ",\n";
     of << "    \"max_boundary_input_var_count\": "
        << approxRegCutSummary.m_maxBoundaryInputVarCount << ",\n";
     of << "    \"max_boundary_output_var_count\": "
@@ -244,6 +252,19 @@ void V3SimAccelProgramJson::write(const string& filename, const V3SimAccelProgra
     of << "    \"max_spec_score\": " << specFrontierSummary.m_maxSpecScore << "\n";
     of << "  },\n";
 
+    of << "  \"hybrid_cluster_analysis\": {\n";
+    of << "    \"cluster_count\": " << approxRegCut.m_clusters.size() << ",\n";
+    of << "    \"gpu_candidate_cluster_count\": " << approxRegCut.m_gpuCandidateClusterCount
+       << ",\n";
+    of << "    \"cpu_boundary_heavy_cluster_count\": "
+       << approxRegCut.m_cpuBoundaryHeavyClusterCount << ",\n";
+    of << "    \"cpu_only_blocked_cluster_count\": "
+       << approxRegCut.m_cpuOnlyBlockedClusterCount << ",\n";
+    of << "    \"cluster_topo_order\": ";
+    writeVarIndexList(of, approxRegCut.m_clusterTopoOrder, "      ");
+    of << "\n";
+    of << "  },\n";
+
     of << "  \"approx_regcut_clusters\": [\n";
     for (size_t i = 0; i < approxRegCut.m_clusters.size(); ++i) {
         const V3SimAccelProgramAnalysis::ApproxRegCutCluster& cluster
@@ -251,6 +272,7 @@ void V3SimAccelProgramJson::write(const string& filename, const V3SimAccelProgra
         of << "    {\n";
         of << "      \"cluster_idx\": " << cluster.m_clusterIdx << ",\n";
         of << "      \"assign_count\": " << cluster.m_assignCount << ",\n";
+        of << "      \"input_signature_var_count\": " << cluster.m_inputSignatureVarCount << ",\n";
         of << "      \"boundary_input_var_count\": " << cluster.m_boundaryInputVarCount << ",\n";
         of << "      \"boundary_output_var_count\": " << cluster.m_boundaryOutputVarCount
            << ",\n";
@@ -263,6 +285,8 @@ void V3SimAccelProgramJson::write(const string& filename, const V3SimAccelProgra
            << cluster.m_specFrontierPreferredOneCount << ",\n";
         of << "      \"spec_frontier_unknown_preference_count\": "
            << cluster.m_specFrontierUnknownPreferenceCount << ",\n";
+        of << "      \"input_signature_bit_count\": " << cluster.m_inputSignatureBitCount
+           << ",\n";
         of << "      \"boundary_input_bit_count\": " << cluster.m_boundaryInputBitCount << ",\n";
         of << "      \"boundary_output_bit_count\": " << cluster.m_boundaryOutputBitCount
            << ",\n";
@@ -270,6 +294,9 @@ void V3SimAccelProgramJson::write(const string& filename, const V3SimAccelProgra
         of << "      \"spec_frontier_max_score\": " << cluster.m_specFrontierMaxScore << ",\n";
         of << "      \"activator_input_var_count\": " << cluster.m_activatorInputVarCount
            << ",\n";
+        of << "      \"topo_rank\": " << cluster.m_topoRank << ",\n";
+        of << "      \"hybrid_owner_hint\": \"" << jsonEscape(cluster.m_hybridOwnerHint)
+           << "\",\n";
         of << "      \"dominant_hierarchy\": \"" << jsonEscape(cluster.m_dominantHierarchy)
            << "\",\n";
         of << "      \"unique_hierarchy_count\": " << cluster.m_uniqueHierarchyCount << ",\n";
@@ -284,6 +311,24 @@ void V3SimAccelProgramJson::write(const string& filename, const V3SimAccelProgra
         of << ",\n";
         of << "      \"internal_var_idxs\": ";
         writeVarIndexList(of, cluster.m_internalVarIdxs, "        ");
+        of << ",\n";
+        of << "      \"dependency_cluster_idxs\": ";
+        writeVarIndexList(of, cluster.m_dependencyClusterIdxs, "        ");
+        of << ",\n";
+        of << "      \"dependent_cluster_idxs\": ";
+        writeVarIndexList(of, cluster.m_dependentClusterIdxs, "        ");
+        of << ",\n";
+        of << "      \"cpu_boundary_input_var_idxs\": ";
+        writeVarIndexList(of, cluster.m_cpuBoundaryInputVarIdxs, "        ");
+        of << ",\n";
+        of << "      \"gpu_internal_input_var_idxs\": ";
+        writeVarIndexList(of, cluster.m_gpuInternalInputVarIdxs, "        ");
+        of << ",\n";
+        of << "      \"cpu_boundary_output_var_idxs\": ";
+        writeVarIndexList(of, cluster.m_cpuBoundaryOutputVarIdxs, "        ");
+        of << ",\n";
+        of << "      \"gpu_internal_output_var_idxs\": ";
+        writeVarIndexList(of, cluster.m_gpuInternalOutputVarIdxs, "        ");
         of << ",\n";
         of << "      \"spec_frontier_candidates\": [";
         if (!cluster.m_specFrontierCandidates.empty()) of << "\n";
