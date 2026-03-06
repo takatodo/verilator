@@ -1,34 +1,58 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_NAME="$(basename "$0")"
+
 usage() {
-  cat <<'EOF'
+  cat <<EOF2
 Usage:
-  verilator_sim_accel_bench --top-module TOP --outdir DIR [options] -- <rtl files...>
+  ${SCRIPT_NAME} --top-module TOP --outdir DIR [options] -- <rtl files...>
 
 Options:
-  --verilator PATH   Verilator binary (default: ./bin/verilator)
-  --top-module TOP   Top module name
-  --outdir DIR       Output directory
-  --nstates N        Number of parallel states (default: 131072)
-  --gpu-reps N       GPU repetitions for timing (default: 200)
-  --cpu-reps N       CPU repetitions for timing (default: 20)
+  --verilator PATH     Verilator binary (default: ./bin/verilator)
+  --top-module TOP     Top module name
+  --outdir DIR         Output directory
+  --nstates N          Number of parallel states (default: 131072)
+  --state-chunk N      States per kernel launch chunk (default: nstates, 0=disabled)
+  --gpu-reps N         GPU repetitions for timing (default: 200)
+  --cpu-reps N         CPU repetitions for timing (default: 20)
+  --block-size N       CUDA block size (default: 256)
+  --init-mode MODE     Initial state mode: random|zero|ones|counter (default: random)
+  --init-seed N        Seed for random init mode (default: 1)
+  --init-file PATH     Optional init override file (index/name based)
+
+Init file format:
+  - Comment lines start with '#'
+  - Each line is one of:
+      <var_index> <value>
+      <var_name> <value>
+      <var_index> <state_index> <value>
+      <var_name> <state_index> <value>
+  - Decimal and hex (0x...) are accepted
 
 Example:
-  verilator_sim_accel_bench \
+  ${SCRIPT_NAME} \
     --verilator ./bin/verilator \
     --top-module axi_interconnect \
     --outdir /tmp/sim_accel_bench \
+    --init-mode counter \
+    --init-file /tmp/ddr_init.txt \
     -- /path/to/priority_encoder.v /path/to/arbiter.v /path/to/axi_interconnect.v
-EOF
+EOF2
 }
 
 VERILATOR_BIN="./bin/verilator"
 TOP_MODULE=""
 OUTDIR=""
 NSTATES=131072
+STATE_CHUNK=0
 GPU_REPS=200
 CPU_REPS=20
+BLOCK_SIZE=256
+INIT_MODE="random"
+INIT_SEED=1
+INIT_FILE=""
+INIT_FILE_ABS=""
 declare -a SOURCES=()
 
 while [[ $# -gt 0 ]]; do
@@ -41,10 +65,20 @@ while [[ $# -gt 0 ]]; do
       OUTDIR="$2"; shift 2 ;;
     --nstates)
       NSTATES="$2"; shift 2 ;;
+    --state-chunk)
+      STATE_CHUNK="$2"; shift 2 ;;
     --gpu-reps)
       GPU_REPS="$2"; shift 2 ;;
     --cpu-reps)
       CPU_REPS="$2"; shift 2 ;;
+    --block-size)
+      BLOCK_SIZE="$2"; shift 2 ;;
+    --init-mode)
+      INIT_MODE="$2"; shift 2 ;;
+    --init-seed)
+      INIT_SEED="$2"; shift 2 ;;
+    --init-file)
+      INIT_FILE="$2"; shift 2 ;;
     --help|-h)
       usage; exit 0 ;;
     --)
@@ -63,15 +97,48 @@ if [[ -z "$TOP_MODULE" || -z "$OUTDIR" || ${#SOURCES[@]} -eq 0 ]]; then
   exit 2
 fi
 
+if ! [[ "$STATE_CHUNK" =~ ^[0-9]+$ ]]; then
+  echo "Invalid --state-chunk: $STATE_CHUNK (expected integer >= 0)" >&2
+  exit 2
+fi
+if ! [[ "$NSTATES" =~ ^[0-9]+$ ]] || [[ "$NSTATES" -eq 0 ]]; then
+  echo "Invalid --nstates: $NSTATES (expected integer > 0)" >&2
+  exit 2
+fi
+if [[ "$STATE_CHUNK" -gt "$NSTATES" ]]; then
+  STATE_CHUNK="$NSTATES"
+fi
+if ! [[ "$BLOCK_SIZE" =~ ^[0-9]+$ ]] || [[ "$BLOCK_SIZE" -eq 0 ]] || [[ "$BLOCK_SIZE" -gt 1024 ]]; then
+  echo "Invalid --block-size: $BLOCK_SIZE (expected integer in 1..1024)" >&2
+  exit 2
+fi
+
+case "$INIT_MODE" in
+  random|zero|ones|counter) ;;
+  *)
+    echo "Invalid --init-mode: $INIT_MODE (expected random|zero|ones|counter)" >&2
+    exit 2 ;;
+esac
+
+if [[ -n "$INIT_FILE" ]]; then
+  if [[ ! -f "$INIT_FILE" ]]; then
+    echo "--init-file not found: $INIT_FILE" >&2
+    exit 2
+  fi
+  INIT_FILE_ABS="$(cd "$(dirname "$INIT_FILE")" && pwd)/$(basename "$INIT_FILE")"
+fi
+
 mkdir -p "$OUTDIR"
 OUTDIR="$(cd "$OUTDIR" && pwd)"
 KERNEL_CU="$OUTDIR/${TOP_MODULE}.sim_accel.kernel.cu"
 KERNEL_VARS="$KERNEL_CU.vars.tsv"
 KERNEL_DEPS="$KERNEL_CU.deps.tsv"
+KERNEL_COMM="$KERNEL_CU.comm.tsv"
 LOG="$OUTDIR/verilator_cuda.log"
 TIME_VERILATOR="$OUTDIR/time_verilator_codegen_sec.txt"
 TIME_NVCC="$OUTDIR/time_nvcc_compile_sec.txt"
 TIME_RUN="$OUTDIR/time_bench_run_sec.txt"
+
 
 echo "[1/4] Generating CUDA kernel with --sim-accel-only..."
 /usr/bin/time -f "%e" -o "$TIME_VERILATOR" \
@@ -88,6 +155,7 @@ if [[ ! -s "$KERNEL_CU" || ! -s "$KERNEL_VARS" ]]; then
   exit 1
 fi
 
+
 echo "[2/4] Extracting CPU fallback body..."
 awk '
   /if \(tid >= nstates\) return;/ {cap=1; next}
@@ -98,21 +166,249 @@ awk '
 cat > "$OUTDIR/bench_kernel.cu" <<'CU'
 #include <cuda_runtime.h>
 
+#include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <random>
+#include <sstream>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "kernel_generated.cu"
+
+#ifdef SIM_ACCEL_PARTIAL_WRITE
+#undef SIM_ACCEL_PARTIAL_WRITE
+#endif
 
 static void checkCuda(cudaError_t st, const char* msg) {
   if (st != cudaSuccess) {
     std::cerr << "CUDA error at " << msg << ": " << cudaGetErrorString(st) << "\n";
     std::exit(2);
   }
+}
+
+static std::vector<std::string> splitTabs(const std::string& s) {
+  std::vector<std::string> out;
+  std::string token;
+  std::stringstream ss(s);
+  while (std::getline(ss, token, '\t')) out.push_back(token);
+  return out;
+}
+
+static bool parseU64(const std::string& s, uint64_t* out) {
+  if (s.empty()) return false;
+  errno = 0;
+  char* endp = nullptr;
+  const unsigned long long v = std::strtoull(s.c_str(), &endp, 0);
+  if (errno != 0 || endp == s.c_str() || *endp != '\0') return false;
+  *out = static_cast<uint64_t>(v);
+  return true;
+}
+
+static uint32_t maskToWidth(uint64_t value, uint32_t width) {
+  if (width == 0) return 0;
+  if (width >= 32) return static_cast<uint32_t>(value);
+  const uint64_t mask = (uint64_t{1} << width) - 1;
+  return static_cast<uint32_t>(value & mask);
+}
+
+struct InitFileStats {
+  size_t rules_applied = 0;
+  size_t values_applied = 0;
+  size_t lines_ignored = 0;
+};
+
+static std::vector<uint32_t> loadVarWidths(const std::string& varsPath, uint32_t nvars) {
+  std::vector<uint32_t> widths(nvars, 32);
+  std::ifstream vf(varsPath);
+  if (!vf) return widths;
+  std::string line;
+  bool first = true;
+  while (std::getline(vf, line)) {
+    if (first) {
+      first = false;
+      continue;
+    }
+    if (line.empty()) continue;
+    const auto cols = splitTabs(line);
+    if (cols.size() < 6) continue;
+    uint64_t idxRaw = 0;
+    uint64_t widthRaw = 0;
+    if (!parseU64(cols[0], &idxRaw)) continue;
+    if (!parseU64(cols[5], &widthRaw)) continue;
+    if (idxRaw >= widths.size()) continue;
+    uint32_t width = static_cast<uint32_t>(widthRaw);
+    if (width == 0) width = 1;
+    if (width > 32) width = 32;
+    widths[idxRaw] = width;
+  }
+  return widths;
+}
+
+static std::vector<uint32_t> loadCommVarIdxs(uint32_t (*countFn)(), uint32_t (*indexFn)(uint32_t)) {
+  const uint32_t count = countFn();
+  std::vector<uint32_t> out(count, 0);
+  for (uint32_t i = 0; i < count; ++i) out[i] = indexFn(i);
+  return out;
+}
+
+static std::vector<uint32_t> gatherSlotsVarMajor(const std::vector<uint32_t>& stateVarMajor,
+                                                 const std::vector<uint32_t>& varIdxs,
+                                                 uint32_t nstates) {
+  std::vector<uint32_t> out(static_cast<size_t>(varIdxs.size()) * nstates, 0u);
+  for (size_t slot = 0; slot < varIdxs.size(); ++slot) {
+    const size_t srcBase = static_cast<size_t>(varIdxs[slot]) * nstates;
+    const size_t dstBase = slot * static_cast<size_t>(nstates);
+    std::copy_n(stateVarMajor.begin() + srcBase, nstates, out.begin() + dstBase);
+  }
+  return out;
+}
+
+static void materializeSlotsVarMajor(const std::vector<uint32_t>& compactState,
+                                     const std::vector<uint32_t>& varIdxs, uint32_t nvars,
+                                     uint32_t nstates, std::vector<uint32_t>* outp) {
+  outp->assign(static_cast<size_t>(nvars) * nstates, 0u);
+  for (size_t slot = 0; slot < varIdxs.size(); ++slot) {
+    const size_t srcBase = slot * static_cast<size_t>(nstates);
+    const size_t dstBase = static_cast<size_t>(varIdxs[slot]) * nstates;
+    std::copy_n(compactState.begin() + srcBase, nstates, outp->begin() + dstBase);
+  }
+}
+
+static void applyInitMode(std::vector<uint32_t>& h_in, uint32_t nvars, uint32_t nstates,
+                          const std::string& mode, uint32_t seed) {
+  const size_t elems = static_cast<size_t>(nvars) * nstates;
+  if (mode == "zero") {
+    std::fill(h_in.begin(), h_in.end(), 0u);
+    return;
+  }
+  if (mode == "ones") {
+    std::fill(h_in.begin(), h_in.end(), 0xffffffffu);
+    return;
+  }
+  if (mode == "counter") {
+    for (uint32_t idx = 0; idx < nvars; ++idx) {
+      const size_t base = static_cast<size_t>(idx) * nstates;
+      for (uint32_t tid = 0; tid < nstates; ++tid) {
+        h_in[base + tid] = static_cast<uint32_t>((idx * 2654435761u) ^ tid);
+      }
+    }
+    return;
+  }
+  std::mt19937 rng(seed);
+  std::uniform_int_distribution<uint32_t> dist(0, 0xffffffffu);
+  for (size_t i = 0; i < elems; ++i) h_in[i] = dist(rng);
+}
+
+static InitFileStats applyInitFile(std::vector<uint32_t>& h_in, uint32_t nvars, uint32_t nstates,
+                                   const std::string& varsPath,
+                                   const std::string& initPath) {
+  InitFileStats stats;
+  std::vector<uint32_t> widths(nvars, 32);
+  std::unordered_map<std::string, uint32_t> nameToIndex;
+
+  {
+    std::ifstream vf(varsPath);
+    if (!vf) {
+      std::cerr << "Warning: could not open vars TSV for name-based init: " << varsPath << "\n";
+    } else {
+      std::string line;
+      bool first = true;
+      while (std::getline(vf, line)) {
+        if (first) {
+          first = false;
+          continue;
+        }
+        if (line.empty()) continue;
+        const auto cols = splitTabs(line);
+        if (cols.size() < 6) continue;
+        uint64_t idx = 0;
+        uint64_t width = 0;
+        if (!parseU64(cols[0], &idx)) continue;
+        if (idx >= nvars) continue;
+        if (parseU64(cols[5], &width)) widths[idx] = static_cast<uint32_t>(width);
+        nameToIndex[cols[1]] = static_cast<uint32_t>(idx);
+      }
+    }
+  }
+
+  std::ifstream inf(initPath);
+  if (!inf) {
+    std::cerr << "Warning: could not open init file: " << initPath << "\n";
+    return stats;
+  }
+
+  std::string line;
+  while (std::getline(inf, line)) {
+    const auto hashPos = line.find('#');
+    if (hashPos != std::string::npos) line.resize(hashPos);
+    for (char& ch : line) {
+      if (ch == ',' || ch == '\t') ch = ' ';
+    }
+
+    std::vector<std::string> toks;
+    {
+      std::stringstream ss(line);
+      std::string tok;
+      while (ss >> tok) toks.push_back(tok);
+    }
+    if (toks.empty()) continue;
+    if (toks.size() != 2 && toks.size() != 3) {
+      ++stats.lines_ignored;
+      continue;
+    }
+
+    uint32_t varIdx = 0;
+    {
+      uint64_t idxParsed = 0;
+      if (parseU64(toks[0], &idxParsed)) {
+        if (idxParsed >= nvars) {
+          ++stats.lines_ignored;
+          continue;
+        }
+        varIdx = static_cast<uint32_t>(idxParsed);
+      } else {
+        const auto it = nameToIndex.find(toks[0]);
+        if (it == nameToIndex.end()) {
+          ++stats.lines_ignored;
+          continue;
+        }
+        varIdx = it->second;
+      }
+    }
+
+    uint64_t valueRaw = 0;
+    if (!parseU64(toks.back(), &valueRaw)) {
+      ++stats.lines_ignored;
+      continue;
+    }
+    const uint32_t value = maskToWidth(valueRaw, widths[varIdx]);
+
+    const size_t base = static_cast<size_t>(varIdx) * nstates;
+    if (toks.size() == 2) {
+      for (uint32_t tid = 0; tid < nstates; ++tid) h_in[base + tid] = value;
+      ++stats.rules_applied;
+      stats.values_applied += nstates;
+      continue;
+    }
+
+    uint64_t stateIdxRaw = 0;
+    if (!parseU64(toks[1], &stateIdxRaw) || stateIdxRaw >= nstates) {
+      ++stats.lines_ignored;
+      continue;
+    }
+    h_in[base + static_cast<size_t>(stateIdxRaw)] = value;
+    ++stats.rules_applied;
+    ++stats.values_applied;
+  }
+
+  return stats;
 }
 
 static void sim_accel_eval_assignw_cpu(const uint32_t* state_in, uint32_t* state_out,
@@ -122,71 +418,234 @@ static void sim_accel_eval_assignw_cpu(const uint32_t* state_in, uint32_t* state
   }
 }
 
-int main() {
+static size_t chunkedIndex(uint32_t varIdx, uint32_t stateIdx, uint32_t nvars, uint32_t stateChunk) {
+  const uint32_t chunkId = stateIdx / stateChunk;
+  const uint32_t local = stateIdx % stateChunk;
+  const size_t chunkBase = static_cast<size_t>(chunkId) * static_cast<size_t>(nvars) * stateChunk;
+  return chunkBase + static_cast<size_t>(varIdx) * stateChunk + local;
+}
+
+static std::vector<uint32_t> unchunkToVarMajor(const std::vector<uint32_t>& chunked, uint32_t nvars,
+                                               uint32_t nstates, uint32_t stateChunk) {
+  std::vector<uint32_t> out(static_cast<size_t>(nvars) * nstates, 0u);
+  for (uint32_t varIdx = 0; varIdx < nvars; ++varIdx) {
+    for (uint32_t stateIdx = 0; stateIdx < nstates; ++stateIdx) {
+      const size_t dst = static_cast<size_t>(varIdx) * nstates + stateIdx;
+      const size_t src = chunkedIndex(varIdx, stateIdx, nvars, stateChunk);
+      out[dst] = chunked[src];
+    }
+  }
+  return out;
+}
+
+static void printUsageAndExit(const char* argv0) {
+  std::cerr << "Usage: " << argv0
+            << " [--init-mode random|zero|ones|counter] [--init-seed N] [--init-file PATH]"
+            << " [--state-chunk N] [--block-size N]\n";
+  std::exit(2);
+}
+
+int main(int argc, char** argv) {
+  std::string initMode = "random";
+  uint32_t initSeed = 1;
+  std::string initFile;
+  uint32_t stateChunk = 0;
+  uint32_t blockSize = BLOCK_SIZE_VALUE;
+
+  for (int i = 1; i < argc; ++i) {
+    const std::string a = argv[i];
+    if (a == "--init-mode") {
+      if (i + 1 >= argc) printUsageAndExit(argv[0]);
+      initMode = argv[++i];
+    } else if (a == "--init-seed") {
+      if (i + 1 >= argc) printUsageAndExit(argv[0]);
+      uint64_t seed = 0;
+      if (!parseU64(argv[++i], &seed)) printUsageAndExit(argv[0]);
+      initSeed = static_cast<uint32_t>(seed);
+    } else if (a == "--init-file") {
+      if (i + 1 >= argc) printUsageAndExit(argv[0]);
+      initFile = argv[++i];
+    } else if (a == "--state-chunk") {
+      if (i + 1 >= argc) printUsageAndExit(argv[0]);
+      uint64_t chunk = 0;
+      if (!parseU64(argv[++i], &chunk)) printUsageAndExit(argv[0]);
+      stateChunk = static_cast<uint32_t>(chunk);
+    } else if (a == "--block-size") {
+      if (i + 1 >= argc) printUsageAndExit(argv[0]);
+      uint64_t bs = 0;
+      if (!parseU64(argv[++i], &bs) || bs == 0 || bs > 1024) printUsageAndExit(argv[0]);
+      blockSize = static_cast<uint32_t>(bs);
+    } else {
+      printUsageAndExit(argv[0]);
+    }
+  }
+
+  if (initMode != "random" && initMode != "zero" && initMode != "ones" && initMode != "counter") {
+    std::cerr << "Invalid --init-mode: " << initMode << "\n";
+    return 2;
+  }
+
   const uint32_t nvars = sim_accel_eval_var_count();
+  const std::vector<uint32_t> inputVarIdxs
+      = loadCommVarIdxs(sim_accel_eval_input_count, sim_accel_eval_input_var_index);
+  const std::vector<uint32_t> outputVarIdxs
+      = loadCommVarIdxs(sim_accel_eval_output_count, sim_accel_eval_output_var_index);
   const uint32_t nstates = NSTATES_VALUE;
   const int gpu_reps = GPU_REPS_VALUE;
   const int cpu_reps = CPU_REPS_VALUE;
+  if (stateChunk > nstates) stateChunk = nstates;
+  const bool useChunkLayout = (stateChunk > 0 && stateChunk < nstates);
+  const uint32_t nchunks = useChunkLayout ? ((nstates + stateChunk - 1) / stateChunk) : 1;
+  const uint32_t paddedStates = useChunkLayout ? (nchunks * stateChunk) : nstates;
 
   const size_t elems = static_cast<size_t>(nvars) * nstates;
-  const size_t bytes = elems * sizeof(uint32_t);
+  const size_t elemsAlloc = static_cast<size_t>(nvars) * paddedStates;
+  const size_t bytes = elemsAlloc * sizeof(uint32_t);
+  const size_t compactInputElems = static_cast<size_t>(inputVarIdxs.size()) * nstates;
+  const size_t compactOutputElems = static_cast<size_t>(outputVarIdxs.size()) * nstates;
+  const size_t compactRoundtripBytes = (compactInputElems + compactOutputElems) * sizeof(uint32_t);
+  const size_t fullRoundtripBytes = elems * sizeof(uint32_t) * 2u;
 
-  std::vector<uint32_t> h_in(elems);
-  std::vector<uint32_t> h_out_gpu(elems);
-  std::vector<uint32_t> h_out_cpu(elems);
+  std::vector<uint32_t> h_seed_varmajor(elems);
+  std::vector<uint32_t> h_in_compact;
+  std::vector<uint32_t> h_in_varmajor(elems, 0u);
+  std::vector<uint32_t> h_in(elemsAlloc, 0);
+  std::vector<uint32_t> h_out_gpu(elemsAlloc, 0);
+  std::vector<uint32_t> h_out_cpu_varmajor(elems, 0);
 
-  std::mt19937 rng(1);
-  std::uniform_int_distribution<uint32_t> dist(0, 0xffffffffu);
-  for (size_t i = 0; i < elems; ++i) h_in[i] = dist(rng);
+  applyInitMode(h_seed_varmajor, nvars, nstates, initMode, initSeed);
+  InitFileStats initStats;
+  if (!initFile.empty()) {
+    initStats = applyInitFile(h_seed_varmajor, nvars, nstates, "kernel_generated.vars.tsv", initFile);
+  }
+  const auto widths = loadVarWidths("kernel_generated.vars.tsv", nvars);
+  for (uint32_t idx = 0; idx < nvars; ++idx) {
+    const size_t base = static_cast<size_t>(idx) * nstates;
+    for (uint32_t tid = 0; tid < nstates; ++tid) {
+      h_seed_varmajor[base + tid] = maskToWidth(h_seed_varmajor[base + tid], widths[idx]);
+    }
+  }
+  h_in_compact = gatherSlotsVarMajor(h_seed_varmajor, inputVarIdxs, nstates);
+  materializeSlotsVarMajor(h_in_compact, inputVarIdxs, nvars, nstates, &h_in_varmajor);
+
+  if (useChunkLayout) {
+    for (uint32_t varIdx = 0; varIdx < nvars; ++varIdx) {
+      const size_t srcBase = static_cast<size_t>(varIdx) * nstates;
+      for (uint32_t stateIdx = 0; stateIdx < nstates; ++stateIdx) {
+        const size_t dst = chunkedIndex(varIdx, stateIdx, nvars, stateChunk);
+        h_in[dst] = h_in_varmajor[srcBase + stateIdx];
+      }
+    }
+  } else {
+    std::copy(h_in_varmajor.begin(), h_in_varmajor.end(), h_in.begin());
+  }
 
   uint32_t* d_in = nullptr;
   uint32_t* d_out = nullptr;
   checkCuda(cudaMalloc(&d_in, bytes), "cudaMalloc d_in");
   checkCuda(cudaMalloc(&d_out, bytes), "cudaMalloc d_out");
   checkCuda(cudaMemcpy(d_in, h_in.data(), bytes, cudaMemcpyHostToDevice), "H2D in");
+  checkCuda(cudaMemcpy(d_out, d_in, bytes, cudaMemcpyDeviceToDevice), "D2D init out");
 
-  const int block = 256;
-  const int grid = static_cast<int>((nstates + block - 1) / block);
-
-  for (int i = 0; i < 10; ++i) sim_accel_eval_assignw_u32<<<grid, block>>>(d_in, d_out, nstates);
+  const int block = static_cast<int>(blockSize);
+  for (int i = 0; i < 10; ++i) {
+    if (!useChunkLayout) {
+      const int grid = static_cast<int>((nstates + block - 1) / block);
+      sim_accel_eval_assignw_u32<<<grid, block>>>(d_in, d_out, nstates);
+    } else {
+      const int grid = static_cast<int>((stateChunk + block - 1) / block);
+      const size_t chunkElems = static_cast<size_t>(nvars) * stateChunk;
+      for (uint32_t chunkId = 0; chunkId < nchunks; ++chunkId) {
+        const size_t off = static_cast<size_t>(chunkId) * chunkElems;
+        sim_accel_eval_assignw_u32<<<grid, block>>>(d_in + off, d_out + off, stateChunk);
+      }
+    }
+  }
   checkCuda(cudaDeviceSynchronize(), "warmup sync");
 
   cudaEvent_t evStart, evStop;
   checkCuda(cudaEventCreate(&evStart), "event create start");
   checkCuda(cudaEventCreate(&evStop), "event create stop");
   checkCuda(cudaEventRecord(evStart), "event record start");
-  for (int i = 0; i < gpu_reps; ++i) sim_accel_eval_assignw_u32<<<grid, block>>>(d_in, d_out, nstates);
+  for (int i = 0; i < gpu_reps; ++i) {
+    if (!useChunkLayout) {
+      const int grid = static_cast<int>((nstates + block - 1) / block);
+      sim_accel_eval_assignw_u32<<<grid, block>>>(d_in, d_out, nstates);
+    } else {
+      const int grid = static_cast<int>((stateChunk + block - 1) / block);
+      const size_t chunkElems = static_cast<size_t>(nvars) * stateChunk;
+      for (uint32_t chunkId = 0; chunkId < nchunks; ++chunkId) {
+        const size_t off = static_cast<size_t>(chunkId) * chunkElems;
+        sim_accel_eval_assignw_u32<<<grid, block>>>(d_in + off, d_out + off, stateChunk);
+      }
+    }
+  }
   checkCuda(cudaEventRecord(evStop), "event record stop");
   checkCuda(cudaEventSynchronize(evStop), "event sync stop");
 
   float gpu_ms = 0.0f;
   checkCuda(cudaEventElapsedTime(&gpu_ms, evStart, evStop), "elapsed");
   checkCuda(cudaMemcpy(h_out_gpu.data(), d_out, bytes, cudaMemcpyDeviceToHost), "D2H out");
+  const std::vector<uint32_t> h_out_gpu_varmajor
+      = useChunkLayout ? unchunkToVarMajor(h_out_gpu, nvars, nstates, stateChunk)
+                       : std::vector<uint32_t>(h_out_gpu.begin(), h_out_gpu.begin() + elems);
 
   auto cpu_t0 = std::chrono::high_resolution_clock::now();
   for (int i = 0; i < cpu_reps; ++i) {
-    sim_accel_eval_assignw_cpu(h_in.data(), h_out_cpu.data(), nstates);
+    sim_accel_eval_assignw_cpu(h_in_varmajor.data(), h_out_cpu_varmajor.data(), nstates);
   }
   auto cpu_t1 = std::chrono::high_resolution_clock::now();
   const double cpu_ms = std::chrono::duration<double, std::milli>(cpu_t1 - cpu_t0).count();
 
-  sim_accel_eval_assignw_cpu(h_in.data(), h_out_cpu.data(), nstates);
+  sim_accel_eval_assignw_cpu(h_in_varmajor.data(), h_out_cpu_varmajor.data(), nstates);
   size_t mismatch = 0;
   for (size_t i = 0; i < elems; ++i) {
-    if (h_out_cpu[i] != h_out_gpu[i]) ++mismatch;
+    if (h_out_cpu_varmajor[i] != h_out_gpu_varmajor[i]) ++mismatch;
+  }
+  const std::vector<uint32_t> h_out_gpu_compact
+      = gatherSlotsVarMajor(h_out_gpu_varmajor, outputVarIdxs, nstates);
+  const std::vector<uint32_t> h_out_cpu_compact
+      = gatherSlotsVarMajor(h_out_cpu_varmajor, outputVarIdxs, nstates);
+  size_t compactMismatch = 0;
+  for (size_t i = 0; i < h_out_cpu_compact.size(); ++i) {
+    if (h_out_cpu_compact[i] != h_out_gpu_compact[i]) ++compactMismatch;
   }
 
   const double gpu_ms_per_rep = gpu_ms / gpu_reps;
   const double cpu_ms_per_rep = cpu_ms / cpu_reps;
   const double speedup = cpu_ms_per_rep / gpu_ms_per_rep;
-  const double eps = 0.05;  // 5% deadband for stable auto-judgement
+  const double eps = 0.05;
 
   std::cout << std::fixed << std::setprecision(6);
   std::cout << "nvars=" << nvars << " nstates=" << nstates << " elems=" << elems << "\n";
+  std::cout << "state_chunk=" << (useChunkLayout ? stateChunk : 0) << "\n";
+  std::cout << "block_size=" << block << "\n";
+  std::cout << "state_chunks=" << nchunks << "\n";
+  std::cout << "padded_states=" << paddedStates << "\n";
+  std::cout << "init_mode=" << initMode << "\n";
+  std::cout << "init_seed=" << initSeed << "\n";
+  if (!initFile.empty()) {
+    std::cout << "init_file=" << initFile << "\n";
+    std::cout << "init_file_rules_applied=" << initStats.rules_applied << "\n";
+    std::cout << "init_file_values_applied=" << initStats.values_applied << "\n";
+    std::cout << "init_file_lines_ignored=" << initStats.lines_ignored << "\n";
+  }
   std::cout << "gpu_ms_per_rep=" << gpu_ms_per_rep << "\n";
   std::cout << "cpu_ms_per_rep=" << cpu_ms_per_rep << "\n";
   std::cout << "speedup_cpu_over_gpu=" << speedup << "x\n";
   std::cout << "mismatch=" << mismatch << "\n";
+  std::cout << "compact_mismatch=" << compactMismatch << "\n";
+  std::cout << "comm_input_vars=" << inputVarIdxs.size() << "\n";
+  std::cout << "comm_output_vars=" << outputVarIdxs.size() << "\n";
+  std::cout << "comm_input_bytes_per_batch=" << (compactInputElems * sizeof(uint32_t)) << "\n";
+  std::cout << "comm_output_bytes_per_batch=" << (compactOutputElems * sizeof(uint32_t)) << "\n";
+  std::cout << "comm_total_bytes_per_batch=" << compactRoundtripBytes << "\n";
+  std::cout << "comm_full_roundtrip_bytes=" << fullRoundtripBytes << "\n";
+  if (fullRoundtripBytes != 0) {
+    const double ratio = (100.0 * static_cast<double>(compactRoundtripBytes))
+                         / static_cast<double>(fullRoundtripBytes);
+    std::cout << "comm_roundtrip_ratio_pct=" << ratio << "\n";
+  }
   if (speedup > (1.0 + eps)) {
     std::cout << "auto_parallel_judgement=parallel\n";
     std::cout << "auto_engine_recommendation=gpu\n";
@@ -209,28 +668,38 @@ CU
 sed -i "s/NSTATES_VALUE/${NSTATES}/g" "$OUTDIR/bench_kernel.cu"
 sed -i "s/GPU_REPS_VALUE/${GPU_REPS}/g" "$OUTDIR/bench_kernel.cu"
 sed -i "s/CPU_REPS_VALUE/${CPU_REPS}/g" "$OUTDIR/bench_kernel.cu"
+sed -i "s/BLOCK_SIZE_VALUE/${BLOCK_SIZE}/g" "$OUTDIR/bench_kernel.cu"
 
 cp "$KERNEL_CU" "$OUTDIR/kernel_generated.cu"
+cp "$KERNEL_VARS" "$OUTDIR/kernel_generated.vars.tsv"
+if [[ -s "$KERNEL_COMM" ]]; then
+  cp "$KERNEL_COMM" "$OUTDIR/kernel_generated.comm.tsv"
+fi
+
 
 echo "[3/4] Building C++-direct CUDA benchmark..."
 (
   cd "$OUTDIR"
   /usr/bin/time -f "%e" -o "$TIME_NVCC" \
-    nvcc -O3 -std=c++17 bench_kernel.cu -o bench_kernel > build_nvcc.log 2>&1
+    nvcc -O3 -std=c++17 -DSIM_ACCEL_PARTIAL_WRITE=1 bench_kernel.cu -o bench_kernel > build_nvcc.log 2>&1
 )
 
 echo "[4/4] Running benchmark..."
 (
   cd "$OUTDIR"
-  if ! /usr/bin/time -f "%e" -o "$TIME_RUN" ./bench_kernel > bench_run.log 2>&1; then
+  BENCH_CMD=(./bench_kernel --init-mode "$INIT_MODE" --init-seed "$INIT_SEED" --state-chunk "$STATE_CHUNK" --block-size "$BLOCK_SIZE")
+  if [[ -n "$INIT_FILE_ABS" ]]; then
+    BENCH_CMD+=(--init-file "$INIT_FILE_ABS")
+  fi
+  if ! /usr/bin/time -f "%e" -o "$TIME_RUN" "${BENCH_CMD[@]}" > bench_run.log 2>&1; then
     echo "Benchmark execution failed. Last lines from bench_run.log:" >&2
     tail -n 40 bench_run.log >&2 || true
     if rg -q "OS call failed or operation not supported on this OS" bench_run.log; then
-      cat >&2 <<'EOF'
+      cat >&2 <<'EOF2'
 Likely root cause: CUDA device calls are blocked in the current execution context.
 If this is running under a sandboxed agent/session, rerun the same command outside the sandbox
 or with elevated permissions that allow GPU device access.
-EOF
+EOF2
     fi
     exit 1
   fi
@@ -271,8 +740,7 @@ VERILATOR_GEN_S="$(cat "$TIME_VERILATOR" 2>/dev/null || true)"
 NVCC_COMPILE_S="$(cat "$TIME_NVCC" 2>/dev/null || true)"
 BENCH_RUN_S="$(cat "$TIME_RUN" 2>/dev/null || true)"
 if [[ -n "$VERILATOR_GEN_S" && -n "$NVCC_COMPILE_S" && -n "$BENCH_RUN_S" ]]; then
-  TOTAL_S="$(awk -v a="$VERILATOR_GEN_S" -v b="$NVCC_COMPILE_S" -v c="$BENCH_RUN_S" \
-                 'BEGIN { printf "%.6f", a + b + c }')"
+  TOTAL_S="$(awk -v a="$VERILATOR_GEN_S" -v b="$NVCC_COMPILE_S" -v c="$BENCH_RUN_S" 'BEGIN { printf "%.6f", a + b + c }')"
   {
     echo "verilator_codegen_s=$VERILATOR_GEN_S"
     echo "nvcc_compile_s=$NVCC_COMPILE_S"
@@ -282,7 +750,7 @@ if [[ -n "$VERILATOR_GEN_S" && -n "$NVCC_COMPILE_S" && -n "$BENCH_RUN_S" ]]; the
 fi
 
 if [[ -s "$KERNEL_DEPS" ]]; then
-  DEPS_ROWS="$(($(wc -l < "$KERNEL_DEPS") - 1))"
+  DEPS_ROWS="$(( $(wc -l < "$KERNEL_DEPS") - 1 ))"
   echo "cuda_deps_rows=$DEPS_ROWS" >> "$OUTDIR/bench_run.log"
 fi
 

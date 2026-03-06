@@ -32,6 +32,7 @@ kernel_log = bench_dir + "/verilator_cuda.log"
 kernel_cu = bench_dir + "/t.sim_accel.kernel.cu"
 kernel_vars = kernel_cu + ".vars.tsv"
 kernel_deps = kernel_cu + ".deps.tsv"
+kernel_comm = kernel_cu + ".comm.tsv"
 
 test.run_capture(
     os.environ["VERILATOR_ROOT"] + "/bin/verilator --sim-accel-bench"
@@ -46,10 +47,17 @@ test.run_capture(
 for filename in [bench_run_log, kernel_log, kernel_cu, kernel_vars]:
     if not os.path.exists(filename):
         test.error("Expected output file not found: " + filename)
+if os.path.exists(kernel_comm):
+    test.file_grep(kernel_comm, r"direction\tslot\tvar_idx\tname\twidth\tis_cpu_visible")
 
 test.file_grep(bench_run_log, r"mismatch=0")
+test.file_grep(bench_run_log, r"compact_mismatch=0")
 test.file_grep(bench_run_log, r"speedup_cpu_over_gpu=")
 test.file_grep(bench_run_log, r"auto_engine_recommendation=")
+test.file_grep(bench_run_log, r"comm_input_vars=")
+test.file_grep(bench_run_log, r"comm_output_vars=")
+test.file_grep(bench_run_log, r"comm_total_bytes_per_batch=")
+test.file_grep(bench_run_log, r"comm_roundtrip_ratio_pct=")
 test.file_grep(bench_run_log, r"verilator_codegen_s=")
 test.file_grep(bench_run_log, r"nvcc_compile_s=")
 test.file_grep(bench_run_log, r"bench_run_s=")
