@@ -783,7 +783,7 @@ EOF2
 ASSIGNW_SUPPORTED_RAW="$(rg -o 'assignw_supported=[0-9A-Fa-f]+' "$LOG" | tail -n1 | cut -d= -f2 || true)"
 ASSIGNW_TOTAL_RAW="$(rg -o 'assignw_total=[0-9A-Fa-f]+' "$LOG" | tail -n1 | cut -d= -f2 || true)"
 ASSIGNW_IGNORED_RAW="$(rg -o 'assignw_ignored=[0-9A-Fa-f]+' "$LOG" | tail -n1 | cut -d= -f2 || true)"
-ASSIGNW_COV_PCT="$(rg -o 'assignw_coverage_pct=[0-9]+\.[0-9]+' "$LOG" | tail -n1 | cut -d= -f2 || true)"
+ASSIGNW_OFFLOAD_PCT="$(rg -o 'assignw_offload_pct=[0-9]+\.[0-9]+' "$LOG" | tail -n1 | cut -d= -f2 || true)"
 
 to_dec() {
   local v="${1:-}"
@@ -802,14 +802,14 @@ ASSIGNW_SUPPORTED="$(to_dec "$ASSIGNW_SUPPORTED_RAW")"
 ASSIGNW_TOTAL="$(to_dec "$ASSIGNW_TOTAL_RAW")"
 ASSIGNW_IGNORED="$(to_dec "$ASSIGNW_IGNORED_RAW")"
 
-if [[ -n "$ASSIGNW_SUPPORTED" && -n "$ASSIGNW_TOTAL" && -n "$ASSIGNW_COV_PCT" ]]; then
+if [[ -n "$ASSIGNW_SUPPORTED" && -n "$ASSIGNW_TOTAL" && -n "$ASSIGNW_OFFLOAD_PCT" ]]; then
   {
     echo "cuda_assignw_supported=$ASSIGNW_SUPPORTED"
     echo "cuda_assignw_total=$ASSIGNW_TOTAL"
     echo "cuda_assignw_ignored=$ASSIGNW_IGNORED"
-    echo "cuda_assignw_coverage_pct=$ASSIGNW_COV_PCT"
-    echo "cuda_assignw_coverage_scope=post_lowering_assignw_nodes"
-    echo "cuda_assignw_coverage_basis=supported_assignw_div_total_assignw"
+    echo "cuda_assignw_offload_pct=$ASSIGNW_OFFLOAD_PCT"
+    echo "cuda_assignw_offload_scope=post_lowering_assignw_nodes"
+    echo "cuda_assignw_offload_basis=supported_assignw_div_total_assignw"
   } >> "$OUTDIR/bench_run.log"
 fi
 

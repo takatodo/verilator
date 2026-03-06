@@ -32,18 +32,18 @@ void emitStats(const V3SimAccelProgram& program, size_t emittedUniqueAssignw) {
         v3info("--sim-accel-only ignored " << skipped
                                           << " ASSIGNW nodes (unsupported or internal constructs)");
     }
-    const double cov = totalAssignw
-                           ? (100.0 * static_cast<double>(supportedAssignw)
-                              / static_cast<double>(totalAssignw))
-                           : 0.0;
-    std::ostringstream covStr;
-    covStr << std::fixed << std::setprecision(2) << cov;
+    const double offloadPct = totalAssignw
+                                  ? (100.0 * static_cast<double>(supportedAssignw)
+                                     / static_cast<double>(totalAssignw))
+                                  : 0.0;
+    std::ostringstream offloadStr;
+    offloadStr << std::fixed << std::setprecision(2) << offloadPct;
     v3info("--sim-accel-only stats "
            << "assignw_supported=" << supportedAssignw << " "
            << "assignw_total=" << totalAssignw << " "
            << "assignw_ignored=" << skipped << " "
            << "assignw_emitted_unique=" << emittedUniqueAssignw << " "
-           << "assignw_coverage_pct=" << covStr.str());
+           << "assignw_offload_pct=" << offloadStr.str());
 }
 
 }  // namespace
