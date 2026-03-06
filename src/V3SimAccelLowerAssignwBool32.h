@@ -1,6 +1,7 @@
-// DESCRIPTION: Verilator: Sim-Accel assignw-bool32 Strategy
+// DESCRIPTION: Verilator: Sim-Accel assignw-bool32 Lowering
 //
-// Emits the current ASSIGNW-based bool32 sim-accel kernel subset.
+// Lowers the supported ASSIGNW-based bool32 subset into a backend-neutral
+// sim-accel program representation.
 //
 // Code available from: https://verilator.org
 //
@@ -12,20 +13,21 @@
 //
 //=============================================================================
 
-#ifndef VERILATOR_V3SIMACCELSTRATEGYASSIGNWBOOL32_H_
-#define VERILATOR_V3SIMACCELSTRATEGYASSIGNWBOOL32_H_
+#ifndef VERILATOR_V3SIMACCELLOWERASSIGNWBOOL32_H_
+#define VERILATOR_V3SIMACCELLOWERASSIGNWBOOL32_H_
 
 #include "config_build.h"
 #include "verilatedos.h"
 
-class V3SimAccelStrategyAssignwBool32 final {
+#include "V3SimAccelProgram.h"
+
+class V3SimAccelLowerAssignwBool32 final {
 public:
-    static void emitIr();
-    static void emitCuda();
+    static V3SimAccelProgram build();
 
 private:
-    V3SimAccelStrategyAssignwBool32() = default;
-    ~V3SimAccelStrategyAssignwBool32() = default;
+    V3SimAccelLowerAssignwBool32() = default;
+    ~V3SimAccelLowerAssignwBool32() = default;
 };
 
 #endif  // Guard

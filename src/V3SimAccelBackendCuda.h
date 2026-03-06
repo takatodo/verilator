@@ -1,6 +1,6 @@
 // DESCRIPTION: Verilator: Sim-Accel CUDA Backend
 //
-// Selects the active CUDA lowering strategy and emits backend-specific output.
+// Emits CUDA source and metadata from a backend-neutral sim-accel program.
 //
 // Code available from: https://verilator.org
 //
@@ -20,7 +20,6 @@
 
 class V3SimAccelBackendCuda final {
 public:
-    static void emitIr();
     static void emitCuda();
 
 private:

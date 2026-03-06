@@ -198,8 +198,8 @@ static void process() {
         if (v3Global.hasTable()) V3Udp::udpResolve(v3Global.rootp());
 
         // Create a hierarchical Verilation plan
-        if (!v3Global.opt.lintOnly() && !v3Global.opt.serializeOnly() && !v3Global.opt.gemIrOnly()
-            && !v3Global.opt.gemCudaOnly()
+        if (!v3Global.opt.lintOnly() && !v3Global.opt.serializeOnly()
+            && !v3Global.opt.simAccelIrOnly() && !v3Global.opt.simAccelOnly()
             && v3Global.opt.hierarchical() && !v3Global.opt.hierChild()) {
             V3Hierarchical::createGraph(v3Global.rootp());
             // If a plan is created, further analysis is not necessary.
@@ -626,8 +626,8 @@ static void process() {
         }
 
         // Output the text
-        if (!v3Global.opt.lintOnly() && !v3Global.opt.serializeOnly() && !v3Global.opt.gemIrOnly()
-            && !v3Global.opt.gemCudaOnly()
+        if (!v3Global.opt.lintOnly() && !v3Global.opt.serializeOnly()
+            && !v3Global.opt.simAccelIrOnly() && !v3Global.opt.simAccelOnly()
             && !v3Global.opt.dpiHdrOnly()) {
             // emitcInlines is first, as it may set needHInlines which other emitters read
             V3EmitC::emitcInlines();
@@ -643,15 +643,16 @@ static void process() {
         // End of conversion
         V3Stats::addStatPerf(V3Stats::STAT_WALLTIME_CVT, cvtWallTime.deltaTime());
     }
-    if (!v3Global.opt.serializeOnly() && !v3Global.opt.gemIrOnly() && !v3Global.opt.gemCudaOnly()
+    if (!v3Global.opt.serializeOnly() && !v3Global.opt.simAccelIrOnly()
+        && !v3Global.opt.simAccelOnly()
         && !v3Global.opt.dpiHdrOnly()) {  // Unfortunately we have some lint checks in emitcImp.
         V3EmitC::emitcImp();
     }
     if (v3Global.opt.serializeOnly()) {
         emitSerialized();
-    } else if (v3Global.opt.gemCudaOnly()) {
+    } else if (v3Global.opt.simAccelOnly()) {
         V3EmitSimAccel::emitCuda();
-    } else if (v3Global.opt.gemIrOnly()) {
+    } else if (v3Global.opt.simAccelIrOnly()) {
         V3EmitSimAccel::emitIr();
     } else {
         if (v3Global.opt.simAccelSidecar() && !v3Global.opt.lintOnly()
@@ -674,8 +675,8 @@ static void process() {
         V3EmitC::emitcFiles();
     }
 
-    if (!v3Global.opt.lintOnly() && !v3Global.opt.serializeOnly() && !v3Global.opt.gemIrOnly()
-        && !v3Global.opt.gemCudaOnly()
+    if (!v3Global.opt.lintOnly() && !v3Global.opt.serializeOnly()
+        && !v3Global.opt.simAccelIrOnly() && !v3Global.opt.simAccelOnly()
         && !v3Global.opt.dpiHdrOnly()) {
         if (v3Global.opt.main()) V3EmitCMain::emit();
 

@@ -217,7 +217,6 @@ RAW_OBJS_PCH_ASTMT = \
   V3EmitCImp.o \
   V3EmitCInlines.o \
   V3EmitCPch.o \
-  V3EmitGem.o \
   V3EmitSimAccel.o \
   V3EmitV.o \
   V3File.o \
@@ -227,7 +226,7 @@ RAW_OBJS_PCH_ASTMT = \
   V3Number.o \
   V3Options.o \
   V3SimAccelBackendCuda.o \
-  V3SimAccelStrategyAssignwBool32.o \
+  V3SimAccelLowerAssignwBool32.o \
   V3Stats.o \
   V3StatsReport.o \
   V3VariableOrder.o \

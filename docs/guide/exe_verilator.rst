@@ -1756,7 +1756,6 @@ Summary:
    Select the sim-accel lowering/partition strategy.
 
    Current supported value is ``assignw-bool32``.
-   ``gem`` is accepted as a deprecated alias.
    Alias: :vlopt:`--gpu-strategy`.
 
 .. option:: --skip-identical

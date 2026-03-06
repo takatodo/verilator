@@ -14,14 +14,15 @@
 
 #include "V3Error.h"
 #include "V3Global.h"
+#include "V3Options.h"
 #include "V3SimAccelBackendCuda.h"
 
 void V3EmitSimAccel::emitIr() VL_MT_DISABLED {
-    if (v3Global.opt.simAccelBackend() == "cuda") {
-        V3SimAccelBackendCuda::emitIr();
-        return;
-    }
-    v3fatal("Unsupported sim-accel backend: " + v3Global.opt.simAccelBackend());  // LCOV_EXCL_LINE
+    const string filename = (v3Global.opt.simAccelIrOutput().empty()
+                                 ? v3Global.opt.makeDir() + "/" + v3Global.opt.prefix()
+                                       + ".sim_accel.tree.json"
+                                 : v3Global.opt.simAccelIrOutput());
+    v3Global.rootp()->dumpTreeJsonFile(filename);
 }
 
 void V3EmitSimAccel::emitCuda() VL_MT_DISABLED {

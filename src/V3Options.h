@@ -610,13 +610,6 @@ public:
     const string& simAccelIrOutput() const { return m_simAccelIrOutput; }
     const string& simAccelBackend() const { return m_simAccelBackend; }
     const string& simAccelStrategy() const { return m_simAccelStrategy; }
-    // Backward-compatible aliases.
-    bool gemCudaOnly() const { return simAccelOnly(); }
-    bool gemIrOnly() const { return simAccelIrOnly(); }
-    bool gemCudaSidecar() const { return simAccelSidecar(); }
-    bool gemCudaSplitModules() const { return simAccelSplitModules(); }
-    const string& gemCudaOutput() const { return simAccelOutput(); }
-    const string& gemIrOutput() const { return simAccelIrOutput(); }
     bool topIfacesSupported() const { return lintOnly() && !hierarchical(); }
 
     int buildJobs() const VL_MT_SAFE { return m_buildJobs; }

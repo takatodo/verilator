@@ -449,7 +449,7 @@ detailed descriptions of these arguments.
     --sim-accel-sidecar-output <filename>  Set sidecar sim-accel output filename
     --sim-accel-split-modules   Experimental; currently parsed but not yet implemented
     --sim-accel-backend <name>  Select sim-accel backend (currently: cuda)
-    --sim-accel-strategy <name> Select sim-accel strategy (currently: assignw-bool32; gem alias)
+    --sim-accel-strategy <name> Select sim-accel strategy (currently: assignw-bool32)
     --sim-accel-ir-only         Create sim-accel IR output (.sim_accel.tree.json)
     --sim-accel-ir-output <filename>  Set sim-accel IR output filename (.sim_accel.tree.json)
     --sim-accel-bench         Run bundled sim-accel CUDA benchmark flow (helper mode)

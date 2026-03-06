@@ -1593,11 +1593,7 @@ void V3Options::parseOptsList(FileLine* fl, const string& optdir, int argc,
     });
     DECL_OPTION("-sim-accel-strategy", CbVal, [this, fl](const char* valp) {
         m_simAccelStrategy = valp;
-        if (m_simAccelStrategy == "gem") {
-            v3info("--sim-accel-strategy gem is deprecated; use "
-                   "--sim-accel-strategy assignw-bool32");
-            m_simAccelStrategy = "assignw-bool32";
-        } else if (m_simAccelStrategy != "assignw-bool32") {
+        if (m_simAccelStrategy != "assignw-bool32") {
             fl->v3error("Unsupported --sim-accel-strategy: '" << m_simAccelStrategy
                                                               << "' (supported: assignw-bool32)");
         }
@@ -1636,31 +1632,10 @@ void V3Options::parseOptsList(FileLine* fl, const string& optdir, int argc,
     });
     DECL_OPTION("-gpu-strategy", CbVal, [this, fl](const char* valp) {
         m_simAccelStrategy = valp;
-        if (m_simAccelStrategy == "gem") {
-            v3info("--gpu-strategy gem is deprecated; use --gpu-strategy assignw-bool32");
-            m_simAccelStrategy = "assignw-bool32";
-        } else if (m_simAccelStrategy != "assignw-bool32") {
+        if (m_simAccelStrategy != "assignw-bool32") {
             fl->v3error("Unsupported --gpu-strategy: '" << m_simAccelStrategy
                                                         << "' (supported: assignw-bool32)");
         }
-    });
-    DECL_OPTION("-gem-cuda-only", CbOnOff, [this](bool flag) {
-        m_simAccelOnly = flag;
-        if (flag) m_outFormatOk = true;
-    });
-    DECL_OPTION("-gem-cuda-output", CbVal, [this](const char* valp) {
-        m_simAccelOutput = valp;
-        m_simAccelOnly = true;
-        m_outFormatOk = true;
-    });
-    DECL_OPTION("-gem-ir-only", CbOnOff, [this](bool flag) {
-        m_simAccelIrOnly = flag;
-        if (flag) m_outFormatOk = true;
-    });
-    DECL_OPTION("-gem-ir-output", CbVal, [this](const char* valp) {
-        m_simAccelIrOutput = valp;
-        m_simAccelIrOnly = true;
-        m_outFormatOk = true;
     });
 
     DECL_OPTION("-LDFLAGS", CbVal, callStrSetter(&V3Options::addLdLibs));
