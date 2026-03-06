@@ -1,0 +1,284 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_NAME="$(basename "$0")"
+
+usage() {
+  cat <<EOF2
+Usage:
+  ${SCRIPT_NAME} --top-module TOP --outdir DIR [options] -- <rtl files...>
+
+Options:
+  --verilator PATH     Verilator binary (default: ./bin/verilator)
+  --top-module TOP     Top module name
+  --outdir DIR         Output directory
+  --nstates N          Number of parallel states for each cluster bench (default: 1024)
+  --gpu-reps N         GPU repetitions for timing (default: 1)
+  --cpu-reps N         CPU repetitions for timing (default: 1)
+  --block-size N       CUDA block size (default: 256)
+  --init-mode MODE     Initial state mode: random|zero|ones|counter (default: random)
+  --init-seed N        Seed for random init mode (default: 1)
+  --assigns-per-kernel N
+                        Limit emitted assigns per generated CUDA kernel partition (default: 0)
+  --compile-cache-dir DIR
+                        Reuse compiled bench binaries across runs
+                        (default: /tmp/verilator-sim-accel-compile-cache)
+  --cluster-limit N    Maximum clusters to benchmark (default: 10)
+  --cluster-max-input-bits N
+                        Filter clusters by input-signature bits (default: 128)
+  --cluster-min-assigns N
+                        Filter clusters by minimum assign count (default: 1)
+  --cluster-owner LIST Comma-separated owner hints to include
+                        (default: gpu_candidate,cpu_boundary_heavy)
+  --cluster-indices LIST
+                        Explicit comma-separated cluster indices to benchmark
+  --keep-cluster-outdirs
+                        Keep per-cluster output directories (default: off)
+
+Example:
+  ${SCRIPT_NAME} \
+    --verilator ./bin/verilator \
+    --top-module tb_top \
+    --outdir /tmp/veer_sweep \
+    --nstates 1024 \
+    --gpu-reps 1 \
+    --cpu-reps 1 \
+    --cluster-limit 8 \
+    --cluster-max-input-bits 128 \
+    -- --timing +incdir+verilogIncludeFiles +define+__RTLMETER_MAIN_CLOCK=tb_top.core_clk -f filelist
+EOF2
+}
+
+VERILATOR_BIN="./bin/verilator"
+TOP_MODULE=""
+OUTDIR=""
+NSTATES=1024
+GPU_REPS=1
+CPU_REPS=1
+BLOCK_SIZE=256
+INIT_MODE="random"
+INIT_SEED=1
+ASSIGNS_PER_KERNEL=0
+COMPILE_CACHE_DIR="${SIM_ACCEL_COMPILE_CACHE_DIR:-/tmp/verilator-sim-accel-compile-cache}"
+CLUSTER_LIMIT=10
+CLUSTER_MAX_INPUT_BITS=128
+CLUSTER_MIN_ASSIGNS=1
+CLUSTER_OWNER_LIST="gpu_candidate,cpu_boundary_heavy"
+CLUSTER_INDICES=""
+KEEP_CLUSTER_OUTDIRS=0
+declare -a SOURCES=()
+INVOCATION_CWD="$(pwd)"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --verilator)
+      VERILATOR_BIN="$2"; shift 2 ;;
+    --top-module)
+      TOP_MODULE="$2"; shift 2 ;;
+    --outdir)
+      OUTDIR="$2"; shift 2 ;;
+    --nstates)
+      NSTATES="$2"; shift 2 ;;
+    --gpu-reps)
+      GPU_REPS="$2"; shift 2 ;;
+    --cpu-reps)
+      CPU_REPS="$2"; shift 2 ;;
+    --block-size)
+      BLOCK_SIZE="$2"; shift 2 ;;
+    --init-mode)
+      INIT_MODE="$2"; shift 2 ;;
+    --init-seed)
+      INIT_SEED="$2"; shift 2 ;;
+    --assigns-per-kernel)
+      ASSIGNS_PER_KERNEL="$2"; shift 2 ;;
+    --compile-cache-dir)
+      COMPILE_CACHE_DIR="$2"; shift 2 ;;
+    --cluster-limit)
+      CLUSTER_LIMIT="$2"; shift 2 ;;
+    --cluster-max-input-bits)
+      CLUSTER_MAX_INPUT_BITS="$2"; shift 2 ;;
+    --cluster-min-assigns)
+      CLUSTER_MIN_ASSIGNS="$2"; shift 2 ;;
+    --cluster-owner)
+      CLUSTER_OWNER_LIST="$2"; shift 2 ;;
+    --cluster-indices)
+      CLUSTER_INDICES="$2"; shift 2 ;;
+    --keep-cluster-outdirs)
+      KEEP_CLUSTER_OUTDIRS=1; shift ;;
+    --help|-h)
+      usage; exit 0 ;;
+    --)
+      shift
+      SOURCES=("$@")
+      break ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 2 ;;
+  esac
+done
+
+if [[ -z "$TOP_MODULE" || -z "$OUTDIR" || ${#SOURCES[@]} -eq 0 ]]; then
+  usage >&2
+  exit 2
+fi
+
+for v in NSTATES GPU_REPS CPU_REPS BLOCK_SIZE ASSIGNS_PER_KERNEL CLUSTER_LIMIT CLUSTER_MAX_INPUT_BITS CLUSTER_MIN_ASSIGNS INIT_SEED; do
+  if ! [[ "${!v}" =~ ^[0-9]+$ ]]; then
+    echo "Invalid numeric value for $v: ${!v}" >&2
+    exit 2
+  fi
+done
+if [[ "$NSTATES" -eq 0 || "$BLOCK_SIZE" -eq 0 || "$CLUSTER_LIMIT" -eq 0 ]]; then
+  echo "NSTATES, BLOCK_SIZE, and CLUSTER_LIMIT must be > 0" >&2
+  exit 2
+fi
+
+mkdir -p "$OUTDIR"
+OUTDIR="$(cd "$OUTDIR" && pwd)"
+COMPILE_CACHE_DIR="$(mkdir -p "$COMPILE_CACHE_DIR" && cd "$COMPILE_CACHE_DIR" && pwd)"
+ANALYSIS_OUT="$OUTDIR/analysis"
+mkdir -p "$ANALYSIS_OUT"
+ANALYSIS_KERNEL="$ANALYSIS_OUT/${TOP_MODULE}.sim_accel.kernel.cu"
+ANALYSIS_CLUSTERS="$ANALYSIS_KERNEL.clusters.tsv"
+SUMMARY_TSV="$OUTDIR/cluster_sweep.tsv"
+SUMMARY_JSON="$OUTDIR/cluster_sweep.json"
+
+VERILATOR_SIM_ACCEL_ARGS=()
+if [[ "$ASSIGNS_PER_KERNEL" -gt 0 ]]; then
+  VERILATOR_SIM_ACCEL_ARGS+=(--sim-accel-assigns-per-kernel "$ASSIGNS_PER_KERNEL")
+fi
+
+if [[ ! -f "$ANALYSIS_CLUSTERS" ]]; then
+  echo "[1/3] Generating cluster metadata..."
+  env CCACHE_DISABLE=1 "$VERILATOR_BIN" \
+    --Wno-fatal --no-skip-identical \
+    --top-module "$TOP_MODULE" \
+    --sim-accel-only \
+    --sim-accel-output "$ANALYSIS_KERNEL" \
+    "${VERILATOR_SIM_ACCEL_ARGS[@]}" \
+    "${SOURCES[@]}" \
+    >"$ANALYSIS_OUT/verilator_cuda.log" 2>&1
+fi
+
+if [[ ! -f "$ANALYSIS_CLUSTERS" ]]; then
+  echo "Missing cluster metadata: $ANALYSIS_CLUSTERS" >&2
+  exit 1
+fi
+
+echo "[2/3] Selecting clusters..."
+python3 - "$ANALYSIS_CLUSTERS" "$CLUSTER_LIMIT" "$CLUSTER_MAX_INPUT_BITS" "$CLUSTER_MIN_ASSIGNS" \
+  "$CLUSTER_OWNER_LIST" "$CLUSTER_INDICES" "$SUMMARY_JSON" <<'PY'
+import csv, json, sys
+path, limit_s, max_bits_s, min_assigns_s, owner_list, indices_s, out_json = sys.argv[1:8]
+limit = int(limit_s)
+max_bits = int(max_bits_s)
+min_assigns = int(min_assigns_s)
+owners = {x for x in owner_list.split(',') if x}
+explicit = None
+if indices_s:
+    explicit = {int(x) for x in indices_s.split(',') if x}
+rows = []
+with open(path, newline='') as fh:
+    for row in csv.DictReader(fh, delimiter='\t'):
+        idx = int(row['index'])
+        assigns = int(row['assign_count'])
+        bits = int(row['input_signature_bits'])
+        owner = row['owner_hint']
+        if explicit is not None and idx not in explicit:
+            continue
+        if owner not in owners:
+            continue
+        if assigns < min_assigns or bits > max_bits:
+            continue
+        rows.append({
+            'index': idx,
+            'topo_rank': int(row['topo_rank']),
+            'assign_count': assigns,
+            'input_signature_bits': bits,
+            'owner_hint': owner,
+            'dominant_hierarchy': row.get('dominant_hierarchy', ''),
+        })
+rows.sort(key=lambda r: (-r['assign_count'], r['input_signature_bits'], r['index']))
+selected = rows[:limit]
+with open(out_json, 'w', encoding='utf-8') as fh:
+    json.dump({'selected_clusters': selected, 'candidate_count': len(rows)}, fh, indent=2)
+for row in selected:
+    print(f"{row['index']}\t{row['assign_count']}\t{row['input_signature_bits']}\t{row['owner_hint']}\t{row['topo_rank']}\t{row['dominant_hierarchy']}")
+PY
+
+mapfile -t SELECTED_LINES < <(python3 - <<'PY' "$SUMMARY_JSON"
+import json, sys
+j=json.load(open(sys.argv[1]))
+for row in j['selected_clusters']:
+    print(f"{row['index']}\t{row['assign_count']}\t{row['input_signature_bits']}\t{row['owner_hint']}\t{row['topo_rank']}\t{row['dominant_hierarchy']}")
+PY
+)
+
+if (( ${#SELECTED_LINES[@]} == 0 )); then
+  echo "No clusters matched the requested filters" >&2
+  exit 2
+fi
+
+printf 'cluster_idx\tassign_count\tinput_signature_bits\towner_hint\ttopo_rank\tdominant_hierarchy\thybrid_gpu_ms_per_rep\thybrid_cpu_ms_per_rep\thybrid_static_h2d_bytes_per_batch\thybrid_dynamic_h2d_bytes_per_batch\thybrid_actual_h2d_bytes_per_batch\thybrid_actual_d2h_bytes_per_batch\thybrid_mismatch\tnvcc_compile_s\tbench_run_s\ttotal_elapsed_s\n' > "$SUMMARY_TSV"
+
+echo "[3/3] Running cluster benches..."
+for line in "${SELECTED_LINES[@]}"; do
+  IFS=$'\t' read -r CLUSTER_IDX ASSIGN_COUNT INPUT_BITS OWNER_HINT TOPO_RANK DOM_HIER <<<"$line"
+  CLUSTER_OUTDIR="$OUTDIR/cluster_${CLUSTER_IDX}"
+  "$VERILATOR_BIN" --sim-accel-bench \
+    --top-module "$TOP_MODULE" \
+    --outdir "$CLUSTER_OUTDIR" \
+    --nstates "$NSTATES" \
+    --gpu-reps "$GPU_REPS" \
+    --cpu-reps "$CPU_REPS" \
+    --block-size "$BLOCK_SIZE" \
+    --init-mode "$INIT_MODE" \
+    --init-seed "$INIT_SEED" \
+    --assigns-per-kernel "$ASSIGNS_PER_KERNEL" \
+    --hybrid-mode single-cluster \
+    --hybrid-cluster-index "$CLUSTER_IDX" \
+    --compile-cache-dir "$COMPILE_CACHE_DIR" \
+    -- "${SOURCES[@]}"
+
+  python3 - "$CLUSTER_OUTDIR/bench_run.log" "$SUMMARY_TSV" "$CLUSTER_IDX" "$ASSIGN_COUNT" \
+    "$INPUT_BITS" "$OWNER_HINT" "$TOPO_RANK" "$DOM_HIER" <<'PY'
+import sys
+log_path, out_tsv, cluster_idx, assign_count, input_bits, owner_hint, topo_rank, dom_hier = sys.argv[1:9]
+want = {
+    'hybrid_gpu_ms_per_rep': '',
+    'hybrid_cpu_ms_per_rep': '',
+    'hybrid_static_h2d_bytes_per_batch': '',
+    'hybrid_dynamic_h2d_bytes_per_batch': '',
+    'hybrid_actual_h2d_bytes_per_batch': '',
+    'hybrid_actual_d2h_bytes_per_batch': '',
+    'hybrid_mismatch': '',
+    'nvcc_compile_s': '',
+    'bench_run_s': '',
+    'total_elapsed_s': '',
+}
+with open(log_path, encoding='utf-8') as fh:
+    for line in fh:
+        line = line.strip()
+        if '=' not in line:
+            continue
+        k, v = line.split('=', 1)
+        if k in want:
+            want[k] = v
+with open(out_tsv, 'a', encoding='utf-8') as fh:
+    fh.write('\t'.join([
+        cluster_idx, assign_count, input_bits, owner_hint, topo_rank, dom_hier,
+        want['hybrid_gpu_ms_per_rep'], want['hybrid_cpu_ms_per_rep'],
+        want['hybrid_static_h2d_bytes_per_batch'], want['hybrid_dynamic_h2d_bytes_per_batch'],
+        want['hybrid_actual_h2d_bytes_per_batch'], want['hybrid_actual_d2h_bytes_per_batch'],
+        want['hybrid_mismatch'], want['nvcc_compile_s'], want['bench_run_s'],
+        want['total_elapsed_s'],
+    ]) + '\n')
+PY
+
+  if [[ "$KEEP_CLUSTER_OUTDIRS" -eq 0 ]]; then
+    rm -rf "$CLUSTER_OUTDIR"
+  fi
+done
+
+echo "Wrote: $SUMMARY_TSV"
