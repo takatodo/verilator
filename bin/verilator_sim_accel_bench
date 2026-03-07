@@ -99,8 +99,10 @@ PROGRAM_HEX_TARGET_ABS=""
 PROGRAM_HEX_ITERATIONS=""
 PROGRAM_HEX_MATERIALIZED=""
 PROGRAM_HEX_INIT_FILE=""
+PROGRAM_HEX_DIRECT_FILE=""
 PROGRAM_HEX_PRELOAD_TSV=""
 PROGRAM_HEX_PRELOAD_ENTRIES=0
+PROGRAM_HEX_DIRECT_ENTRIES=0
 MEMORY_IMAGE=""
 MEMORY_IMAGE_ABS=""
 MEMORY_IMAGE_MAP=""
@@ -110,8 +112,10 @@ MEMORY_IMAGE_TARGET_ABS=""
 MEMORY_IMAGE_FORMAT="auto"
 MEMORY_IMAGE_MATERIALIZED=""
 MEMORY_IMAGE_INIT_FILE=""
+MEMORY_IMAGE_DIRECT_FILE=""
 MEMORY_IMAGE_PRELOAD_TSV=""
 MEMORY_IMAGE_PRELOAD_ENTRIES=0
+MEMORY_IMAGE_DIRECT_ENTRIES=0
 EFFECTIVE_INIT_FILE=""
 ASSIGNS_PER_KERNEL=0
 HYBRID_MODE="off"
@@ -1102,14 +1106,14 @@ TIME_VERILATOR="$OUTDIR/time_verilator_codegen_sec.txt"
 TIME_NVCC="$OUTDIR/time_nvcc_compile_sec.txt"
 TIME_RUN="$OUTDIR/time_bench_run_sec.txt"
 MEMORY_IMAGE_INIT_HELPER="$(cd "$(dirname "$0")/../../scripts" && pwd)/materialize_memory_image_init.py"
+PRELOAD_MATERIALIZE_HELPER="$(cd "$(dirname "$0")" && pwd)/verilator_sim_accel_materialize_preload"
 
 materialize_program_hex_inputs() {
   [[ -n "$PROGRAM_HEX_ABS" ]] || return 0
   local outdir="$1"
   local vars_tsv="$2"
-  if [[ -n "$PROGRAM_HEX_TARGET_ABS" ]]; then
-    local pyout
-    pyout="$(python3 - "$PROGRAM_HEX_ABS" "${PROGRAM_HEX_ITERATIONS:-}" "$outdir" <<'PY'
+  local pyout
+  pyout="$(python3 - "$PROGRAM_HEX_ABS" "${PROGRAM_HEX_ITERATIONS:-}" "$outdir" <<'PY'
 import pathlib
 import sys
 
@@ -1168,319 +1172,93 @@ store_program_hex(materialized, memory)
 print(f"materialized={materialized}")
 PY
 )"
-    while IFS='=' read -r key value; do
-      case "$key" in
-        materialized) PROGRAM_HEX_MATERIALIZED="$value" ;;
-      esac
-    done <<<"$pyout"
-    PROGRAM_HEX_INIT_FILE="$outdir/program_hex.init"
-    python3 "$MEMORY_IMAGE_INIT_HELPER" \
-      --memory-image "$PROGRAM_HEX_MATERIALIZED" \
-      --target-descriptor "$PROGRAM_HEX_TARGET_ABS" \
-      --format hex \
-      --out "$PROGRAM_HEX_INIT_FILE"
-    PROGRAM_HEX_PRELOAD_ENTRIES="$(wc -l < "$PROGRAM_HEX_INIT_FILE" | tr -d ' ')"
-    return 0
-  fi
-  local pyout
-  pyout="$(python3 - "$PROGRAM_HEX_ABS" "$PROGRAM_HEX_MAP_ABS" "${PROGRAM_HEX_ITERATIONS:-}" "$outdir" "$vars_tsv" <<'PY'
-import csv
-import pathlib
-import sys
-
-def load_program_hex(path: pathlib.Path) -> dict[int, int]:
-    memory: dict[int, int] = {}
-    current_addr = 0
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.split("//", 1)[0].strip()
-        if not line:
-            continue
-        for token in line.split():
-            if token.startswith("@"):
-                current_addr = int(token[1:], 16)
-                continue
-            value = int(token, 16)
-            if value < 0 or value > 0xFF:
-                raise ValueError(f"program.hex token out of byte range in {path}: {token}")
-            memory[current_addr] = value
-            current_addr += 1
-    if not memory:
-        raise ValueError(f"No memory data found in {path}")
-    return memory
-
-def load_program_hex_map(path: pathlib.Path) -> list[tuple[int, int, str]]:
-    entries: list[tuple[int, int, str]] = []
-    for lineno, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        line = raw_line.split("#", 1)[0].strip()
-        if not line:
-            continue
-        toks = line.split()
-        if len(toks) == 2:
-            addr_text, var_name = toks
-            byte_count = 4
-        elif len(toks) == 3:
-            addr_text, byte_count_text, var_name = toks
-            byte_count = int(byte_count_text, 0)
-        else:
-            raise ValueError(
-                f"invalid program_hex_map line in {path}:{lineno}: expected 'addr var' or 'addr bytes var'"
-            )
-        addr = int(addr_text, 0)
-        if byte_count <= 0 or byte_count > 4:
-            raise ValueError(f"program_hex_map byte count must be in 1..4 at {path}:{lineno}")
-        entries.append((addr, byte_count, var_name))
-    if not entries:
-        raise ValueError(f"program_hex_map is empty: {path}")
-    return entries
-
-def patch_iterations(memory: dict[int, int], iterations: int, base_addr: int = 0x10000000) -> dict[int, int]:
-    if iterations < 0 or iterations > 0xFFFFFFFF:
-        raise ValueError("iterations must fit in 32 bits")
-    patched = dict(memory)
-    for byte_idx in range(4):
-        patched[base_addr + byte_idx] = (iterations >> (8 * byte_idx)) & 0xFF
-    return patched
-
-def store_program_hex(path: pathlib.Path, memory: dict[int, int], bytes_per_line: int = 16) -> None:
-    if not memory:
-        raise ValueError("Cannot write empty program.hex memory image")
-    addrs = sorted(memory.keys())
-    lines: list[str] = []
-    run_start = addrs[0]
-    run_bytes = [memory[run_start]]
-    last_addr = run_start
-
-    def flush(start_addr: int, data: list[int]) -> None:
-        lines.append(f"@{start_addr:08X}")
-        for idx in range(0, len(data), bytes_per_line):
-            chunk = data[idx: idx + bytes_per_line]
-            lines.append(" ".join(f"{byte:02X}" for byte in chunk))
-
-    for addr in addrs[1:]:
-        if addr == last_addr + 1:
-            run_bytes.append(memory[addr])
-        else:
-            flush(run_start, run_bytes)
-            run_start = addr
-            run_bytes = [memory[addr]]
-        last_addr = addr
-    flush(run_start, run_bytes)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-program_hex = pathlib.Path(sys.argv[1]).resolve()
-program_hex_map = pathlib.Path(sys.argv[2]).resolve()
-iterations = sys.argv[3]
-outdir = pathlib.Path(sys.argv[4]).resolve()
-vars_tsv = pathlib.Path(sys.argv[5]).resolve()
-
-memory = load_program_hex(program_hex)
-if iterations:
-    memory = patch_iterations(memory, int(iterations))
-
-materialized = outdir / "program_hex.materialized"
-store_program_hex(materialized, memory)
-
-map_entries = load_program_hex_map(program_hex_map)
-name_to_meta = {}
-with vars_tsv.open(encoding="utf-8") as fh:
-    for row in csv.DictReader(fh, delimiter='\t'):
-        name_to_meta[row["name"]] = (row["index"], row["width"])
-
-init_file = outdir / "program_hex.init"
-preload_tsv = outdir / "program_hex.preload.tsv"
-with init_file.open("w", encoding="utf-8") as ifh, preload_tsv.open("w", encoding="utf-8") as pfh:
-    pfh.write("address\tbyte_count\tvar_name\tvar_index\twidth\tvisible\n")
-    for addr, byte_count, var_name in map_entries:
-        value = 0
-        for byte_idx in range(byte_count):
-            value |= (memory.get(addr + byte_idx, 0) & 0xFF) << (8 * byte_idx)
-        ifh.write(f"{var_name} 0x{value:08X}\n")
-        meta = name_to_meta.get(var_name)
-        if meta is None:
-            pfh.write(f"0x{addr:08X}\t{byte_count}\t{var_name}\t-1\t-1\t0\n")
-        else:
-            pfh.write(f"0x{addr:08X}\t{byte_count}\t{var_name}\t{meta[0]}\t{meta[1]}\t1\n")
-
-print(f"materialized={materialized}")
-print(f"init_file={init_file}")
-print(f"preload_tsv={preload_tsv}")
-print(f"entry_count={len(map_entries)}")
-PY
-)"
   while IFS='=' read -r key value; do
     case "$key" in
       materialized) PROGRAM_HEX_MATERIALIZED="$value" ;;
-      init_file) PROGRAM_HEX_INIT_FILE="$value" ;;
-      preload_tsv) PROGRAM_HEX_PRELOAD_TSV="$value" ;;
-      entry_count) PROGRAM_HEX_PRELOAD_ENTRIES="$value" ;;
     esac
   done <<<"$pyout"
+  PROGRAM_HEX_INIT_FILE="$outdir/program_hex.init"
+  PROGRAM_HEX_PRELOAD_TSV="$outdir/program_hex.preload.tsv"
+  PROGRAM_HEX_DIRECT_FILE="$outdir/program_hex.direct.tsv"
+  local helper_out
+  if [[ -n "$PROGRAM_HEX_TARGET_ABS" ]]; then
+    helper_out="$(python3 "$PRELOAD_MATERIALIZE_HELPER" \
+      --memory-image "$PROGRAM_HEX_MATERIALIZED" \
+      --vars-tsv "$vars_tsv" \
+      --format hex \
+      --target-descriptor "$PROGRAM_HEX_TARGET_ABS" \
+      --out-init "$PROGRAM_HEX_INIT_FILE" \
+      --out-preload-tsv "$PROGRAM_HEX_PRELOAD_TSV" \
+      --out-direct "$PROGRAM_HEX_DIRECT_FILE")"
+  else
+    helper_out="$(python3 "$PRELOAD_MATERIALIZE_HELPER" \
+      --memory-image "$PROGRAM_HEX_MATERIALIZED" \
+      --vars-tsv "$vars_tsv" \
+      --format hex \
+      --map-file "$PROGRAM_HEX_MAP_ABS" \
+      --out-init "$PROGRAM_HEX_INIT_FILE" \
+      --out-preload-tsv "$PROGRAM_HEX_PRELOAD_TSV" \
+      --out-direct "$PROGRAM_HEX_DIRECT_FILE")"
+  fi
+  while IFS='=' read -r key value; do
+    case "$key" in
+      init_file) PROGRAM_HEX_INIT_FILE="$value" ;;
+      preload_tsv) PROGRAM_HEX_PRELOAD_TSV="$value" ;;
+      direct_file) PROGRAM_HEX_DIRECT_FILE="$value" ;;
+      entry_count) PROGRAM_HEX_PRELOAD_ENTRIES="$value" ;;
+      visible_entry_count) PROGRAM_HEX_DIRECT_ENTRIES="$value" ;;
+    esac
+  done <<<"$helper_out"
 }
 
 materialize_memory_image_inputs() {
   [[ -n "$MEMORY_IMAGE_ABS" ]] || return 0
   local outdir="$1"
   local vars_tsv="$2"
-  if [[ -n "$MEMORY_IMAGE_TARGET_ABS" ]]; then
-    if [[ "$MEMORY_IMAGE_FORMAT" == "auto" ]]; then
-      if [[ "${MEMORY_IMAGE_ABS##*.}" == "bin" || "${MEMORY_IMAGE_ABS##*.}" == "img" ]]; then
-        MEMORY_IMAGE_MATERIALIZED="$outdir/memory_image.materialized.bin"
-      else
-        MEMORY_IMAGE_MATERIALIZED="$outdir/memory_image.materialized.hex"
-      fi
-    elif [[ "$MEMORY_IMAGE_FORMAT" == "bin" ]]; then
+  if [[ "$MEMORY_IMAGE_FORMAT" == "auto" ]]; then
+    if [[ "${MEMORY_IMAGE_ABS##*.}" == "bin" || "${MEMORY_IMAGE_ABS##*.}" == "img" ]]; then
       MEMORY_IMAGE_MATERIALIZED="$outdir/memory_image.materialized.bin"
     else
       MEMORY_IMAGE_MATERIALIZED="$outdir/memory_image.materialized.hex"
     fi
-    cp "$MEMORY_IMAGE_ABS" "$MEMORY_IMAGE_MATERIALIZED"
-    MEMORY_IMAGE_INIT_FILE="$outdir/memory_image.init"
-    python3 "$MEMORY_IMAGE_INIT_HELPER" \
-      --memory-image "$MEMORY_IMAGE_MATERIALIZED" \
-      --target-descriptor "$MEMORY_IMAGE_TARGET_ABS" \
-      --format "$MEMORY_IMAGE_FORMAT" \
-      --out "$MEMORY_IMAGE_INIT_FILE"
-    MEMORY_IMAGE_PRELOAD_ENTRIES="$(wc -l < "$MEMORY_IMAGE_INIT_FILE" | tr -d ' ')"
-    return 0
+  elif [[ "$MEMORY_IMAGE_FORMAT" == "bin" ]]; then
+    MEMORY_IMAGE_MATERIALIZED="$outdir/memory_image.materialized.bin"
+  else
+    MEMORY_IMAGE_MATERIALIZED="$outdir/memory_image.materialized.hex"
   fi
-  local pyout
-  pyout="$(python3 - "$MEMORY_IMAGE_ABS" "$MEMORY_IMAGE_MAP_ABS" "$MEMORY_IMAGE_FORMAT" "$outdir" "$vars_tsv" <<'PY'
-import csv
-import pathlib
-import sys
-
-def load_program_hex(path: pathlib.Path) -> dict[int, int]:
-    memory: dict[int, int] = {}
-    current_addr = 0
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.split("//", 1)[0].strip()
-        if not line:
-            continue
-        for token in line.split():
-            if token.startswith("@"):
-                current_addr = int(token[1:], 16)
-                continue
-            value = int(token, 16)
-            if value < 0 or value > 0xFF:
-                raise ValueError(f"memory image token out of byte range in {path}: {token}")
-            memory[current_addr] = value
-            current_addr += 1
-    if not memory:
-        raise ValueError(f"No memory data found in {path}")
-    return memory
-
-def load_memory_image(path: pathlib.Path, fmt: str) -> dict[int, int]:
-    cooked = fmt.lower()
-    if cooked == "auto":
-        cooked = "bin" if path.suffix.lower() in {".bin", ".img"} else "hex"
-    if cooked == "bin":
-        data = path.read_bytes()
-        if not data:
-            raise ValueError(f"No memory data found in {path}")
-        return {idx: value for idx, value in enumerate(data)}
-    if cooked == "hex":
-        return load_program_hex(path)
-    raise ValueError(f"Unsupported memory image format: {fmt}")
-
-def load_visible_preload_map(path: pathlib.Path) -> list[tuple[int, int, str]]:
-    entries: list[tuple[int, int, str]] = []
-    for lineno, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        line = raw_line.split("#", 1)[0].strip()
-        if not line:
-            continue
-        toks = line.split()
-        if len(toks) == 2:
-            addr_text, var_name = toks
-            byte_count = 4
-        elif len(toks) == 3:
-            addr_text, byte_count_text, var_name = toks
-            byte_count = int(byte_count_text, 0)
-        else:
-            raise ValueError(
-                f"invalid memory_image_map line in {path}:{lineno}: expected 'addr var' or 'addr bytes var'"
-            )
-        addr = int(addr_text, 0)
-        if byte_count <= 0 or byte_count > 4:
-            raise ValueError(f"memory_image_map byte count must be in 1..4 at {path}:{lineno}")
-        entries.append((addr, byte_count, var_name))
-    if not entries:
-        raise ValueError(f"memory_image_map is empty: {path}")
-    return entries
-
-image = pathlib.Path(sys.argv[1]).resolve()
-image_map = pathlib.Path(sys.argv[2]).resolve()
-image_format = sys.argv[3]
-outdir = pathlib.Path(sys.argv[4]).resolve()
-vars_tsv = pathlib.Path(sys.argv[5]).resolve()
-
-memory = load_memory_image(image, image_format)
-materialized_suffix = ".materialized.bin" if (image_format == "bin" or (image_format == "auto" and image.suffix.lower() in {".bin", ".img"})) else ".materialized.hex"
-materialized = outdir / f"memory_image{materialized_suffix}"
-if materialized_suffix.endswith(".bin"):
-    addrs = sorted(memory.keys())
-    buf = bytearray(addrs[-1] + 1)
-    for addr, value in memory.items():
-        buf[addr] = value & 0xFF
-    materialized.write_bytes(bytes(buf))
-else:
-    addrs = sorted(memory.keys())
-    lines: list[str] = []
-    run_start = addrs[0]
-    run_bytes = [memory[run_start]]
-    last_addr = run_start
-
-    def flush(start_addr: int, data: list[int]) -> None:
-        lines.append(f"@{start_addr:08X}")
-        for idx in range(0, len(data), 16):
-            chunk = data[idx: idx + 16]
-            lines.append(" ".join(f"{byte:02X}" for byte in chunk))
-
-    for addr in addrs[1:]:
-        if addr == last_addr + 1:
-            run_bytes.append(memory[addr])
-        else:
-            flush(run_start, run_bytes)
-            run_start = addr
-            run_bytes = [memory[addr]]
-        last_addr = addr
-    flush(run_start, run_bytes)
-    materialized.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-map_entries = load_visible_preload_map(image_map)
-name_to_meta = {}
-with vars_tsv.open(encoding="utf-8") as fh:
-    for row in csv.DictReader(fh, delimiter='\t'):
-        name_to_meta[row["name"]] = (row["index"], row["width"])
-
-init_file = outdir / "memory_image.init"
-preload_tsv = outdir / "memory_image.preload.tsv"
-with init_file.open("w", encoding="utf-8") as ifh, preload_tsv.open("w", encoding="utf-8") as pfh:
-    pfh.write("address\tbyte_count\tvar_name\tvar_index\twidth\tvisible\n")
-    for addr, byte_count, var_name in map_entries:
-        value = 0
-        for byte_idx in range(byte_count):
-            value |= (memory.get(addr + byte_idx, 0) & 0xFF) << (8 * byte_idx)
-        ifh.write(f"{var_name} 0x{value:08X}\n")
-        meta = name_to_meta.get(var_name)
-        if meta is None:
-            pfh.write(f"0x{addr:08X}\t{byte_count}\t{var_name}\t-1\t-1\t0\n")
-        else:
-            pfh.write(f"0x{addr:08X}\t{byte_count}\t{var_name}\t{meta[0]}\t{meta[1]}\t1\n")
-
-print(f"materialized={materialized}")
-print(f"init_file={init_file}")
-print(f"preload_tsv={preload_tsv}")
-print(f"entry_count={len(map_entries)}")
-PY
-)"
+  cp "$MEMORY_IMAGE_ABS" "$MEMORY_IMAGE_MATERIALIZED"
+  MEMORY_IMAGE_INIT_FILE="$outdir/memory_image.init"
+  MEMORY_IMAGE_PRELOAD_TSV="$outdir/memory_image.preload.tsv"
+  MEMORY_IMAGE_DIRECT_FILE="$outdir/memory_image.direct.tsv"
+  local helper_out
+  if [[ -n "$MEMORY_IMAGE_TARGET_ABS" ]]; then
+    helper_out="$(python3 "$PRELOAD_MATERIALIZE_HELPER" \
+      --memory-image "$MEMORY_IMAGE_MATERIALIZED" \
+      --vars-tsv "$vars_tsv" \
+      --format "$MEMORY_IMAGE_FORMAT" \
+      --target-descriptor "$MEMORY_IMAGE_TARGET_ABS" \
+      --out-init "$MEMORY_IMAGE_INIT_FILE" \
+      --out-preload-tsv "$MEMORY_IMAGE_PRELOAD_TSV" \
+      --out-direct "$MEMORY_IMAGE_DIRECT_FILE")"
+  else
+    helper_out="$(python3 "$PRELOAD_MATERIALIZE_HELPER" \
+      --memory-image "$MEMORY_IMAGE_MATERIALIZED" \
+      --vars-tsv "$vars_tsv" \
+      --format "$MEMORY_IMAGE_FORMAT" \
+      --map-file "$MEMORY_IMAGE_MAP_ABS" \
+      --out-init "$MEMORY_IMAGE_INIT_FILE" \
+      --out-preload-tsv "$MEMORY_IMAGE_PRELOAD_TSV" \
+      --out-direct "$MEMORY_IMAGE_DIRECT_FILE")"
+  fi
   while IFS='=' read -r key value; do
     case "$key" in
-      materialized) MEMORY_IMAGE_MATERIALIZED="$value" ;;
       init_file) MEMORY_IMAGE_INIT_FILE="$value" ;;
       preload_tsv) MEMORY_IMAGE_PRELOAD_TSV="$value" ;;
+      direct_file) MEMORY_IMAGE_DIRECT_FILE="$value" ;;
       entry_count) MEMORY_IMAGE_PRELOAD_ENTRIES="$value" ;;
+      visible_entry_count) MEMORY_IMAGE_DIRECT_ENTRIES="$value" ;;
     esac
-  done <<<"$pyout"
+  done <<<"$helper_out"
 }
 
 materialize_effective_init_file() {
@@ -1489,10 +1267,10 @@ materialize_effective_init_file() {
   if [[ -n "$INIT_FILE_ABS" ]]; then
     parts+=("$INIT_FILE_ABS")
   fi
-  if [[ -n "$PROGRAM_HEX_INIT_FILE" ]]; then
+  if [[ -n "$PROGRAM_HEX_INIT_FILE" && -z "$PROGRAM_HEX_DIRECT_FILE" ]]; then
     parts+=("$PROGRAM_HEX_INIT_FILE")
   fi
-  if [[ -n "$MEMORY_IMAGE_INIT_FILE" ]]; then
+  if [[ -n "$MEMORY_IMAGE_INIT_FILE" && -z "$MEMORY_IMAGE_DIRECT_FILE" ]]; then
     parts+=("$MEMORY_IMAGE_INIT_FILE")
   fi
   if [[ "${#parts[@]}" -eq 0 ]]; then
@@ -1739,6 +1517,12 @@ static uint32_t maskToWidth(uint64_t value, uint32_t width) {
 }
 
 struct InitFileStats {
+  size_t rules_applied = 0;
+  size_t values_applied = 0;
+  size_t lines_ignored = 0;
+};
+
+struct DirectPreloadStats {
   size_t rules_applied = 0;
   size_t values_applied = 0;
   size_t lines_ignored = 0;
@@ -2105,6 +1889,47 @@ static InitFileStats applyInitFile(std::vector<uint32_t>& h_in, uint32_t nvars, 
   return stats;
 }
 
+static DirectPreloadStats applyDirectPreload(std::vector<uint32_t>& h_in, uint32_t nvars,
+                                             uint32_t nstates, const std::string& varsPath,
+                                             const std::string& directPath) {
+  DirectPreloadStats stats;
+  const std::vector<uint32_t> widths = loadVarWidths(varsPath, nvars);
+
+  std::ifstream inf(directPath);
+  if (!inf) {
+    std::cerr << "Warning: could not open direct preload file: " << directPath << "\n";
+    return stats;
+  }
+
+  std::string line;
+  while (std::getline(inf, line)) {
+    if (line.empty()) continue;
+    const auto cols = splitTabs(line);
+    if (cols.empty()) continue;
+    if (cols[0] == "var_idx") continue;
+    if (cols.size() < 2) {
+      ++stats.lines_ignored;
+      continue;
+    }
+
+    uint64_t varIdxRaw = 0;
+    uint64_t valueRaw = 0;
+    if (!parseU64(cols[0], &varIdxRaw) || varIdxRaw >= nvars || !parseU64(cols[1], &valueRaw)) {
+      ++stats.lines_ignored;
+      continue;
+    }
+
+    const uint32_t varIdx = static_cast<uint32_t>(varIdxRaw);
+    const uint32_t value = maskToWidth(valueRaw, widths[varIdx]);
+    const size_t base = static_cast<size_t>(varIdx) * nstates;
+    for (uint32_t tid = 0; tid < nstates; ++tid) h_in[base + tid] = value;
+    ++stats.rules_applied;
+    stats.values_applied += nstates;
+  }
+
+  return stats;
+}
+
 #ifndef SIM_ACCEL_SKIP_CPU_REFERENCE_BUILD
 static void sim_accel_eval_assignw_cpu(const uint32_t* state_in, uint32_t* state_out,
                                        uint32_t nstates) {
@@ -2175,6 +2000,7 @@ static std::vector<uint32_t> unchunkToVarMajor(const std::vector<uint32_t>& chun
 static void printUsageAndExit(const char* argv0) {
   std::cerr << "Usage: " << argv0
               << " [--init-mode random|zero|ones|counter] [--init-seed N] [--init-file PATH]"
+            << " [--direct-preload-file PATH]..."
             << " --nstates N --gpu-reps N --cpu-reps N"
             << " [--state-chunk N] [--block-size N]"
             << " [--hybrid-mode off|single-partition|single-cluster|cluster-group]"
@@ -2261,6 +2087,7 @@ int main(int argc, char** argv) {
   std::string initMode = "random";
   uint32_t initSeed = 1;
   std::string initFile;
+  std::vector<std::string> directPreloadFiles;
   uint32_t nstates = 0;
   int gpu_reps = 0;
   int cpu_reps = 0;
@@ -2293,6 +2120,9 @@ int main(int argc, char** argv) {
     } else if (a == "--init-file") {
       if (i + 1 >= argc) printUsageAndExit(argv[0]);
       initFile = argv[++i];
+    } else if (a == "--direct-preload-file") {
+      if (i + 1 >= argc) printUsageAndExit(argv[0]);
+      directPreloadFiles.emplace_back(argv[++i]);
     } else if (a == "--nstates") {
       if (i + 1 >= argc) printUsageAndExit(argv[0]);
       uint64_t raw = 0;
@@ -2495,8 +2325,17 @@ int main(int argc, char** argv) {
 
   applyInitMode(h_seed_varmajor, nvars, nstates, initMode, initSeed);
   InitFileStats initStats;
+  DirectPreloadStats directPreloadStats;
   if (!initFile.empty()) {
     initStats = applyInitFile(h_seed_varmajor, nvars, nstates, "kernel_generated.vars.tsv", initFile);
+  }
+  for (const std::string& directPath : directPreloadFiles) {
+    const DirectPreloadStats perFileStats
+        = applyDirectPreload(h_seed_varmajor, nvars, nstates, "kernel_generated.vars.tsv",
+                             directPath);
+    directPreloadStats.rules_applied += perFileStats.rules_applied;
+    directPreloadStats.values_applied += perFileStats.values_applied;
+    directPreloadStats.lines_ignored += perFileStats.lines_ignored;
   }
   const auto widths = loadVarWidths("kernel_generated.vars.tsv", nvars);
   std::vector<uint32_t> hybridReadVarIdxs;
@@ -3356,6 +3195,12 @@ int main(int argc, char** argv) {
     std::cout << "init_file_values_applied=" << initStats.values_applied << "\n";
     std::cout << "init_file_lines_ignored=" << initStats.lines_ignored << "\n";
   }
+  std::cout << "direct_preload_file_count=" << directPreloadFiles.size() << "\n";
+  if (!directPreloadFiles.empty()) {
+    std::cout << "direct_preload_rules_applied=" << directPreloadStats.rules_applied << "\n";
+    std::cout << "direct_preload_values_applied=" << directPreloadStats.values_applied << "\n";
+    std::cout << "direct_preload_lines_ignored=" << directPreloadStats.lines_ignored << "\n";
+  }
   std::cout << "hybrid_mode=" << hybridMode << "\n";
   std::cout << "gpu_ms_per_rep=" << gpu_ms_per_rep << "\n";
   std::cout << "cpu_ms_per_rep=" << cpu_ms_per_rep << "\n";
@@ -3778,6 +3623,12 @@ echo "[4/4] Running benchmark..."
   if [[ -n "$EFFECTIVE_INIT_FILE" ]]; then
     BENCH_CMD+=(--init-file "$EFFECTIVE_INIT_FILE")
   fi
+  if [[ -n "$PROGRAM_HEX_DIRECT_FILE" ]]; then
+    BENCH_CMD+=(--direct-preload-file "$PROGRAM_HEX_DIRECT_FILE")
+  fi
+  if [[ -n "$MEMORY_IMAGE_DIRECT_FILE" ]]; then
+    BENCH_CMD+=(--direct-preload-file "$MEMORY_IMAGE_DIRECT_FILE")
+  fi
   if ! /usr/bin/time -f "%e" -o "$TIME_RUN" "${BENCH_CMD[@]}" > bench_run.log 2>&1; then
     echo "Benchmark execution failed. Last lines from bench_run.log:" >&2
     tail -n 40 bench_run.log >&2 || true
@@ -3912,6 +3763,8 @@ if [[ -n "$PROGRAM_HEX_ABS" ]]; then
     echo "program_hex_init_file=$PROGRAM_HEX_INIT_FILE"
     echo "program_hex_preload_tsv=$PROGRAM_HEX_PRELOAD_TSV"
     echo "program_hex_preload_entries=$PROGRAM_HEX_PRELOAD_ENTRIES"
+    echo "program_hex_direct_file=$PROGRAM_HEX_DIRECT_FILE"
+    echo "program_hex_direct_entries=$PROGRAM_HEX_DIRECT_ENTRIES"
     if [[ -n "$EFFECTIVE_INIT_FILE" ]]; then
       echo "effective_init_file=$EFFECTIVE_INIT_FILE"
     fi
@@ -3927,6 +3780,8 @@ if [[ -n "$MEMORY_IMAGE_ABS" ]]; then
     echo "memory_image_init_file=$MEMORY_IMAGE_INIT_FILE"
     echo "memory_image_preload_tsv=$MEMORY_IMAGE_PRELOAD_TSV"
     echo "memory_image_preload_entries=$MEMORY_IMAGE_PRELOAD_ENTRIES"
+    echo "memory_image_direct_file=$MEMORY_IMAGE_DIRECT_FILE"
+    echo "memory_image_direct_entries=$MEMORY_IMAGE_DIRECT_ENTRIES"
     if [[ -n "$EFFECTIVE_INIT_FILE" ]]; then
       echo "effective_init_file=$EFFECTIVE_INIT_FILE"
     fi

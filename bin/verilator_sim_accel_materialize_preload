@@ -1,0 +1,274 @@
+#!/usr/bin/env python3
+# DESCRIPTION: Verilator: Materialize sim-accel preload payloads
+#
+# This program is free software; you can redistribute it and/or modify it
+# under the terms of either the GNU Lesser General Public License Version 3
+# or the Perl Artistic License Version 2.0.
+# SPDX-FileCopyrightText: 2026 Wilson Snyder
+# SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import pathlib
+from typing import Any
+
+MAPPED_VISIBLE_KIND = "mapped-visible-preload-v1"
+FULL_MEMORY_ARRAY_KIND = "memory-array-preload-v1"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Materialize init/direct preload payloads for sim-accel bench"
+    )
+    parser.add_argument("--memory-image", required=True)
+    parser.add_argument("--vars-tsv", required=True)
+    parser.add_argument("--format", default="auto")
+    parser.add_argument("--target-descriptor")
+    parser.add_argument("--map-file")
+    parser.add_argument("--out-init", required=True)
+    parser.add_argument("--out-preload-tsv", required=True)
+    parser.add_argument("--out-direct", required=True)
+    args = parser.parse_args()
+    if bool(args.target_descriptor) == bool(args.map_file):
+        parser.error("exactly one of --target-descriptor or --map-file is required")
+    return args
+
+
+def load_program_hex(path: str | pathlib.Path) -> dict[int, int]:
+    src = pathlib.Path(path).expanduser().resolve()
+    memory: dict[int, int] = {}
+    current_addr = 0
+    for raw_line in src.read_text(encoding="utf-8").splitlines():
+        line = raw_line.split("//", 1)[0].strip()
+        if not line:
+            continue
+        for token in line.split():
+            if token.startswith("@"):
+                current_addr = int(token[1:], 16)
+                continue
+            value = int(token, 16)
+            if value < 0 or value > 0xFF:
+                raise ValueError(f"program.hex token out of byte range in {src}: {token}")
+            memory[current_addr] = value
+            current_addr += 1
+    if not memory:
+        raise ValueError(f"No memory data found in {src}")
+    return memory
+
+
+def load_memory_image(path: str | pathlib.Path, fmt: str = "auto") -> dict[int, int]:
+    src = pathlib.Path(path).expanduser().resolve()
+    cooked = fmt.lower()
+    if cooked == "auto":
+        cooked = "bin" if src.suffix.lower() in {".bin", ".img"} else "hex"
+    if cooked == "bin":
+        data = src.read_bytes()
+        if not data:
+            raise ValueError(f"No memory data found in {src}")
+        return {idx: value for idx, value in enumerate(data)}
+    if cooked == "hex":
+        return load_program_hex(src)
+    raise ValueError(f"Unsupported memory image format: {fmt}")
+
+
+def load_visible_preload_map(path: str | pathlib.Path, label: str = "preload_map") -> list[tuple[int, int, str]]:
+    src = pathlib.Path(path).expanduser().resolve()
+    entries: list[tuple[int, int, str]] = []
+    for lineno, raw_line in enumerate(src.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        toks = line.split()
+        if len(toks) == 2:
+            addr_text, var_name = toks
+            byte_count = 4
+        elif len(toks) == 3:
+            addr_text, byte_count_text, var_name = toks
+            byte_count = int(byte_count_text, 0)
+        else:
+            raise ValueError(
+                f"invalid {label} line in {src}:{lineno}: expected 'addr var' or 'addr bytes var'"
+            )
+        addr = int(addr_text, 0)
+        if byte_count <= 0 or byte_count > 4:
+            raise ValueError(f"{label} byte count must be in 1..4 at {src}:{lineno}")
+        entries.append((addr, byte_count, var_name))
+    if not entries:
+        raise ValueError(f"{label} is empty: {src}")
+    return entries
+
+
+def load_target_descriptor(path: str | pathlib.Path) -> dict[str, Any]:
+    src = pathlib.Path(path).expanduser().resolve()
+    payload = json.loads(src.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"target descriptor must be a JSON object: {src}")
+    kind = str(payload.get("kind") or MAPPED_VISIBLE_KIND)
+    if kind == MAPPED_VISIBLE_KIND:
+        map_path = payload.get("map_file")
+        if not map_path:
+            raise ValueError(f"missing map_file in target descriptor: {src}")
+        return {
+            "kind": kind,
+            "map_file": str(pathlib.Path(str(map_path)).expanduser().resolve()),
+        }
+    if kind == FULL_MEMORY_ARRAY_KIND:
+        elements_payload = payload.get("elements", [])
+        if not isinstance(elements_payload, list):
+            raise ValueError(f"elements must be a JSON array in target descriptor: {src}")
+        elements: list[dict[str, Any]] = []
+        for idx, entry in enumerate(elements_payload, start=1):
+            if not isinstance(entry, dict):
+                raise ValueError(f"element {idx} in {src} is not an object")
+            var_name = entry.get("var_name")
+            offset = entry.get("offset")
+            if not var_name or offset is None:
+                raise ValueError(f"element {idx} missing var_name/offset in {src}")
+            elements.append(
+                {
+                    "var_name": str(var_name),
+                    "offset": int(offset),
+                    "byte_count": int(entry.get("byte_count", 4)),
+                    "index": None if entry.get("index") is None else int(entry.get("index")),
+                }
+            )
+        return {
+            "kind": kind,
+            "endianness": str(payload.get("endianness") or "little"),
+            "elements": elements,
+        }
+    raise ValueError(f"unsupported target descriptor kind: {kind}")
+
+
+def load_vars_tsv(path: str | pathlib.Path) -> tuple[dict[str, tuple[int, int]], dict[int, int]]:
+    src = pathlib.Path(path).expanduser().resolve()
+    name_to_meta: dict[str, tuple[int, int]] = {}
+    idx_to_width: dict[int, int] = {}
+    with src.open(encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        if "index" not in (reader.fieldnames or []) or "name" not in (reader.fieldnames or []):
+            raise ValueError(f"vars.tsv missing required columns: {src}")
+        for row in reader:
+            idx = int(row["index"], 0)
+            name = row["name"]
+            width = int(row.get("width") or row.get("bits") or row.get("var_width") or 32, 0)
+            name_to_meta[name] = (idx, width)
+            idx_to_width[idx] = width
+    return name_to_meta, idx_to_width
+
+
+def memory_value(memory: dict[int, int], addr: int, byte_count: int, little_endian: bool = True) -> int:
+    value = 0
+    if little_endian:
+        for byte_idx in range(byte_count):
+            value |= (memory.get(addr + byte_idx, 0) & 0xFF) << (8 * byte_idx)
+        return value
+    for byte_idx in range(byte_count):
+        value = (value << 8) | (memory.get(addr + byte_idx, 0) & 0xFF)
+    return value
+
+
+def main() -> int:
+    args = parse_args()
+    memory = load_memory_image(args.memory_image, args.format)
+    name_to_meta, idx_to_width = load_vars_tsv(args.vars_tsv)
+
+    init_lines: list[str] = []
+    preload_rows: list[str] = ["address\tbyte_count\tvar_name\tvar_index\twidth\tvisible\tvalue"]
+    direct_rows: list[str] = ["var_idx\tvalue\tvar_name\twidth\taddress\tbyte_count"]
+    entry_count = 0
+    visible_entry_count = 0
+
+    if args.target_descriptor:
+        desc = load_target_descriptor(args.target_descriptor)
+        if desc["kind"] == MAPPED_VISIBLE_KIND:
+            entries = load_visible_preload_map(desc["map_file"], "target.map_file")
+            for addr, byte_count, var_name in entries:
+                value = memory_value(memory, addr, byte_count, True)
+                meta = name_to_meta.get(var_name)
+                entry_count += 1
+                if meta is None:
+                    preload_rows.append(
+                        f"0x{addr:08X}\t{byte_count}\t{var_name}\t-1\t-1\t0\t0x{value:08X}"
+                    )
+                    continue
+                var_idx, width = meta
+                preload_rows.append(
+                    f"0x{addr:08X}\t{byte_count}\t{var_name}\t{var_idx}\t{width}\t1\t0x{value:08X}"
+                )
+                direct_rows.append(
+                    f"{var_idx}\t0x{value:08X}\t{var_name}\t{width}\t0x{addr:08X}\t{byte_count}"
+                )
+                init_lines.append(f"{var_name} 0x{value:08X}")
+                visible_entry_count += 1
+        else:
+            little_endian = str(desc.get("endianness", "little")).lower() != "big"
+            for entry in desc["elements"]:
+                addr = int(entry["offset"])
+                byte_count = int(entry["byte_count"])
+                var_name = str(entry["var_name"])
+                value = memory_value(memory, addr, byte_count, little_endian)
+                meta = name_to_meta.get(var_name)
+                if meta is None and entry.get("index") is not None:
+                    fallback_idx = int(entry["index"])
+                    fallback_width = idx_to_width.get(fallback_idx, byte_count * 8)
+                    meta = (fallback_idx, fallback_width)
+                entry_count += 1
+                if meta is None:
+                    preload_rows.append(
+                        f"0x{addr:08X}\t{byte_count}\t{var_name}\t-1\t-1\t0\t0x{value:08X}"
+                    )
+                    continue
+                var_idx, width = meta
+                preload_rows.append(
+                    f"0x{addr:08X}\t{byte_count}\t{var_name}\t{var_idx}\t{width}\t1\t0x{value:08X}"
+                )
+                direct_rows.append(
+                    f"{var_idx}\t0x{value:08X}\t{var_name}\t{width}\t0x{addr:08X}\t{byte_count}"
+                )
+                init_lines.append(f"{var_name} 0x{value:08X}")
+                visible_entry_count += 1
+    else:
+        entries = load_visible_preload_map(args.map_file, "visible_map")
+        for addr, byte_count, var_name in entries:
+            value = memory_value(memory, addr, byte_count, True)
+            meta = name_to_meta.get(var_name)
+            entry_count += 1
+            if meta is None:
+                preload_rows.append(
+                    f"0x{addr:08X}\t{byte_count}\t{var_name}\t-1\t-1\t0\t0x{value:08X}"
+                )
+                continue
+            var_idx, width = meta
+            preload_rows.append(
+                f"0x{addr:08X}\t{byte_count}\t{var_name}\t{var_idx}\t{width}\t1\t0x{value:08X}"
+            )
+            direct_rows.append(
+                f"{var_idx}\t0x{value:08X}\t{var_name}\t{width}\t0x{addr:08X}\t{byte_count}"
+            )
+            init_lines.append(f"{var_name} 0x{value:08X}")
+            visible_entry_count += 1
+
+    out_init = pathlib.Path(args.out_init).expanduser().resolve()
+    out_preload = pathlib.Path(args.out_preload_tsv).expanduser().resolve()
+    out_direct = pathlib.Path(args.out_direct).expanduser().resolve()
+    out_init.parent.mkdir(parents=True, exist_ok=True)
+    out_preload.parent.mkdir(parents=True, exist_ok=True)
+    out_direct.parent.mkdir(parents=True, exist_ok=True)
+    out_init.write_text(("\n".join(init_lines) + "\n") if init_lines else "", encoding="utf-8")
+    out_preload.write_text("\n".join(preload_rows) + "\n", encoding="utf-8")
+    out_direct.write_text("\n".join(direct_rows) + "\n", encoding="utf-8")
+
+    print(f"init_file={out_init}")
+    print(f"preload_tsv={out_preload}")
+    print(f"direct_file={out_direct}")
+    print(f"entry_count={entry_count}")
+    print(f"visible_entry_count={visible_entry_count}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
