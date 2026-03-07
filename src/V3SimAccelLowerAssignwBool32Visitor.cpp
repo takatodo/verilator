@@ -157,6 +157,7 @@ private:
     std::unordered_set<size_t> m_gpuWrittenVarIdxs;
     std::unordered_set<const AstVar*> m_externalTouchedVarps;
     std::unordered_set<string> m_preloadTargetPaths;
+    std::unordered_map<string, size_t> m_preloadTargetPathToIndex;
     size_t m_skippedUnsupported = 0;
     size_t m_skippedInternal = 0;
     size_t m_skippedNonVarLhs = 0;
@@ -235,6 +236,7 @@ private:
         m_program.m_vars.push_back(std::move(var));
         m_arrayElementToIndex.emplace(key, idx);
         m_indexToVar.push_back(nullptr);
+        rememberPreloadTargetElement(resolved, m_program.m_vars.at(idx).m_name);
         return idx;
     }
 
@@ -265,7 +267,37 @@ private:
         target.m_addressUnitBytes = std::max<uint32_t>(1, (target.m_wordBits + 7) / 8);
         target.m_endianness = "little";
         target.m_isPrimaryIo = varp->isPrimaryIO();
+        const size_t targetIdx = m_program.m_preloadTargets.size();
         m_program.m_preloadTargets.push_back(std::move(target));
+        m_preloadTargetPathToIndex.emplace(targetPath, targetIdx);
+    }
+
+    void rememberPreloadTargetElement(const ResolvedArrayElement& resolved, const string& varName) {
+        if (!resolved.m_varp || !resolved.m_varp->dtypep()) return;
+        const string targetPath = simAccelNormalizeTargetPath(resolved.m_varp->name());
+        const auto targetIt = m_preloadTargetPathToIndex.find(targetPath);
+        if (targetIt == m_preloadTargetPathToIndex.end()) return;
+
+        const AstUnpackArrayDType* const unpackp
+            = VN_CAST(resolved.m_varp->dtypep()->skipRefp(), UnpackArrayDType);
+        if (!unpackp) return;
+        const int logicalBase = unpackp->lo();
+        const int relativeIndex = resolved.m_logicalIndex - logicalBase;
+        if (relativeIndex < 0) return;
+
+        V3SimAccelProgram::PreloadTarget& target = m_program.m_preloadTargets.at(targetIt->second);
+        const uint32_t byteCount = std::max<uint32_t>(1, (resolved.m_width + 7) / 8);
+        const uint32_t offset = static_cast<uint32_t>(relativeIndex) * byteCount;
+        for (const V3SimAccelProgram::PreloadTarget::Element& existing : target.m_elements) {
+            if (existing.m_index == resolved.m_logicalIndex || existing.m_varName == varName) return;
+        }
+
+        V3SimAccelProgram::PreloadTarget::Element element;
+        element.m_index = resolved.m_logicalIndex;
+        element.m_offset = offset;
+        element.m_byteCount = byteCount;
+        element.m_varName = varName;
+        target.m_elements.push_back(std::move(element));
     }
 
     void finalizeCommPlan() {

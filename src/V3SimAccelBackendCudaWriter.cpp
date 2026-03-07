@@ -1179,5 +1179,44 @@ size_t V3SimAccelBackendCudaWriter::write(
         }
     }
 
+    const string preloadElementsFilename = filename + ".preload_target_elements.tsv";
+    std::ofstream preloadElements{preloadElementsFilename};
+    if (preloadElements.is_open()) {
+        preloadElements << "target_path\tname\tindex\toffset\tbyte_count\tvar_name\n";
+        struct EmittedPreloadElement final {
+            string m_targetPath;
+            string m_name;
+            int m_index = 0;
+            uint32_t m_offset = 0;
+            uint32_t m_byteCount = 0;
+            string m_varName;
+        };
+        std::vector<EmittedPreloadElement> rows;
+        for (const V3SimAccelProgram::PreloadTarget& target : program.m_preloadTargets) {
+            for (const V3SimAccelProgram::PreloadTarget::Element& element : target.m_elements) {
+                EmittedPreloadElement row;
+                row.m_targetPath = target.m_targetPath;
+                row.m_name = target.m_name;
+                row.m_index = element.m_index;
+                row.m_offset = element.m_offset;
+                row.m_byteCount = element.m_byteCount;
+                row.m_varName = element.m_varName;
+                rows.push_back(std::move(row));
+            }
+        }
+        std::sort(rows.begin(), rows.end(), [](const EmittedPreloadElement& lhs,
+                                               const EmittedPreloadElement& rhs) {
+            if (lhs.m_targetPath != rhs.m_targetPath) return lhs.m_targetPath < rhs.m_targetPath;
+            if (lhs.m_index != rhs.m_index) return lhs.m_index < rhs.m_index;
+            if (lhs.m_offset != rhs.m_offset) return lhs.m_offset < rhs.m_offset;
+            return lhs.m_varName < rhs.m_varName;
+        });
+        for (const EmittedPreloadElement& row : rows) {
+            preloadElements << row.m_targetPath << '\t' << row.m_name << '\t' << row.m_index
+                            << '\t' << row.m_offset << '\t' << row.m_byteCount << '\t'
+                            << row.m_varName << '\n';
+        }
+    }
+
     return emittedAssigns.size();
 }

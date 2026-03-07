@@ -37,6 +37,8 @@ probe_dir = test.obj_dir + "/sim_accel_hidden_preload_exec_probe"
 bench_dir = test.obj_dir + "/sim_accel_hidden_preload_exec_bench"
 kernel_path = probe_dir + "/hidden_exec.sim_accel.kernel.cu"
 vars_tsv = kernel_path + ".vars.tsv"
+preload_targets_tsv = kernel_path + ".preload_targets.tsv"
+preload_target_elements_tsv = kernel_path + ".preload_target_elements.tsv"
 target_path = probe_dir + "/hidden_mem.target.json"
 bench_log = bench_dir + "/bench_run.log"
 memory_init = bench_dir + "/memory_image.init"
@@ -67,6 +69,10 @@ test.run_capture(probe_cmd)
 
 if not os.path.exists(vars_tsv):
     test.error("Expected vars.tsv not found: " + vars_tsv)
+if not os.path.exists(preload_targets_tsv):
+    test.error("Expected preload_targets.tsv not found: " + preload_targets_tsv)
+if not os.path.exists(preload_target_elements_tsv):
+    test.error("Expected preload_target_elements.tsv not found: " + preload_target_elements_tsv)
 
 test.file_grep(vars_tsv, r"t__DOT__hidden_mem__BRA__0__KET__")
 test.file_grep(vars_tsv, r"t__DOT__hidden_mem__BRA__1__KET__")
@@ -75,13 +81,10 @@ test.file_grep(vars_tsv, r"t__DOT__hidden_mem__BRA__3__KET__")
 
 target_cmd = (
     target_gen
-    + " --vars-tsv " + vars_tsv
-    + " --name generated_hidden_mem_target"
-    + " --target-path t.hidden_mem"
-    + " --var-regex '^t__DOT__hidden_mem__BRA__(\\d+)__KET__$'"
-    + " --word-bits 32"
-    + " --depth 4"
+    + " --preload-targets-tsv " + preload_targets_tsv
+    + " --preload-target-elements-tsv " + preload_target_elements_tsv
     + " --description 'Generated from hidden array element vars'"
+    + " --target-path t.hidden_mem"
     + " --out " + target_path)
 test.run_capture(target_cmd)
 

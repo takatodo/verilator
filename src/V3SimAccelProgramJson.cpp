@@ -15,6 +15,7 @@
 #include "V3Error.h"
 #include "V3SimAccelProgramAnalysis.h"
 
+#include <algorithm>
 #include <fstream>
 
 namespace {
@@ -225,7 +226,28 @@ void V3SimAccelProgramJson::write(const string& filename, const V3SimAccelProgra
         of << "      \"address_unit_bytes\": " << target.m_addressUnitBytes << ",\n";
         of << "      \"endianness\": \"" << jsonEscape(target.m_endianness) << "\",\n";
         of << "      \"is_primary_io\": " << (target.m_isPrimaryIo ? "true" : "false")
-           << "\n";
+           << ",\n";
+        of << "      \"elements\": [\n";
+        std::vector<V3SimAccelProgram::PreloadTarget::Element> elements = target.m_elements;
+        std::sort(elements.begin(), elements.end(),
+                  [](const V3SimAccelProgram::PreloadTarget::Element& lhs,
+                     const V3SimAccelProgram::PreloadTarget::Element& rhs) {
+                      if (lhs.m_index != rhs.m_index) return lhs.m_index < rhs.m_index;
+                      if (lhs.m_offset != rhs.m_offset) return lhs.m_offset < rhs.m_offset;
+                      return lhs.m_varName < rhs.m_varName;
+                  });
+        for (size_t elemIdx = 0; elemIdx < elements.size(); ++elemIdx) {
+            const auto& elem = elements.at(elemIdx);
+            of << "        {\n";
+            of << "          \"index\": " << elem.m_index << ",\n";
+            of << "          \"offset\": " << elem.m_offset << ",\n";
+            of << "          \"byte_count\": " << elem.m_byteCount << ",\n";
+            of << "          \"var_name\": \"" << jsonEscape(elem.m_varName) << "\"\n";
+            of << "        }";
+            if (elemIdx + 1 != elements.size()) of << ",";
+            of << "\n";
+        }
+        of << "      ]\n";
         of << "    }";
         if (i + 1 != program.m_preloadTargets.size()) of << ",";
         of << "\n";

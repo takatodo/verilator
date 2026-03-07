@@ -96,6 +96,13 @@ public:
     };
 
     struct PreloadTarget final {
+        struct Element final {
+            int m_index = 0;
+            uint32_t m_offset = 0;
+            uint32_t m_byteCount = 0;
+            string m_varName;
+        };
+
         string m_kind;
         string m_name;
         string m_targetPath;
@@ -107,6 +114,7 @@ public:
         uint32_t m_addressUnitBytes = 0;
         string m_endianness;
         bool m_isPrimaryIo = false;
+        std::vector<Element> m_elements;
     };
 
     std::vector<Expr> m_exprs;

@@ -21,6 +21,7 @@ target_gen = verilator_root + "/bin/verilator_sim_accel_generate_preload_target"
 probe_dir = os.path.abspath(test.obj_dir + "/sim_accel_hidden_preload_probe")
 kernel_path = probe_dir + "/hidden_probe.sim_accel.kernel.cu"
 preload_targets_tsv = kernel_path + ".preload_targets.tsv"
+preload_target_elements_tsv = kernel_path + ".preload_target_elements.tsv"
 target_path = probe_dir + "/hidden_mem.target.json"
 
 shutil.rmtree(probe_dir, ignore_errors=True)
@@ -37,15 +38,19 @@ test.run_capture(probe_cmd)
 
 if not os.path.exists(preload_targets_tsv):
     test.error("Expected preload_targets.tsv not found: " + preload_targets_tsv)
+if not os.path.exists(preload_target_elements_tsv):
+    test.error("Expected preload_target_elements.tsv not found: " + preload_target_elements_tsv)
 
 test.file_grep(preload_targets_tsv, r"^kind\tname\ttarget_path\tast_name\thierarchy\tword_bits\tdepth\tbase_addr\taddress_unit_bytes\tendianness\tis_primary_io$")
 test.file_grep(
     preload_targets_tsv,
     r"^memory-array-preload-v1\thidden_mem\tt\.hidden_mem\tt__DOT__hidden_mem\tt\t32\t4\t0\t4\tlittle\t0$")
+test.file_grep(preload_target_elements_tsv, r"^target_path\tname\tindex\toffset\tbyte_count\tvar_name$")
 
 target_cmd = (
     target_gen
     + " --preload-targets-tsv " + preload_targets_tsv
+    + " --preload-target-elements-tsv " + preload_target_elements_tsv
     + " --target-path t.hidden_mem"
     + " --description 'Hidden array generated metadata'"
     + " --out " + target_path)
@@ -65,6 +70,6 @@ if payload.get("word_bits") != 32:
 if payload.get("depth") != 4:
     test.error("Unexpected depth: " + str(payload.get("depth")))
 if payload.get("elements") != []:
-    test.error("Hidden preload target should not have visible projection elements")
+    test.error("Hidden preload target without constant-index reads should not expose elements")
 
 test.passes()

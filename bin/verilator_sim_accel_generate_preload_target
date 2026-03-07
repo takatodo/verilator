@@ -24,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--vars-tsv")
     parser.add_argument("--preload-targets-tsv")
+    parser.add_argument("--preload-target-elements-tsv")
     parser.add_argument("--name")
     parser.add_argument("--target-path")
     parser.add_argument(
@@ -66,6 +67,29 @@ def main() -> int:
 
     if args.preload_targets_tsv:
         targets_tsv = pathlib.Path(args.preload_targets_tsv).expanduser().resolve()
+        elements_by_target: dict[str, list[dict[str, int | str]]] = {}
+        if args.preload_target_elements_tsv:
+            elements_tsv = pathlib.Path(args.preload_target_elements_tsv).expanduser().resolve()
+            with elements_tsv.open(encoding="utf-8", newline="") as fh:
+                reader = csv.DictReader(fh, delimiter="\t")
+                fieldnames = set(reader.fieldnames or [])
+                required = {"target_path", "index", "offset", "byte_count", "var_name"}
+                missing = sorted(required - fieldnames)
+                if missing:
+                    raise SystemExit(
+                        "preload_target_elements.tsv is missing columns "
+                        + ",".join(missing)
+                        + f": {elements_tsv}"
+                    )
+                for row in reader:
+                    elements_by_target.setdefault(row["target_path"], []).append(
+                        {
+                            "index": int(row["index"], 0),
+                            "offset": int(row["offset"], 0),
+                            "byte_count": int(row["byte_count"], 0),
+                            "var_name": row["var_name"],
+                        }
+                    )
         with targets_tsv.open(encoding="utf-8", newline="") as fh:
             reader = csv.DictReader(fh, delimiter="\t")
             fieldnames = set(reader.fieldnames or [])
@@ -106,7 +130,10 @@ def main() -> int:
             "address_unit_bytes": int(matched_row["address_unit_bytes"], 0),
             "endianness": matched_row["endianness"],
             "default_format": args.default_format,
-            "elements": [],
+            "elements": sorted(
+                elements_by_target.get(matched_row["target_path"], []),
+                key=lambda item: (int(item["index"]), int(item["offset"]), str(item["var_name"])),
+            ),
         }
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
