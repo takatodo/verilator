@@ -37,6 +37,7 @@ bench_dir_hybrid = test.obj_dir + "/sim_accel_bench_hybrid"
 bench_dir_hybrid_cluster = test.obj_dir + "/sim_accel_bench_hybrid_cluster"
 bench_dir_hybrid_cluster_auto = test.obj_dir + "/sim_accel_bench_hybrid_cluster_auto"
 bench_dir_program_hex = test.obj_dir + "/sim_accel_bench_program_hex"
+bench_dir_memory_image = test.obj_dir + "/sim_accel_bench_memory_image"
 bench_run_log = bench_dir_hit + "/bench_run.log"
 bench_objhit_log = bench_dir_objhit + "/bench_run.log"
 bench_skip_log = bench_dir_skip + "/bench_run.log"
@@ -44,6 +45,7 @@ bench_hybrid_log = bench_dir_hybrid + "/bench_run.log"
 bench_hybrid_cluster_log = bench_dir_hybrid_cluster + "/bench_run.log"
 bench_hybrid_cluster_auto_log = bench_dir_hybrid_cluster_auto + "/bench_run.log"
 bench_program_hex_log = bench_dir_program_hex + "/bench_run.log"
+bench_memory_image_log = bench_dir_memory_image + "/bench_run.log"
 kernel_log = bench_dir_hit + "/verilator_cuda.log"
 kernel_cu = bench_dir_hit + "/t.sim_accel.kernel.cu"
 kernel_vars = kernel_cu + ".vars.tsv"
@@ -56,12 +58,14 @@ kernel_parts = kernel_cu + ".partitions.tsv"
 
 for path in [cache_dir, bench_dir_miss, bench_dir_hit, bench_dir_objhit, bench_dir_hybrid,
              bench_dir_skip, bench_dir_hybrid_cluster, bench_dir_hybrid_cluster_auto,
-             bench_dir_program_hex]:
+             bench_dir_program_hex, bench_dir_memory_image]:
     shutil.rmtree(path, ignore_errors=True)
 
 program_hex_dir = tempfile.mkdtemp(prefix="sim_accel_bench_program_hex_", dir=test.obj_dir)
 program_hex_path = program_hex_dir + "/program.hex"
 program_map_path = program_hex_dir + "/program.map"
+memory_image_path = program_hex_dir + "/memory.bin"
+memory_map_path = program_hex_dir + "/memory.map"
 with open(program_hex_path, "w", encoding="utf-8") as fh:
     fh.write("@10000000\n")
     fh.write("01 00 00 00\n")
@@ -73,6 +77,16 @@ with open(program_map_path, "w", encoding="utf-8") as fh:
     fh.write("0x10000004 b\n")
     fh.write("0x10000008 c\n")
     fh.write("0x1000000C d\n")
+with open(memory_image_path, "wb") as fh:
+    fh.write(bytes([0x0A, 0x00, 0x00, 0x00,
+                    0x02, 0x00, 0x00, 0x00,
+                    0x03, 0x00, 0x00, 0x00,
+                    0x04, 0x00, 0x00, 0x00]))
+with open(memory_map_path, "w", encoding="utf-8") as fh:
+    fh.write("0x0 a\n")
+    fh.write("0x4 b\n")
+    fh.write("0x8 c\n")
+    fh.write("0xC d\n")
 
 bench_cmd = (
     os.environ["VERILATOR_ROOT"] + "/bin/verilator --sim-accel-bench"
@@ -166,6 +180,19 @@ bench_cmd_program_hex = (
     + " --program-hex-iterations 8"
     + " -- "
     + test.t_dir + "/t_sim_accel_bench_exec.v")
+bench_cmd_memory_image = (
+    os.environ["VERILATOR_ROOT"] + "/bin/verilator --sim-accel-bench"
+    + " --top-module t"
+    + " --nstates 2048"
+    + " --gpu-reps 4"
+    + " --cpu-reps 2"
+    + " --assigns-per-kernel 2"
+    + " --compile-cache-dir " + cache_dir
+    + " --memory-image " + memory_image_path
+    + " --memory-image-map " + memory_map_path
+    + " --memory-image-format bin"
+    + " -- "
+    + test.t_dir + "/t_sim_accel_bench_exec.v")
 
 test.run_capture(bench_cmd.replace("-- ", "--outdir " + bench_dir_miss + " -- ", 1))
 test.run_capture(bench_cmd_hit.replace("-- ", "--outdir " + bench_dir_hit + " -- ", 1))
@@ -178,6 +205,8 @@ test.run_capture(
     bench_cmd_hybrid_cluster_auto.replace("-- ", "--outdir " + bench_dir_hybrid_cluster_auto + " -- ", 1))
 test.run_capture(
     bench_cmd_program_hex.replace("-- ", "--outdir " + bench_dir_program_hex + " -- ", 1))
+test.run_capture(
+    bench_cmd_memory_image.replace("-- ", "--outdir " + bench_dir_memory_image + " -- ", 1))
 
 for filename in [bench_run_log, kernel_log, kernel_cu, kernel_vars, kernel_api, kernel_cpu, kernel_link, kernel_parts]:
     if not os.path.exists(filename):
@@ -276,6 +305,21 @@ test.file_grep(bench_dir_program_hex + r"/program_hex.init", r"^a 0x00000008$")
 test.file_grep(bench_dir_program_hex + r"/program_hex.init", r"^b 0x00000002$")
 test.file_grep(bench_dir_program_hex + r"/program_hex.init", r"^c 0x00000003$")
 test.file_grep(bench_dir_program_hex + r"/program_hex.init", r"^d 0x00000004$")
+test.file_grep(bench_memory_image_log, r"memory_image=.*memory\.bin")
+test.file_grep(bench_memory_image_log, r"memory_image_map=.*memory\.map")
+test.file_grep(bench_memory_image_log, r"memory_image_format=bin")
+test.file_grep(bench_memory_image_log, r"memory_image_materialized=.*memory_image\.materialized\.bin")
+test.file_grep(bench_memory_image_log, r"memory_image_init_file=.*memory_image\.init")
+test.file_grep(bench_memory_image_log, r"memory_image_preload_tsv=.*memory_image\.preload\.tsv")
+test.file_grep(bench_memory_image_log, r"memory_image_preload_entries=4")
+test.file_grep(bench_memory_image_log, r"effective_init_file=.*memory_image\.init")
+test.file_grep(bench_memory_image_log, r"init_file=.*memory_image\.init")
+test.file_grep(bench_memory_image_log, r"init_file_values_applied=8192")
+test.file_grep(bench_memory_image_log, r"mismatch=0")
+test.file_grep(bench_dir_memory_image + r"/memory_image.init", r"^a 0x0000000A$")
+test.file_grep(bench_dir_memory_image + r"/memory_image.init", r"^b 0x00000002$")
+test.file_grep(bench_dir_memory_image + r"/memory_image.init", r"^c 0x00000003$")
+test.file_grep(bench_dir_memory_image + r"/memory_image.init", r"^d 0x00000004$")
 test.file_grep(bench_run_log, r"speedup_gpu_over_cpu=")
 test.file_grep(bench_run_log, r"kernel_partitions=[2-9][0-9]*")
 test.file_grep(bench_run_log, r"auto_engine_recommendation=")

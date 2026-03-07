@@ -25,6 +25,11 @@ Options:
                        Map program.hex addresses into visible vars via generated init-file
   --program-hex-iterations N
                        Patch the first 32-bit word in program.hex before applying the map
+  --memory-image PATH  Materialize a generic preload image for sim-accel bench
+  --memory-image-map PATH
+                       Map memory-image offsets into visible vars via generated init-file
+  --memory-image-format FMT
+                       Input image format: auto|hex|bin (default: auto)
   --assigns-per-kernel N  Limit emitted assigns per generated CUDA kernel partition (default: 0)
   --hybrid-mode MODE   Runtime path: off|single-partition|single-cluster|cluster-group (default: off)
   --hybrid-partition-index N  Selected partition for --hybrid-mode single-partition
@@ -88,6 +93,15 @@ PROGRAM_HEX_MATERIALIZED=""
 PROGRAM_HEX_INIT_FILE=""
 PROGRAM_HEX_PRELOAD_TSV=""
 PROGRAM_HEX_PRELOAD_ENTRIES=0
+MEMORY_IMAGE=""
+MEMORY_IMAGE_ABS=""
+MEMORY_IMAGE_MAP=""
+MEMORY_IMAGE_MAP_ABS=""
+MEMORY_IMAGE_FORMAT="auto"
+MEMORY_IMAGE_MATERIALIZED=""
+MEMORY_IMAGE_INIT_FILE=""
+MEMORY_IMAGE_PRELOAD_TSV=""
+MEMORY_IMAGE_PRELOAD_ENTRIES=0
 EFFECTIVE_INIT_FILE=""
 ASSIGNS_PER_KERNEL=0
 HYBRID_MODE="off"
@@ -135,6 +149,12 @@ while [[ $# -gt 0 ]]; do
       PROGRAM_HEX_MAP="$2"; shift 2 ;;
     --program-hex-iterations)
       PROGRAM_HEX_ITERATIONS="$2"; shift 2 ;;
+    --memory-image)
+      MEMORY_IMAGE="$2"; shift 2 ;;
+    --memory-image-map)
+      MEMORY_IMAGE_MAP="$2"; shift 2 ;;
+    --memory-image-format)
+      MEMORY_IMAGE_FORMAT="$2"; shift 2 ;;
     --assigns-per-kernel)
       ASSIGNS_PER_KERNEL="$2"; shift 2 ;;
     --hybrid-mode)
@@ -377,6 +397,38 @@ fi
 if [[ -n "$PROGRAM_HEX_ITERATIONS" ]] && ! [[ "$PROGRAM_HEX_ITERATIONS" =~ ^[0-9]+$ ]]; then
   echo "Invalid --program-hex-iterations: $PROGRAM_HEX_ITERATIONS (expected integer >= 0)" >&2
   exit 2
+fi
+if [[ -n "$MEMORY_IMAGE_MAP" && -z "$MEMORY_IMAGE" ]]; then
+  echo "--memory-image-map requires --memory-image" >&2
+  exit 2
+fi
+if [[ -n "$MEMORY_IMAGE" && -z "$MEMORY_IMAGE_MAP" ]]; then
+  echo "--memory-image currently requires --memory-image-map" >&2
+  exit 2
+fi
+case "$MEMORY_IMAGE_FORMAT" in
+  auto|hex|bin) ;;
+  *)
+    echo "Invalid --memory-image-format: $MEMORY_IMAGE_FORMAT (expected auto|hex|bin)" >&2
+    exit 2 ;;
+esac
+if [[ -n "$PROGRAM_HEX" && -n "$MEMORY_IMAGE" ]]; then
+  echo "--program-hex and --memory-image are currently mutually exclusive" >&2
+  exit 2
+fi
+if [[ -n "$MEMORY_IMAGE" ]]; then
+  if [[ ! -f "$MEMORY_IMAGE" ]]; then
+    echo "--memory-image not found: $MEMORY_IMAGE" >&2
+    exit 2
+  fi
+  MEMORY_IMAGE_ABS="$(cd "$(dirname "$MEMORY_IMAGE")" && pwd)/$(basename "$MEMORY_IMAGE")"
+fi
+if [[ -n "$MEMORY_IMAGE_MAP" ]]; then
+  if [[ ! -f "$MEMORY_IMAGE_MAP" ]]; then
+    echo "--memory-image-map not found: $MEMORY_IMAGE_MAP" >&2
+    exit 2
+  fi
+  MEMORY_IMAGE_MAP_ABS="$(cd "$(dirname "$MEMORY_IMAGE_MAP")" && pwd)/$(basename "$MEMORY_IMAGE_MAP")"
 fi
 
 mkdir -p "$COMPILE_CACHE_DIR"
@@ -1138,20 +1190,178 @@ PY
   done <<<"$pyout"
 }
 
+materialize_memory_image_inputs() {
+  [[ -n "$MEMORY_IMAGE_ABS" ]] || return 0
+  local outdir="$1"
+  local vars_tsv="$2"
+  local pyout
+  pyout="$(python3 - "$MEMORY_IMAGE_ABS" "$MEMORY_IMAGE_MAP_ABS" "$MEMORY_IMAGE_FORMAT" "$outdir" "$vars_tsv" <<'PY'
+import csv
+import pathlib
+import sys
+
+def load_program_hex(path: pathlib.Path) -> dict[int, int]:
+    memory: dict[int, int] = {}
+    current_addr = 0
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.split("//", 1)[0].strip()
+        if not line:
+            continue
+        for token in line.split():
+            if token.startswith("@"):
+                current_addr = int(token[1:], 16)
+                continue
+            value = int(token, 16)
+            if value < 0 or value > 0xFF:
+                raise ValueError(f"memory image token out of byte range in {path}: {token}")
+            memory[current_addr] = value
+            current_addr += 1
+    if not memory:
+        raise ValueError(f"No memory data found in {path}")
+    return memory
+
+def load_memory_image(path: pathlib.Path, fmt: str) -> dict[int, int]:
+    cooked = fmt.lower()
+    if cooked == "auto":
+        cooked = "bin" if path.suffix.lower() in {".bin", ".img"} else "hex"
+    if cooked == "bin":
+        data = path.read_bytes()
+        if not data:
+            raise ValueError(f"No memory data found in {path}")
+        return {idx: value for idx, value in enumerate(data)}
+    if cooked == "hex":
+        return load_program_hex(path)
+    raise ValueError(f"Unsupported memory image format: {fmt}")
+
+def load_visible_preload_map(path: pathlib.Path) -> list[tuple[int, int, str]]:
+    entries: list[tuple[int, int, str]] = []
+    for lineno, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        toks = line.split()
+        if len(toks) == 2:
+            addr_text, var_name = toks
+            byte_count = 4
+        elif len(toks) == 3:
+            addr_text, byte_count_text, var_name = toks
+            byte_count = int(byte_count_text, 0)
+        else:
+            raise ValueError(
+                f"invalid memory_image_map line in {path}:{lineno}: expected 'addr var' or 'addr bytes var'"
+            )
+        addr = int(addr_text, 0)
+        if byte_count <= 0 or byte_count > 4:
+            raise ValueError(f"memory_image_map byte count must be in 1..4 at {path}:{lineno}")
+        entries.append((addr, byte_count, var_name))
+    if not entries:
+        raise ValueError(f"memory_image_map is empty: {path}")
+    return entries
+
+image = pathlib.Path(sys.argv[1]).resolve()
+image_map = pathlib.Path(sys.argv[2]).resolve()
+image_format = sys.argv[3]
+outdir = pathlib.Path(sys.argv[4]).resolve()
+vars_tsv = pathlib.Path(sys.argv[5]).resolve()
+
+memory = load_memory_image(image, image_format)
+materialized_suffix = ".materialized.bin" if (image_format == "bin" or (image_format == "auto" and image.suffix.lower() in {".bin", ".img"})) else ".materialized.hex"
+materialized = outdir / f"memory_image{materialized_suffix}"
+if materialized_suffix.endswith(".bin"):
+    addrs = sorted(memory.keys())
+    buf = bytearray(addrs[-1] + 1)
+    for addr, value in memory.items():
+        buf[addr] = value & 0xFF
+    materialized.write_bytes(bytes(buf))
+else:
+    addrs = sorted(memory.keys())
+    lines: list[str] = []
+    run_start = addrs[0]
+    run_bytes = [memory[run_start]]
+    last_addr = run_start
+
+    def flush(start_addr: int, data: list[int]) -> None:
+        lines.append(f"@{start_addr:08X}")
+        for idx in range(0, len(data), 16):
+            chunk = data[idx: idx + 16]
+            lines.append(" ".join(f"{byte:02X}" for byte in chunk))
+
+    for addr in addrs[1:]:
+        if addr == last_addr + 1:
+            run_bytes.append(memory[addr])
+        else:
+            flush(run_start, run_bytes)
+            run_start = addr
+            run_bytes = [memory[addr]]
+        last_addr = addr
+    flush(run_start, run_bytes)
+    materialized.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+map_entries = load_visible_preload_map(image_map)
+name_to_meta = {}
+with vars_tsv.open(encoding="utf-8") as fh:
+    for row in csv.DictReader(fh, delimiter='\t'):
+        name_to_meta[row["name"]] = (row["index"], row["width"])
+
+init_file = outdir / "memory_image.init"
+preload_tsv = outdir / "memory_image.preload.tsv"
+with init_file.open("w", encoding="utf-8") as ifh, preload_tsv.open("w", encoding="utf-8") as pfh:
+    pfh.write("address\tbyte_count\tvar_name\tvar_index\twidth\tvisible\n")
+    for addr, byte_count, var_name in map_entries:
+        value = 0
+        for byte_idx in range(byte_count):
+            value |= (memory.get(addr + byte_idx, 0) & 0xFF) << (8 * byte_idx)
+        ifh.write(f"{var_name} 0x{value:08X}\n")
+        meta = name_to_meta.get(var_name)
+        if meta is None:
+            pfh.write(f"0x{addr:08X}\t{byte_count}\t{var_name}\t-1\t-1\t0\n")
+        else:
+            pfh.write(f"0x{addr:08X}\t{byte_count}\t{var_name}\t{meta[0]}\t{meta[1]}\t1\n")
+
+print(f"materialized={materialized}")
+print(f"init_file={init_file}")
+print(f"preload_tsv={preload_tsv}")
+print(f"entry_count={len(map_entries)}")
+PY
+)"
+  while IFS='=' read -r key value; do
+    case "$key" in
+      materialized) MEMORY_IMAGE_MATERIALIZED="$value" ;;
+      init_file) MEMORY_IMAGE_INIT_FILE="$value" ;;
+      preload_tsv) MEMORY_IMAGE_PRELOAD_TSV="$value" ;;
+      entry_count) MEMORY_IMAGE_PRELOAD_ENTRIES="$value" ;;
+    esac
+  done <<<"$pyout"
+}
+
 materialize_effective_init_file() {
   EFFECTIVE_INIT_FILE=""
-  if [[ -n "$INIT_FILE_ABS" && -n "$PROGRAM_HEX_INIT_FILE" ]]; then
-    EFFECTIVE_INIT_FILE="$OUTDIR/effective.init"
-    cat "$INIT_FILE_ABS" > "$EFFECTIVE_INIT_FILE"
+  local parts=()
+  if [[ -n "$INIT_FILE_ABS" ]]; then
+    parts+=("$INIT_FILE_ABS")
+  fi
+  if [[ -n "$PROGRAM_HEX_INIT_FILE" ]]; then
+    parts+=("$PROGRAM_HEX_INIT_FILE")
+  fi
+  if [[ -n "$MEMORY_IMAGE_INIT_FILE" ]]; then
+    parts+=("$MEMORY_IMAGE_INIT_FILE")
+  fi
+  if [[ "${#parts[@]}" -eq 0 ]]; then
+    return 0
+  fi
+  if [[ "${#parts[@]}" -eq 1 ]]; then
+    EFFECTIVE_INIT_FILE="${parts[0]}"
+    return 0
+  fi
+  EFFECTIVE_INIT_FILE="$OUTDIR/effective.init"
+  : > "$EFFECTIVE_INIT_FILE"
+  local part
+  for part in "${parts[@]}"; do
+    cat "$part" >> "$EFFECTIVE_INIT_FILE"
     if [[ -s "$EFFECTIVE_INIT_FILE" ]] && [[ "$(tail -c1 "$EFFECTIVE_INIT_FILE" 2>/dev/null || true)" != "" ]]; then
       echo >> "$EFFECTIVE_INIT_FILE"
     fi
-    cat "$PROGRAM_HEX_INIT_FILE" >> "$EFFECTIVE_INIT_FILE"
-  elif [[ -n "$PROGRAM_HEX_INIT_FILE" ]]; then
-    EFFECTIVE_INIT_FILE="$PROGRAM_HEX_INIT_FILE"
-  elif [[ -n "$INIT_FILE_ABS" ]]; then
-    EFFECTIVE_INIT_FILE="$INIT_FILE_ABS"
-  fi
+  done
 }
 
 declare -a VERILATOR_SIM_ACCEL_ARGS=()
@@ -1291,6 +1501,7 @@ if [[ ! -s "$KERNEL_CU" || ! -s "$KERNEL_VARS" ]]; then
 fi
 
 materialize_program_hex_inputs "$OUTDIR" "$KERNEL_VARS"
+materialize_memory_image_inputs "$OUTDIR" "$KERNEL_VARS"
 materialize_effective_init_file
 
 echo "[2/4] Preparing benchmark sources..."
@@ -3254,6 +3465,20 @@ if [[ -n "$PROGRAM_HEX_ABS" ]]; then
     echo "program_hex_init_file=$PROGRAM_HEX_INIT_FILE"
     echo "program_hex_preload_tsv=$PROGRAM_HEX_PRELOAD_TSV"
     echo "program_hex_preload_entries=$PROGRAM_HEX_PRELOAD_ENTRIES"
+    if [[ -n "$EFFECTIVE_INIT_FILE" ]]; then
+      echo "effective_init_file=$EFFECTIVE_INIT_FILE"
+    fi
+  } >> "$OUTDIR/bench_run.log"
+fi
+if [[ -n "$MEMORY_IMAGE_ABS" ]]; then
+  {
+    echo "memory_image=$MEMORY_IMAGE_ABS"
+    echo "memory_image_map=$MEMORY_IMAGE_MAP_ABS"
+    echo "memory_image_format=$MEMORY_IMAGE_FORMAT"
+    echo "memory_image_materialized=$MEMORY_IMAGE_MATERIALIZED"
+    echo "memory_image_init_file=$MEMORY_IMAGE_INIT_FILE"
+    echo "memory_image_preload_tsv=$MEMORY_IMAGE_PRELOAD_TSV"
+    echo "memory_image_preload_entries=$MEMORY_IMAGE_PRELOAD_ENTRIES"
     if [[ -n "$EFFECTIVE_INIT_FILE" ]]; then
       echo "effective_init_file=$EFFECTIVE_INIT_FILE"
     fi

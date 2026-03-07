@@ -20,7 +20,14 @@ if PROGRAM_HEX_TOOLS_DIR.exists():
     sys.path.insert(0, str(PROGRAM_HEX_TOOLS_DIR))
 
 try:
-    from program_hex_tools import load_program_hex, patch_iterations, store_program_hex
+    from program_hex_tools import (
+        load_memory_image,
+        load_program_hex,
+        load_visible_preload_map,
+        patch_iterations,
+        store_memory_image,
+        store_program_hex,
+    )
 except ImportError:
     def load_program_hex(path: str | pathlib.Path) -> dict[int, int]:
         src = pathlib.Path(path).expanduser().resolve()
@@ -78,6 +85,71 @@ except ImportError:
         flush(run_start, run_bytes)
         dst.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
+    def load_memory_image(path: str | pathlib.Path, fmt: str = "auto") -> dict[int, int]:
+        src = pathlib.Path(path).expanduser().resolve()
+        cooked = fmt.lower()
+        if cooked == "auto":
+            cooked = "bin" if src.suffix.lower() in {".bin", ".img"} else "hex"
+        if cooked == "bin":
+            data = src.read_bytes()
+            if not data:
+                raise ValueError(f"No memory data found in {src}")
+            return {idx: value for idx, value in enumerate(data)}
+        if cooked == "hex":
+            return load_program_hex(src)
+        raise ValueError(f"Unsupported memory image format: {fmt}")
+
+    def store_memory_image(path: str | pathlib.Path, memory: dict[int, int], fmt: str = "bin") -> None:
+        dst = pathlib.Path(path).expanduser().resolve()
+        cooked = fmt.lower()
+        if cooked == "bin":
+            if not memory:
+                raise ValueError("Cannot write empty memory image")
+            addrs = sorted(memory.keys())
+            if addrs[0] < 0:
+                raise ValueError("Binary memory image requires non-negative offsets")
+            buf = bytearray(addrs[-1] + 1)
+            for addr, value in memory.items():
+                buf[addr] = value & 0xFF
+            dst.write_bytes(bytes(buf))
+            return
+        if cooked == "hex":
+            store_program_hex(dst, memory)
+            return
+        raise ValueError(f"Unsupported memory image format: {fmt}")
+
+    def load_visible_preload_map(path: str | pathlib.Path, label: str = "preload_map") -> list[tuple[int, int, str]]:
+        src = pathlib.Path(path).expanduser().resolve()
+        entries: list[tuple[int, int, str]] = []
+        for lineno, raw_line in enumerate(src.read_text(encoding="utf-8").splitlines(), start=1):
+            line = raw_line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            toks = line.split()
+            if len(toks) == 2:
+                addr_text, var_name = toks
+                byte_count = 4
+            elif len(toks) == 3:
+                addr_text, byte_count_text, var_name = toks
+                try:
+                    byte_count = int(byte_count_text, 0)
+                except ValueError as exc:
+                    raise ValueError(f"invalid byte count in {label} {src}:{lineno}: {byte_count_text}") from exc
+            else:
+                raise ValueError(
+                    f"invalid {label} line in {src}:{lineno}: expected 'addr var' or 'addr bytes var'"
+                )
+            try:
+                addr = int(addr_text, 0)
+            except ValueError as exc:
+                raise ValueError(f"invalid address in {label} {src}:{lineno}: {addr_text}") from exc
+            if byte_count <= 0 or byte_count > 4:
+                raise ValueError(f"{label} byte count must be in 1..4 at {src}:{lineno}")
+            entries.append((addr, byte_count, var_name))
+        if not entries:
+            raise ValueError(f"{label} is empty: {src}")
+        return entries
+
 try:
     from scenario_manifest_tools import load_sim_accel_manifest
 except ImportError:
@@ -124,7 +196,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scenario-manifest",
                         help=("JSON file with scenarios: "
                               "[{name, init_mode, init_seed, init_file, "
-                              "program_hex, program_hex_map, iterations}]"))
+                              "program_hex, program_hex_map, iterations, "
+                              "memory_image, memory_image_map, memory_image_format}]"))
     parser.add_argument("--keep-going", action="store_true",
                         help="Continue after scenario failures")
     parser.add_argument("--keep-scenario-outdirs", action="store_true",
@@ -172,38 +245,6 @@ def materialize_program_hex_variant(outdir: pathlib.Path, scenario: dict[str, An
     return dst
 
 
-def load_program_hex_map(path: pathlib.Path) -> list[tuple[int, int, str]]:
-    entries: list[tuple[int, int, str]] = []
-    for lineno, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        line = raw_line.split("#", 1)[0].strip()
-        if not line:
-            continue
-        toks = line.split()
-        if len(toks) == 2:
-            addr_text, var_name = toks
-            byte_count = 4
-        elif len(toks) == 3:
-            addr_text, byte_count_text, var_name = toks
-            try:
-                byte_count = int(byte_count_text, 0)
-            except ValueError as exc:
-                raise SystemExit(f"invalid byte count in program_hex_map {path}:{lineno}: {byte_count_text}") from exc
-        else:
-            raise SystemExit(
-                f"invalid program_hex_map line in {path}:{lineno}: expected 'addr var' or 'addr bytes var'"
-            )
-        try:
-            addr = int(addr_text, 0)
-        except ValueError as exc:
-            raise SystemExit(f"invalid address in program_hex_map {path}:{lineno}: {addr_text}") from exc
-        if byte_count <= 0 or byte_count > 4:
-            raise SystemExit(f"program_hex_map byte count must be in 1..4 at {path}:{lineno}")
-        entries.append((addr, byte_count, var_name))
-    if not entries:
-        raise SystemExit(f"program_hex_map is empty: {path}")
-    return entries
-
-
 def materialize_program_hex_init_file(outdir: pathlib.Path, scenario: dict[str, Any]) -> pathlib.Path | None:
     program_hex_map = scenario.get("program_hex_map")
     if not program_hex_map:
@@ -216,8 +257,59 @@ def materialize_program_hex_init_file(outdir: pathlib.Path, scenario: dict[str, 
     if load_program_hex is None:
         raise SystemExit("program_hex_tools.py is required to lower program_hex_map into init files")
     memory = load_program_hex(program_hex_path)
-    map_entries = load_program_hex_map(pathlib.Path(str(program_hex_map)).expanduser().resolve())
+    map_entries = load_visible_preload_map(pathlib.Path(str(program_hex_map)).expanduser().resolve(), "program_hex_map")
     dst = outdir / "scenario_inputs" / sanitize_name(str(scenario["name"])) / "program_hex.init"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = []
+    for addr, byte_count, var_name in map_entries:
+        value = 0
+        for byte_idx in range(byte_count):
+            value |= (memory.get(addr + byte_idx, 0) & 0xFF) << (8 * byte_idx)
+        lines.append(f"{var_name} 0x{value:08X}")
+    dst.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return dst
+
+
+def materialize_memory_image_variant(outdir: pathlib.Path, scenario: dict[str, Any]) -> pathlib.Path | None:
+    memory_image = scenario.get("memory_image")
+    if not memory_image:
+        return None
+    src = pathlib.Path(str(memory_image)).expanduser().resolve()
+    if not src.exists():
+        raise SystemExit(f"memory_image file not found: {src}")
+    image_format = str(scenario.get("memory_image_format") or "auto")
+    if load_memory_image is None or store_memory_image is None:
+        raise SystemExit("program_hex_tools.py is required to materialize memory-image scenarios")
+    memory = load_memory_image(src, image_format)
+    if image_format == "auto":
+        cooked_format = "bin" if src.suffix.lower() in {".bin", ".img"} else "hex"
+    else:
+        cooked_format = image_format.lower()
+    suffix = ".bin" if cooked_format == "bin" else ".hex"
+    dst = outdir / "scenario_inputs" / sanitize_name(str(scenario["name"])) / f"memory_image{suffix}"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    store_memory_image(dst, memory, cooked_format)
+    scenario["memory_image_format"] = cooked_format
+    return dst
+
+
+def materialize_memory_image_init_file(outdir: pathlib.Path, scenario: dict[str, Any]) -> pathlib.Path | None:
+    memory_image_map = scenario.get("memory_image_map")
+    if not memory_image_map:
+        return None
+    memory_image_path = scenario.get("memory_image_materialized") or scenario.get("memory_image")
+    if not memory_image_path:
+        raise SystemExit(
+            f"scenario '{scenario['name']}' uses memory_image_map but has no memory_image/memory_image_materialized"
+        )
+    if load_memory_image is None:
+        raise SystemExit("program_hex_tools.py is required to lower memory_image_map into init files")
+    memory = load_memory_image(memory_image_path, str(scenario.get("memory_image_format") or "auto"))
+    map_entries = load_visible_preload_map(
+        pathlib.Path(str(memory_image_map)).expanduser().resolve(),
+        "memory_image_map",
+    )
+    dst = outdir / "scenario_inputs" / sanitize_name(str(scenario["name"])) / "memory_image.init"
     dst.parent.mkdir(parents=True, exist_ok=True)
     lines: list[str] = []
     for addr, byte_count, var_name in map_entries:
@@ -233,10 +325,14 @@ def materialize_effective_init_file(outdir: pathlib.Path, scenario: dict[str, An
     init_parts: list[pathlib.Path] = []
     if scenario.get("init_file"):
         init_parts.append(pathlib.Path(str(scenario["init_file"])).expanduser().resolve())
-    generated = materialize_program_hex_init_file(outdir, scenario)
-    if generated is not None:
-        scenario["program_hex_init_file"] = str(generated)
-        init_parts.append(generated)
+    generated_program_hex = materialize_program_hex_init_file(outdir, scenario)
+    if generated_program_hex is not None:
+        scenario["program_hex_init_file"] = str(generated_program_hex)
+        init_parts.append(generated_program_hex)
+    generated_memory_image = materialize_memory_image_init_file(outdir, scenario)
+    if generated_memory_image is not None:
+        scenario["memory_image_init_file"] = str(generated_memory_image)
+        init_parts.append(generated_memory_image)
     if not init_parts:
         return None
     if len(init_parts) == 1:
@@ -266,6 +362,9 @@ def build_scenarios(args: argparse.Namespace) -> list[dict[str, Any]]:
                 "init_file": None,
                 "program_hex": None,
                 "program_hex_map": None,
+                "memory_image": None,
+                "memory_image_map": None,
+                "memory_image_format": "auto",
                 "iterations": None,
             })
     if args.scenario_init_files:
@@ -278,6 +377,9 @@ def build_scenarios(args: argparse.Namespace) -> list[dict[str, Any]]:
                 "init_file": str(path),
                 "program_hex": None,
                 "program_hex_map": None,
+                "memory_image": None,
+                "memory_image_map": None,
+                "memory_image_format": "auto",
                 "iterations": None,
             })
     if args.scenario_manifest:
@@ -298,6 +400,12 @@ def build_scenarios(args: argparse.Namespace) -> list[dict[str, Any]]:
                 f"warning: scenario '{scenario['name']}' carries program_hex/iterations metadata, "
                 "but the current sim-accel path does not lower that into runtime state yet; "
                 "provide init_file or program_hex_map if you need the scenario to affect execution.\n"
+            )
+        if scenario.get("memory_image") and not scenario.get("init_file") and not scenario.get("memory_image_map"):
+            sys.stderr.write(
+                f"warning: scenario '{scenario['name']}' carries memory_image metadata, "
+                "but the current sim-accel path does not lower that into runtime state yet; "
+                "provide init_file or memory_image_map if you need the scenario to affect execution.\n"
             )
     return scenarios
 
@@ -344,6 +452,11 @@ def write_tsv(path: pathlib.Path, rows: list[dict[str, Any]]) -> None:
         "program_hex_map",
         "program_hex_materialized",
         "program_hex_init_file",
+        "memory_image",
+        "memory_image_map",
+        "memory_image_format",
+        "memory_image_materialized",
+        "memory_image_init_file",
         "effective_init_file",
         "iterations",
         "cpu_reference_checked",
@@ -396,6 +509,9 @@ def main() -> int:
         materialized_program_hex = materialize_program_hex_variant(outdir, scenario)
         if materialized_program_hex is not None:
             scenario["program_hex_materialized"] = str(materialized_program_hex)
+        materialized_memory_image = materialize_memory_image_variant(outdir, scenario)
+        if materialized_memory_image is not None:
+            scenario["memory_image_materialized"] = str(materialized_memory_image)
         effective_init_file = materialize_effective_init_file(outdir, scenario)
         if effective_init_file is not None:
             scenario["effective_init_file"] = str(effective_init_file)
@@ -453,6 +569,11 @@ def main() -> int:
             "program_hex_map": scenario.get("program_hex_map") or "",
             "program_hex_materialized": scenario.get("program_hex_materialized") or "",
             "program_hex_init_file": scenario.get("program_hex_init_file") or "",
+            "memory_image": scenario.get("memory_image") or "",
+            "memory_image_map": scenario.get("memory_image_map") or "",
+            "memory_image_format": scenario.get("memory_image_format") or "",
+            "memory_image_materialized": scenario.get("memory_image_materialized") or "",
+            "memory_image_init_file": scenario.get("memory_image_init_file") or "",
             "effective_init_file": scenario.get("effective_init_file") or "",
             "iterations": scenario.get("iterations") if scenario.get("iterations") is not None else "",
             "cpu_reference_checked": metrics.get("cpu_reference_checked", ""),
@@ -479,6 +600,11 @@ def main() -> int:
             "program_hex_map": scenario.get("program_hex_map"),
             "program_hex_materialized": scenario.get("program_hex_materialized"),
             "program_hex_init_file": scenario.get("program_hex_init_file"),
+            "memory_image": scenario.get("memory_image"),
+            "memory_image_map": scenario.get("memory_image_map"),
+            "memory_image_format": scenario.get("memory_image_format"),
+            "memory_image_materialized": scenario.get("memory_image_materialized"),
+            "memory_image_init_file": scenario.get("memory_image_init_file"),
             "effective_init_file": scenario.get("effective_init_file"),
             "iterations": scenario.get("iterations"),
             "outdir": str(scenario_outdir),
