@@ -38,6 +38,9 @@ Options:
   --compile-cache-dir DIR  Reuse compiled bench binaries across runs
                            (default: /tmp/verilator-sim-accel-compile-cache)
   --no-compile-cache   Disable compiled bench cache reuse
+  --skip-cpu-reference-build
+                        Skip building/checking generated CPU reference
+                        (requires --hybrid-mode off)
 
 Init file format:
   - Comment lines start with '#'
@@ -83,6 +86,7 @@ HYBRID_CLUSTER_GROUP_SIZE=3
 HYBRID_CLUSTER_GROUP_AUTO_MAX_INPUT_BITS=128
 COMPILE_CACHE_DIR="${SIM_ACCEL_COMPILE_CACHE_DIR:-/tmp/verilator-sim-accel-compile-cache}"
 COMPILE_CACHE_ENABLED=1
+SKIP_CPU_REFERENCE_BUILD=0
 declare -a SOURCES=()
 INVOCATION_CWD="$(pwd)"
 
@@ -134,6 +138,8 @@ while [[ $# -gt 0 ]]; do
       COMPILE_CACHE_DIR="$2"; shift 2 ;;
     --no-compile-cache)
       COMPILE_CACHE_ENABLED=0; shift ;;
+    --skip-cpu-reference-build)
+      SKIP_CPU_REFERENCE_BUILD=1; shift ;;
     --help|-h)
       usage; exit 0 ;;
     --)
@@ -301,6 +307,10 @@ if [[ "$HYBRID_CLUSTER_GROUP_AUTO" -eq 0 && "$HYBRID_CLUSTER_GROUP_AUTO_MAX_INPU
   echo "--hybrid-cluster-group-auto-max-input-bits requires --hybrid-cluster-group-auto" >&2
   exit 2
 fi
+if [[ "$SKIP_CPU_REFERENCE_BUILD" -ne 0 && "$HYBRID_MODE" != "off" ]]; then
+  echo "--skip-cpu-reference-build requires --hybrid-mode off" >&2
+  exit 2
+fi
 
 case "$INIT_MODE" in
   random|zero|ones|counter) ;;
@@ -466,6 +476,7 @@ compute_compile_cache_key() {
     printf 'nvcc_flags=-O3 -std=c++17 -DSIM_ACCEL_PARTIAL_WRITE=1\n'
     printf 'bench_kernel_sha=%s\n' "$bench_sha"
     printf 'generated_bundle_sha=%s\n' "$bundle_sha"
+    printf 'skip_cpu_reference_build=%s\n' "$SKIP_CPU_REFERENCE_BUILD"
     printf 'hybrid_mode=%s\n' "$HYBRID_MODE"
     printf 'hybrid_cluster_build_index=%s\n' "${HYBRID_BUILD_CLUSTER_INDEX:-}"
     printf 'hybrid_cluster_build_indices=%s\n' "${HYBRID_BUILD_CLUSTER_INDICES:-}"
@@ -817,9 +828,14 @@ compute_object_cache_key() {
 build_cached_cuda_object() {
   local src="$1"
   local out_obj="$2"
+  local extra_flags="${3:-}"
+  local compile_flags="-O3 -std=c++17 -c"
+  if [[ -n "$extra_flags" ]]; then
+    compile_flags+=" $extra_flags"
+  fi
   local key compiler_id cache_obj tmp_obj namespace
   compiler_id="$(nvcc --version | tr '\n' '|')"
-  key="$(compute_object_cache_key "$compiler_id" "-O3 -std=c++17 -c" "$src")"
+  key="$(compute_object_cache_key "$compiler_id" "$compile_flags" "$src")"
   namespace="$(partition_object_namespace "$src")"
   cache_obj="$COMPILE_CACHE_DIR/object-cache/$namespace/$key.o"
   if [[ -f "$cache_obj" ]]; then
@@ -827,7 +843,7 @@ build_cached_cuda_object() {
     OBJECT_CACHE_HITS=$((OBJECT_CACHE_HITS + 1))
     return 0
   fi
-  nvcc -O3 -std=c++17 -c "$src" -o "$out_obj"
+  nvcc -O3 -std=c++17 -c $extra_flags "$src" -o "$out_obj"
   tmp_obj="$COMPILE_CACHE_DIR/.tmp.object.$key.$$"
   mkdir -p "$(dirname "$cache_obj")"
   cp "$out_obj" "$tmp_obj"
@@ -840,9 +856,14 @@ build_cached_cuda_object() {
 build_cached_cxx_object() {
   local src="$1"
   local out_obj="$2"
+  local extra_flags="${3:-}"
+  local compile_flags="-O3 -std=c++17 -c"
+  if [[ -n "$extra_flags" ]]; then
+    compile_flags+=" $extra_flags"
+  fi
   local key compiler_id cache_obj tmp_obj namespace
   compiler_id="$(g++ --version | tr '\n' '|')"
-  key="$(compute_object_cache_key "$compiler_id" "-O3 -std=c++17 -c" "$src")"
+  key="$(compute_object_cache_key "$compiler_id" "$compile_flags" "$src")"
   namespace="$(partition_object_namespace "$src")"
   cache_obj="$COMPILE_CACHE_DIR/object-cache/$namespace/$key.o"
   if [[ -f "$cache_obj" ]]; then
@@ -850,7 +871,7 @@ build_cached_cxx_object() {
     OBJECT_CACHE_HITS=$((OBJECT_CACHE_HITS + 1))
     return 0
   fi
-  g++ -O3 -std=c++17 -c "$src" -o "$out_obj"
+  g++ -O3 -std=c++17 -c $extra_flags "$src" -o "$out_obj"
   tmp_obj="$COMPILE_CACHE_DIR/.tmp.object.$key.$$"
   mkdir -p "$(dirname "$cache_obj")"
   cp "$out_obj" "$tmp_obj"
@@ -1035,6 +1056,12 @@ cat > "$OUTDIR/bench_kernel.cu" <<'CU'
 
 #ifdef SIM_ACCEL_PARTIAL_WRITE
 #undef SIM_ACCEL_PARTIAL_WRITE
+#endif
+
+#ifdef SIM_ACCEL_SKIP_CPU_REFERENCE_BUILD
+static constexpr bool kSimAccelSkipCpuReferenceBuild = true;
+#else
+static constexpr bool kSimAccelSkipCpuReferenceBuild = false;
 #endif
 
 static void checkCuda(cudaError_t st, const char* msg) {
@@ -1363,10 +1390,12 @@ static InitFileStats applyInitFile(std::vector<uint32_t>& h_in, uint32_t nvars, 
   return stats;
 }
 
+#ifndef SIM_ACCEL_SKIP_CPU_REFERENCE_BUILD
 static void sim_accel_eval_assignw_cpu(const uint32_t* state_in, uint32_t* state_out,
                                        uint32_t nstates) {
   sim_accel_eval_assignw_cpu_ref(state_in, state_out, nstates);
 }
+#endif
 
 static size_t chunkedIndex(uint32_t varIdx, uint32_t stateIdx, uint32_t nvars, uint32_t stateChunk) {
   const uint32_t chunkId = stateIdx / stateChunk;
@@ -2000,6 +2029,7 @@ int main(int argc, char** argv) {
     }
   }
 
+  #ifndef SIM_ACCEL_SKIP_CPU_REFERENCE_BUILD
   auto runCpuPartitionPass = [&](std::vector<uint32_t>& stateOut) {
     stateOut = h_in_varmajor;
     for (uint32_t partitionIdx = 0; partitionIdx < partitionCount; ++partitionIdx) {
@@ -2228,10 +2258,37 @@ int main(int argc, char** argv) {
       }
     }
   };
+  #else
+  auto failSkippedCpuReferenceHybrid = [&]() {
+    std::cerr << "Internal error: hybrid execution requires CPU reference build\n";
+    std::exit(2);
+  };
+
+  auto runCpuPartitionPass = [&](std::vector<uint32_t>&) {
+    failSkippedCpuReferenceHybrid();
+  };
+
+  auto runCpuClusterPass = [&](std::vector<uint32_t>&) {
+    failSkippedCpuReferenceHybrid();
+  };
+
+  auto runHybridPartitionPass = [&](std::vector<uint32_t>&, HybridTimingStats*) {
+    failSkippedCpuReferenceHybrid();
+  };
+
+  auto runHybridClusterPass = [&](std::vector<uint32_t>&, HybridTimingStats*) {
+    failSkippedCpuReferenceHybrid();
+  };
+
+  auto runHybridClusterGroupPass = [&](std::vector<uint32_t>&, HybridTimingStats*) {
+    failSkippedCpuReferenceHybrid();
+  };
+  #endif
 
   std::vector<uint32_t> h_out_gpu_varmajor;
   std::vector<uint32_t> h_out_hybrid_varmajor(elems, 0u);
   float gpu_ms = 0.0f;
+  double cpu_ms = 0.0;
   double hybrid_ms = 0.0;
   double hybrid_cpu_ms = 0.0;
   HybridTimingStats hybridTimingTotal;
@@ -2328,19 +2385,23 @@ int main(int argc, char** argv) {
     hybrid_cpu_ms = std::chrono::duration<double, std::milli>(hybrid_cpu_t1 - hybrid_cpu_t0).count();
   }
 
-  auto cpu_t0 = std::chrono::high_resolution_clock::now();
-  for (int i = 0; i < cpu_reps; ++i) {
-    sim_accel_eval_assignw_cpu(h_in_varmajor.data(), h_out_cpu_varmajor.data(), nstates);
+#ifndef SIM_ACCEL_SKIP_CPU_REFERENCE_BUILD
+  {
+    auto cpu_t0 = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < cpu_reps; ++i) {
+      sim_accel_eval_assignw_cpu(h_in_varmajor.data(), h_out_cpu_varmajor.data(), nstates);
+    }
+    auto cpu_t1 = std::chrono::high_resolution_clock::now();
+    cpu_ms = std::chrono::duration<double, std::milli>(cpu_t1 - cpu_t0).count();
   }
-  auto cpu_t1 = std::chrono::high_resolution_clock::now();
-  const double cpu_ms = std::chrono::duration<double, std::milli>(cpu_t1 - cpu_t0).count();
-
-  sim_accel_eval_assignw_cpu(h_in_varmajor.data(), h_out_cpu_varmajor.data(), nstates);
+#endif
   size_t mismatch = 0;
-  const std::vector<uint32_t> h_out_cpu_compact
-      = gatherSlotsVarMajor(h_out_cpu_varmajor, outputVarIdxs, nstates);
   size_t compactMismatch = 0;
   size_t hybridMismatch = 0;
+#ifndef SIM_ACCEL_SKIP_CPU_REFERENCE_BUILD
+  sim_accel_eval_assignw_cpu(h_in_varmajor.data(), h_out_cpu_varmajor.data(), nstates);
+  const std::vector<uint32_t> h_out_cpu_compact
+      = gatherSlotsVarMajor(h_out_cpu_varmajor, outputVarIdxs, nstates);
   if (hybridMode == "off") {
     for (size_t i = 0; i < elems; ++i) {
       if (h_out_cpu_varmajor[i] != h_out_gpu_varmajor[i]) ++mismatch;
@@ -2353,6 +2414,7 @@ int main(int argc, char** argv) {
       if (h_out_cpu_varmajor[i] != h_out_hybrid_varmajor[i]) ++hybridMismatch;
     }
   }
+#endif
 
   const double gpu_ms_per_rep = (hybridMode == "off") ? (gpu_ms / gpu_reps) : 0.0;
   const double cpu_ms_per_rep = cpu_ms / cpu_reps;
@@ -2381,6 +2443,8 @@ int main(int argc, char** argv) {
   std::cout << "kernel_clusters=" << clusterCount << "\n";
   std::cout << "state_chunks=" << nchunks << "\n";
   std::cout << "padded_states=" << paddedStates << "\n";
+  std::cout << "cpu_reference_build=" << (kSimAccelSkipCpuReferenceBuild ? 0 : 1) << "\n";
+  std::cout << "cpu_reference_checked=" << (kSimAccelSkipCpuReferenceBuild ? 0 : 1) << "\n";
   std::cout << "init_mode=" << initMode << "\n";
   std::cout << "init_seed=" << initSeed << "\n";
   if (!initFile.empty()) {
@@ -2393,7 +2457,11 @@ int main(int argc, char** argv) {
   std::cout << "gpu_ms_per_rep=" << gpu_ms_per_rep << "\n";
   std::cout << "cpu_ms_per_rep=" << cpu_ms_per_rep << "\n";
   if (hybridMode == "off") {
-    std::cout << "speedup_gpu_over_cpu=" << speedup << "x\n";
+    if (!kSimAccelSkipCpuReferenceBuild) {
+      std::cout << "speedup_gpu_over_cpu=" << speedup << "x\n";
+    } else {
+      std::cout << "speedup_gpu_over_cpu=skipped\n";
+    }
   } else if (hybridMode == "single-partition") {
     std::cout << "hybrid_partition_index=" << hybridPartitionIndex << "\n";
     std::cout << "hybrid_partition_assign_count="
@@ -2514,7 +2582,10 @@ int main(int argc, char** argv) {
   if (d_hybridWriteCompact) cudaFree(d_hybridWriteCompact);
   cudaFree(d_in);
   cudaFree(d_out);
-  return (hybridMode == "off") ? (mismatch == 0 ? 0 : 1) : (hybridMismatch == 0 ? 0 : 1);
+  if (hybridMode == "off") {
+    return kSimAccelSkipCpuReferenceBuild ? 0 : (mismatch == 0 ? 0 : 1);
+  }
+  return hybridMismatch == 0 ? 0 : 1;
 }
 CU
 
@@ -2559,12 +2630,18 @@ HYBRID_BUILD_CLUSTER_GROUP_STATIC_SCORE=""
 HYBRID_BUILD_CLUSTER_GROUP_WEIGHTED_OPS=""
 HYBRID_BUILD_CLUSTER_GROUP_INPUT_BITS=""
 HYBRID_BUILD_CLUSTER_GROUP_ASSIGN_COUNT=""
-if [[ -f "$OUTDIR/kernel_generated.api.h" && -f "$OUTDIR/kernel_generated.cpu.cpp" && -f "$OUTDIR/kernel_generated.link.cu" ]]; then
+if [[ -f "$OUTDIR/kernel_generated.api.h" && -f "$OUTDIR/kernel_generated.link.cu" ]] \
+   && ([[ "$SKIP_CPU_REFERENCE_BUILD" -ne 0 ]] || [[ -f "$OUTDIR/kernel_generated.cpu.cpp" ]]); then
   mapfile -t PARTITION_SOURCES < <(find "$OUTDIR" -maxdepth 1 -type f -name 'kernel_generated.part*.cu' | LC_ALL=C sort)
   mapfile -t CLUSTER_SOURCES < <(find "$OUTDIR" -maxdepth 1 -type f -name 'kernel_generated.cluster*.cu' | LC_ALL=C sort)
   if (( ${#PARTITION_SOURCES[@]} > 0 || ${#CLUSTER_SOURCES[@]} > 0 )); then
     USE_PARTITION_OBJECTS=1
   fi
+fi
+
+BENCH_CUDA_EXTRA_FLAGS=""
+if [[ "$SKIP_CPU_REFERENCE_BUILD" -ne 0 ]]; then
+  BENCH_CUDA_EXTRA_FLAGS="-DSIM_ACCEL_SKIP_CPU_REFERENCE_BUILD=1"
 fi
 
 if [[ "$HYBRID_MODE" == "single-cluster" && "$USE_PARTITION_OBJECTS" -eq 1 ]]; then
@@ -2669,9 +2746,8 @@ if [[ "$COMPILE_CACHE_ENABLED" -eq 1 ]]; then
       rm -rf "$OBJ_DIR"
       mkdir -p "$OBJ_DIR"
       {
-        build_cached_cuda_object "bench_kernel.cu" "$OBJ_DIR/bench_kernel.o"
+        build_cached_cuda_object "bench_kernel.cu" "$OBJ_DIR/bench_kernel.o" "$BENCH_CUDA_EXTRA_FLAGS"
         build_cached_cuda_object "kernel_generated.link.cu" "$OBJ_DIR/kernel_generated.link.o"
-        build_cached_cxx_object "kernel_generated.cpu.cpp" "$OBJ_DIR/kernel_generated.cpu.o"
         declare -a PARTITION_OBJECTS=()
         for src in "${PARTITION_SOURCES[@]}"; do
           obj="$OBJ_DIR/$(basename "$src").o"
@@ -2683,8 +2759,12 @@ if [[ "$COMPILE_CACHE_ENABLED" -eq 1 ]]; then
           build_cached_cuda_object "$src" "$obj"
           PARTITION_OBJECTS+=("$obj")
         done
-        nvcc -O3 -std=c++17 "$OBJ_DIR/bench_kernel.o" "$OBJ_DIR/kernel_generated.link.o" \
-          "$OBJ_DIR/kernel_generated.cpu.o" "${PARTITION_OBJECTS[@]}" -o bench_kernel
+        declare -a LINK_OBJECTS=("$OBJ_DIR/bench_kernel.o" "$OBJ_DIR/kernel_generated.link.o")
+        if [[ "$SKIP_CPU_REFERENCE_BUILD" -eq 0 ]]; then
+          build_cached_cxx_object "kernel_generated.cpu.cpp" "$OBJ_DIR/kernel_generated.cpu.o"
+          LINK_OBJECTS+=("$OBJ_DIR/kernel_generated.cpu.o")
+        fi
+        nvcc -O3 -std=c++17 "${LINK_OBJECTS[@]}" "${PARTITION_OBJECTS[@]}" -o bench_kernel
       } > build_nvcc.log 2>&1
       cd "$OLD_PWD_SIM_ACCEL"
       BUILD_END="$(date +%s.%N)"
@@ -2693,7 +2773,7 @@ if [[ "$COMPILE_CACHE_ENABLED" -eq 1 ]]; then
       (
         cd "$OUTDIR"
         /usr/bin/time -f "%e" -o "$TIME_NVCC" \
-          nvcc -O3 -std=c++17 -DSIM_ACCEL_PARTIAL_WRITE=1 bench_kernel.cu -o bench_kernel > build_nvcc.log 2>&1
+          nvcc -O3 -std=c++17 -DSIM_ACCEL_PARTIAL_WRITE=1 $BENCH_CUDA_EXTRA_FLAGS bench_kernel.cu -o bench_kernel > build_nvcc.log 2>&1
       )
     fi
     NVCC_CACHE_MODE="miss"
@@ -2724,9 +2804,8 @@ else
     rm -rf "$OBJ_DIR"
     mkdir -p "$OBJ_DIR"
     {
-      build_cached_cuda_object "bench_kernel.cu" "$OBJ_DIR/bench_kernel.o"
+      build_cached_cuda_object "bench_kernel.cu" "$OBJ_DIR/bench_kernel.o" "$BENCH_CUDA_EXTRA_FLAGS"
       build_cached_cuda_object "kernel_generated.link.cu" "$OBJ_DIR/kernel_generated.link.o"
-      build_cached_cxx_object "kernel_generated.cpu.cpp" "$OBJ_DIR/kernel_generated.cpu.o"
       declare -a PARTITION_OBJECTS=()
       for src in "${PARTITION_SOURCES[@]}"; do
         obj="$OBJ_DIR/$(basename "$src").o"
@@ -2738,8 +2817,12 @@ else
         build_cached_cuda_object "$src" "$obj"
         PARTITION_OBJECTS+=("$obj")
       done
-      nvcc -O3 -std=c++17 "$OBJ_DIR/bench_kernel.o" "$OBJ_DIR/kernel_generated.link.o" \
-        "$OBJ_DIR/kernel_generated.cpu.o" "${PARTITION_OBJECTS[@]}" -o bench_kernel
+      declare -a LINK_OBJECTS=("$OBJ_DIR/bench_kernel.o" "$OBJ_DIR/kernel_generated.link.o")
+      if [[ "$SKIP_CPU_REFERENCE_BUILD" -eq 0 ]]; then
+        build_cached_cxx_object "kernel_generated.cpu.cpp" "$OBJ_DIR/kernel_generated.cpu.o"
+        LINK_OBJECTS+=("$OBJ_DIR/kernel_generated.cpu.o")
+      fi
+      nvcc -O3 -std=c++17 "${LINK_OBJECTS[@]}" "${PARTITION_OBJECTS[@]}" -o bench_kernel
     } > build_nvcc.log 2>&1
     cd "$OLD_PWD_SIM_ACCEL"
     BUILD_END="$(date +%s.%N)"
@@ -2748,7 +2831,7 @@ else
     (
       cd "$OUTDIR"
       /usr/bin/time -f "%e" -o "$TIME_NVCC" \
-        nvcc -O3 -std=c++17 -DSIM_ACCEL_PARTIAL_WRITE=1 bench_kernel.cu -o bench_kernel > build_nvcc.log 2>&1
+        nvcc -O3 -std=c++17 -DSIM_ACCEL_PARTIAL_WRITE=1 $BENCH_CUDA_EXTRA_FLAGS bench_kernel.cu -o bench_kernel > build_nvcc.log 2>&1
     )
   fi
 fi

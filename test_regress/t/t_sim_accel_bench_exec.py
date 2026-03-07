@@ -31,11 +31,13 @@ cache_dir = test.obj_dir + "/sim_accel_cache"
 bench_dir_miss = test.obj_dir + "/sim_accel_bench_miss"
 bench_dir_hit = test.obj_dir + "/sim_accel_bench_hit"
 bench_dir_objhit = test.obj_dir + "/sim_accel_bench_object_hit"
+bench_dir_skip = test.obj_dir + "/sim_accel_bench_skip_cpu_ref"
 bench_dir_hybrid = test.obj_dir + "/sim_accel_bench_hybrid"
 bench_dir_hybrid_cluster = test.obj_dir + "/sim_accel_bench_hybrid_cluster"
 bench_dir_hybrid_cluster_auto = test.obj_dir + "/sim_accel_bench_hybrid_cluster_auto"
 bench_run_log = bench_dir_hit + "/bench_run.log"
 bench_objhit_log = bench_dir_objhit + "/bench_run.log"
+bench_skip_log = bench_dir_skip + "/bench_run.log"
 bench_hybrid_log = bench_dir_hybrid + "/bench_run.log"
 bench_hybrid_cluster_log = bench_dir_hybrid_cluster + "/bench_run.log"
 bench_hybrid_cluster_auto_log = bench_dir_hybrid_cluster_auto + "/bench_run.log"
@@ -50,7 +52,7 @@ kernel_link = kernel_cu + ".link.cu"
 kernel_parts = kernel_cu + ".partitions.tsv"
 
 for path in [cache_dir, bench_dir_miss, bench_dir_hit, bench_dir_objhit, bench_dir_hybrid,
-             bench_dir_hybrid_cluster, bench_dir_hybrid_cluster_auto]:
+             bench_dir_skip, bench_dir_hybrid_cluster, bench_dir_hybrid_cluster_auto]:
     shutil.rmtree(path, ignore_errors=True)
 
 bench_cmd = (
@@ -82,6 +84,17 @@ bench_cmd_object_hit = (
     + " --assigns-per-kernel 2"
     + " --compile-cache-dir " + cache_dir
     + " --no-compile-cache"
+    + " -- "
+    + test.t_dir + "/t_sim_accel_bench_exec.v")
+bench_cmd_skip = (
+    os.environ["VERILATOR_ROOT"] + "/bin/verilator --sim-accel-bench"
+    + " --top-module t"
+    + " --nstates 2048"
+    + " --gpu-reps 4"
+    + " --cpu-reps 2"
+    + " --assigns-per-kernel 2"
+    + " --compile-cache-dir " + cache_dir
+    + " --skip-cpu-reference-build"
     + " -- "
     + test.t_dir + "/t_sim_accel_bench_exec.v")
 bench_cmd_hybrid = (
@@ -125,6 +138,7 @@ bench_cmd_hybrid_cluster_auto = (
 test.run_capture(bench_cmd.replace("-- ", "--outdir " + bench_dir_miss + " -- ", 1))
 test.run_capture(bench_cmd_hit.replace("-- ", "--outdir " + bench_dir_hit + " -- ", 1))
 test.run_capture(bench_cmd_object_hit.replace("-- ", "--outdir " + bench_dir_objhit + " -- ", 1))
+test.run_capture(bench_cmd_skip.replace("-- ", "--outdir " + bench_dir_skip + " -- ", 1))
 test.run_capture(bench_cmd_hybrid.replace("-- ", "--outdir " + bench_dir_hybrid + " -- ", 1))
 test.run_capture(
     bench_cmd_hybrid_cluster.replace("-- ", "--outdir " + bench_dir_hybrid_cluster + " -- ", 1))
@@ -151,6 +165,12 @@ test.file_grep(bench_run_log, r"mismatch=0")
 test.file_grep(bench_run_log, r"compact_mismatch=0")
 test.file_grep(bench_objhit_log, r"mismatch=0")
 test.file_grep(bench_objhit_log, r"compact_mismatch=0")
+test.file_grep(bench_skip_log, r"cpu_reference_build=0")
+test.file_grep(bench_skip_log, r"cpu_reference_checked=0")
+test.file_grep(bench_skip_log, r"cpu_ms_per_rep=0\.000000")
+test.file_grep(bench_skip_log, r"speedup_gpu_over_cpu=skipped")
+test.file_grep(bench_skip_log, r"mismatch=0")
+test.file_grep(bench_skip_log, r"compact_mismatch=0")
 test.file_grep(bench_hybrid_log, r"hybrid_mode=single-partition")
 test.file_grep(bench_hybrid_log, r"hybrid_partition_index=1")
 test.file_grep(bench_hybrid_log, r"hybrid_partition_assign_count=")
