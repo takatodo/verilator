@@ -26,6 +26,11 @@ except ImportError:
     patch_iterations = None
     store_program_hex = None
 
+try:
+    from scenario_manifest_tools import load_sim_accel_manifest
+except ImportError:
+    load_sim_accel_manifest = None
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -197,20 +202,6 @@ def materialize_effective_init_file(outdir: pathlib.Path, scenario: dict[str, An
     return dst
 
 
-def load_manifest(path: pathlib.Path) -> list[dict[str, Any]]:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if isinstance(data, dict):
-        data = data.get("scenarios", [])
-    if not isinstance(data, list):
-        raise ValueError(f"scenario manifest must be a list or {{\"scenarios\": [...]}}: {path}")
-    scenarios: list[dict[str, Any]] = []
-    for idx, item in enumerate(data):
-        if not isinstance(item, dict):
-            raise ValueError(f"scenario manifest entry {idx} is not an object")
-        scenarios.append(item)
-    return scenarios
-
-
 def build_scenarios(args: argparse.Namespace) -> list[dict[str, Any]]:
     scenarios: list[dict[str, Any]] = []
     if args.scenario_seeds:
@@ -238,29 +229,10 @@ def build_scenarios(args: argparse.Namespace) -> list[dict[str, Any]]:
                 "iterations": None,
             })
     if args.scenario_manifest:
-        for idx, item in enumerate(load_manifest(pathlib.Path(args.scenario_manifest).expanduser().resolve())):
-            name = sanitize_name(str(item.get("name") or f"manifest{idx:03d}"))
-            init_mode = str(item.get("init_mode") or args.init_mode)
-            init_seed = int(item.get("init_seed", args.init_seed))
-            init_file = item.get("init_file")
-            program_hex = item.get("program_hex")
-            program_hex_map = item.get("program_hex_map")
-            iterations = item.get("iterations")
-            if init_file:
-                init_file = str(pathlib.Path(str(init_file)).expanduser().resolve())
-            if program_hex:
-                program_hex = str(pathlib.Path(str(program_hex)).expanduser().resolve())
-            if program_hex_map:
-                program_hex_map = str(pathlib.Path(str(program_hex_map)).expanduser().resolve())
-            scenarios.append({
-                "name": name,
-                "init_mode": init_mode,
-                "init_seed": init_seed,
-                "init_file": init_file,
-                "program_hex": program_hex,
-                "program_hex_map": program_hex_map,
-                "iterations": iterations,
-            })
+        if load_sim_accel_manifest is None:
+            raise SystemExit("scenario_manifest_tools.py is required to use --scenario-manifest")
+        for item in load_sim_accel_manifest(args.scenario_manifest, args.init_mode, args.init_seed):
+            scenarios.append(item)
     if not scenarios:
         raise SystemExit("No scenarios specified. Use --scenario-seeds, --scenario-init-files, or --scenario-manifest.")
     # Preserve order but ensure stable unique names.
