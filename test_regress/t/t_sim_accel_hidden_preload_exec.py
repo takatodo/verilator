@@ -46,6 +46,8 @@ memory_init = bench_dir + "/memory_image.init"
 memory_payload = bench_dir + "/memory_image.payload.tsv"
 hidden_storage = bench_dir + "/array_preload.hidden.tsv"
 target_summary = bench_dir + "/array_preload.targets.tsv"
+hidden_target_summary = bench_dir + "/array_preload.hidden_targets.tsv"
+hidden_target_dir = bench_dir + "/array_preload.hidden_targets.d"
 
 for path in [cache_dir, probe_dir, bench_dir]:
     shutil.rmtree(path, ignore_errors=True)
@@ -125,6 +127,10 @@ for filename in [bench_log, memory_init, memory_payload, target_summary]:
         test.error("Expected output file not found: " + filename)
 if os.path.exists(hidden_storage):
     test.error("Did not expect hidden storage dump for fully materialized hidden preload")
+if os.path.exists(hidden_target_summary):
+    test.error("Did not expect hidden target summary for fully materialized hidden preload")
+if os.path.exists(hidden_target_dir):
+    test.error("Did not expect hidden target directory for fully materialized hidden preload")
 
 test.file_grep(target_path, r'"var_name": "t__DOT__hidden_mem__BRA__0__KET__"')
 test.file_grep(target_path, r'"var_name": "t__DOT__hidden_mem__BRA__3__KET__"')

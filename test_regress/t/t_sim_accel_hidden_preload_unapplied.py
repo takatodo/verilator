@@ -44,6 +44,9 @@ bench_log = bench_dir + "/bench_run.log"
 memory_payload = bench_dir + "/memory_image.payload.tsv"
 hidden_storage = bench_dir + "/array_preload.hidden.tsv"
 target_summary = bench_dir + "/array_preload.targets.tsv"
+hidden_target_summary = bench_dir + "/array_preload.hidden_targets.tsv"
+hidden_target_dir = bench_dir + "/array_preload.hidden_targets.d"
+hidden_target_file = hidden_target_dir + "/0000_t.hidden_mem.tsv"
 
 for path in [cache_dir, probe_dir, bench_dir]:
     shutil.rmtree(path, ignore_errors=True)
@@ -105,7 +108,7 @@ bench_cmd = (
     + test.t_dir + "/t_sim_accel_hidden_preload_unmapped.v")
 test.run_capture(bench_cmd)
 
-for filename in [bench_log, memory_payload, hidden_storage, target_summary]:
+for filename in [bench_log, memory_payload, hidden_storage, target_summary, hidden_target_summary, hidden_target_file]:
     if not os.path.exists(filename):
         test.error("Expected bench artifact not found: " + filename)
 
@@ -130,6 +133,8 @@ test.file_grep(bench_log, r"array_preload_hidden_storage_targets=1")
 test.file_grep(bench_log, r"array_preload_hidden_storage_words=17")
 test.file_grep(bench_log, r"array_preload_target_summary_tsv=array_preload\.targets\.tsv")
 test.file_grep(bench_log, r"array_preload_hidden_storage_tsv=array_preload\.hidden\.tsv")
+test.file_grep(bench_log, r"array_preload_hidden_target_summary_tsv=array_preload\.hidden_targets\.tsv")
+test.file_grep(bench_log, r"array_preload_hidden_target_dir=array_preload\.hidden_targets\.d")
 test.file_grep(bench_log, r"array_preload_mapped_rules_applied=0")
 test.file_grep(bench_log, r"array_preload_mapped_values_applied=0")
 test.file_grep(bench_log, r"array_preload_lines_ignored=0")
@@ -145,6 +150,17 @@ test.file_grep(
 test.file_grep(
     target_summary,
     r"^t\.hidden_mem\t32\t0x00000000\t4\tlittle\t17\t17\t0\t1$")
+test.file_grep(
+    hidden_target_summary,
+    r"^target_path\tstorage_tsv\thidden_words$")
+test.file_grep(
+    hidden_target_summary,
+    r"^t\.hidden_mem\tarray_preload\.hidden_targets\.d/0000_t\.hidden_mem\.tsv\t17$")
+test.file_grep(
+    hidden_target_file,
+    r"^target_path\tword_index\tvalue_hex\tword_bits\tbase_addr\taddress_unit_bytes\tendianness$")
+test.file_grep(hidden_target_file, r"^t\.hidden_mem\t0\t0x0000000A\t32\t0x00000000\t4\tlittle$")
+test.file_grep(hidden_target_file, r"^t\.hidden_mem\t16\t0x000000AA\t32\t0x00000000\t4\tlittle$")
 test.file_grep(memory_payload, r"^target_path\tword_index\tvalue_hex\tword_bits\tbase_addr\taddress_unit_bytes\tendianness\tvar_name\tvar_index\twidth\tvisible$")
 test.file_grep(memory_payload, r"^t\.hidden_mem\t0\t0x0000000A\t32\t0x00000000\t4\tlittle\t\t-1\t-1\t0$")
 test.file_grep(memory_payload, r"^t\.hidden_mem\t16\t0x000000AA\t32\t0x00000000\t4\tlittle\t\t-1\t-1\t0$")

@@ -3,6 +3,53 @@ set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
 
+split_hidden_storage_by_target() {
+  local hidden_tsv="$1"
+  local outdir="$2"
+  local summary_tsv="$3"
+  local target_dir="$4"
+  python3 - "$hidden_tsv" "$outdir" "$summary_tsv" "$target_dir" <<'PY'
+import csv
+import os
+import re
+import sys
+from collections import OrderedDict
+
+hidden_tsv, outdir, summary_tsv, target_dir = sys.argv[1:5]
+if not os.path.exists(hidden_tsv):
+    sys.exit(0)
+
+os.makedirs(os.path.join(outdir, target_dir), exist_ok=True)
+groups = OrderedDict()
+with open(hidden_tsv, newline="", encoding="utf-8") as fh:
+    reader = csv.DictReader(fh, delimiter="\t")
+    for row in reader:
+        target = row["target_path"]
+        groups.setdefault(target, []).append(row)
+
+with open(os.path.join(outdir, summary_tsv), "w", encoding="utf-8", newline="") as sf:
+    sw = csv.writer(sf, delimiter="\t")
+    sw.writerow(["target_path", "storage_tsv", "hidden_words"])
+    for idx, (target, rows) in enumerate(groups.items()):
+        safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", target).strip("._")
+        if not safe:
+            safe = f"target_{idx}"
+        leaf = f"{idx:04d}_{safe}.tsv"
+        rel = os.path.join(target_dir, leaf)
+        full = os.path.join(outdir, rel)
+        with open(full, "w", encoding="utf-8", newline="") as tf:
+            tw = csv.writer(tf, delimiter="\t")
+            tw.writerow(["target_path", "word_index", "value_hex", "word_bits",
+                         "base_addr", "address_unit_bytes", "endianness"])
+            for row in rows:
+                tw.writerow([
+                    row["target_path"], row["word_index"], row["value_hex"], row["word_bits"],
+                    row["base_addr"], row["address_unit_bytes"], row["endianness"],
+                ])
+        sw.writerow([target, rel, len(rows)])
+PY
+}
+
 usage() {
   cat <<EOF2
 Usage:
@@ -4064,6 +4111,22 @@ if [[ -s "$KERNEL_DEPS" ]]; then
 fi
 
 append_partition_canonical_stats "$KERNEL_PARTITIONS" "$OUTDIR/bench_run.log"
+
+ARRAY_PRELOAD_HIDDEN_TARGET_DIR="array_preload.hidden_targets.d"
+ARRAY_PRELOAD_HIDDEN_TARGET_SUMMARY="array_preload.hidden_targets.tsv"
+if [[ -f "$OUTDIR/array_preload.hidden.tsv" ]]; then
+  split_hidden_storage_by_target \
+    "$OUTDIR/array_preload.hidden.tsv" \
+    "$OUTDIR" \
+    "$ARRAY_PRELOAD_HIDDEN_TARGET_SUMMARY" \
+    "$ARRAY_PRELOAD_HIDDEN_TARGET_DIR"
+  if [[ -f "$OUTDIR/$ARRAY_PRELOAD_HIDDEN_TARGET_SUMMARY" ]]; then
+    {
+      echo "array_preload_hidden_target_summary_tsv=$ARRAY_PRELOAD_HIDDEN_TARGET_SUMMARY"
+      echo "array_preload_hidden_target_dir=$ARRAY_PRELOAD_HIDDEN_TARGET_DIR"
+    } >> "$OUTDIR/bench_run.log"
+  fi
+fi
 
 echo "== C++ direct benchmark complete =="
 echo "outdir: $OUTDIR"
