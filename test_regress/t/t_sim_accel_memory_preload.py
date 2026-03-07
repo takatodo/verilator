@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+# DESCRIPTION: Verilator: Verifies generated memory-array preload targets for sim-accel
+#
+# This program is free software; you can redistribute it and/or modify it
+# under the terms of either the GNU Lesser General Public License Version 3
+# or the Perl Artistic License Version 2.0.
+# SPDX-FileCopyrightText: 2026 Wilson Snyder
+# SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
+
+import json
+import os
+import pathlib
+import shutil
+import tempfile
+
+import vltest_bootstrap
+
+test.scenarios('vlt')
+
+
+def require_or_skip(message: str) -> None:
+    if os.getenv("VERILATOR_TEST_REQUIRE_SIM_ACCEL_CUDA") or os.getenv("VERILATOR_TEST_REQUIRE_GEM_CUDA"):
+        test.error(message)
+    else:
+        test.skip(message)
+
+
+if not test.run_capture("nvcc --version", check=False):
+    require_or_skip("No nvcc installed")
+if not test.run_capture("nvidia-smi -L", check=False):
+    require_or_skip("No visible NVIDIA GPU")
+
+verilator_root = os.environ["VERILATOR_ROOT"]
+workspace_root = str(pathlib.Path(__file__).resolve().parents[3])
+target_gen = workspace_root + "/scripts/generate_memory_array_target_from_vars.py"
+
+if not os.path.exists(target_gen):
+    require_or_skip("Missing generate_memory_array_target_from_vars.py helper")
+
+cache_dir = test.obj_dir + "/sim_accel_memory_preload_cache"
+probe_dir = test.obj_dir + "/sim_accel_memory_preload_probe"
+bench_dir = test.obj_dir + "/sim_accel_memory_preload_bench"
+kernel_path = probe_dir + "/memory_probe.sim_accel.kernel.cu"
+vars_tsv = kernel_path + ".vars.tsv"
+target_path = probe_dir + "/memory.target.json"
+bench_log = bench_dir + "/bench_run.log"
+memory_init = bench_dir + "/memory_image.init"
+
+for path in [cache_dir, probe_dir, bench_dir]:
+    shutil.rmtree(path, ignore_errors=True)
+os.makedirs(probe_dir, exist_ok=True)
+
+image_dir = tempfile.mkdtemp(prefix="sim_accel_memory_preload_", dir=test.obj_dir)
+memory_image = image_dir + "/memory.bin"
+with open(memory_image, "wb") as fh:
+    fh.write(bytes([
+        0x0A, 0x00, 0x00, 0x00,
+        0x14, 0x00, 0x00, 0x00,
+        0x1E, 0x00, 0x00, 0x00,
+        0x28, 0x00, 0x00, 0x00,
+    ]))
+
+probe_cmd = (
+    verilator_root + "/bin/verilator"
+    + " --no-std"
+    + " --sim-accel-only"
+    + " --sim-accel-output " + kernel_path
+    + " --top-module t"
+    + " " + test.t_dir + "/t_sim_accel_memory_preload.v")
+test.run_capture(probe_cmd)
+
+if not os.path.exists(vars_tsv):
+    test.error("Expected vars.tsv not found: " + vars_tsv)
+
+target_cmd = (
+    "python3 " + target_gen
+    + " --vars-tsv " + vars_tsv
+    + " --name generated_mem_target"
+    + " --target-path t.mem"
+    + " --var-regex '^mem_(\\d+)$'"
+    + " --word-bits 32"
+    + " --depth 4"
+    + " --description 'Generated from sim-accel vars.tsv'"
+    + " --out " + target_path)
+test.run_capture(target_cmd)
+
+if not os.path.exists(target_path):
+    test.error("Expected generated target not found: " + target_path)
+
+with open(target_path, encoding="utf-8") as fh:
+    target_payload = json.load(fh)
+if target_payload.get("kind") != "memory-array-preload-v1":
+    test.error("Unexpected target kind: " + str(target_payload.get("kind")))
+if target_payload.get("target_path") != "t.mem":
+    test.error("Unexpected target path: " + str(target_payload.get("target_path")))
+elements = target_payload.get("elements", [])
+if len(elements) != 4:
+    test.error("Expected 4 generated memory elements, got " + str(len(elements)))
+
+bench_cmd = (
+    verilator_root + "/bin/verilator --sim-accel-bench"
+    + " --top-module t"
+    + " --outdir " + bench_dir
+    + " --nstates 2048"
+    + " --gpu-reps 4"
+    + " --cpu-reps 2"
+    + " --compile-cache-dir " + cache_dir
+    + " --memory-image " + memory_image
+    + " --memory-image-target " + target_path
+    + " --memory-image-format bin"
+    + " -- "
+    + test.t_dir + "/t_sim_accel_memory_preload.v")
+test.run_capture(bench_cmd)
+
+for filename in [bench_log, memory_init]:
+    if not os.path.exists(filename):
+        test.error("Expected output file not found: " + filename)
+
+test.file_grep(target_path, r'"kind": "memory-array-preload-v1"')
+test.file_grep(target_path, r'"target_path": "t\.mem"')
+test.file_grep(target_path, r'"var_name": "mem_0"')
+test.file_grep(target_path, r'"var_name": "mem_3"')
+test.file_grep(target_path, r'"offset": 0')
+test.file_grep(target_path, r'"offset": 12')
+test.file_grep(bench_log, r"memory_image_target=.*memory\.target\.json")
+test.file_grep(bench_log, r"memory_image_preload_entries=4")
+test.file_grep(bench_log, r"init_file=.*memory_image\.init")
+test.file_grep(bench_log, r"init_file_values_applied=8192")
+test.file_grep(bench_log, r"mismatch=0")
+test.file_grep(memory_init, r"^mem_0 0x0000000A$")
+test.file_grep(memory_init, r"^mem_1 0x00000014$")
+test.file_grep(memory_init, r"^mem_2 0x0000001E$")
+test.file_grep(memory_init, r"^mem_3 0x00000028$")
+
+test.passes()
