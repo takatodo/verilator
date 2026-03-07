@@ -1456,6 +1456,7 @@ cat > "$OUTDIR/bench_kernel.cu" <<'CU'
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <random>
 #include <sstream>
 #include <string>
@@ -1537,6 +1538,22 @@ struct InitFileStats {
 struct DirectPreloadStats {
   size_t rules_applied = 0;
   size_t values_applied = 0;
+  size_t lines_ignored = 0;
+};
+
+struct ArrayPreloadTargetData {
+  std::string target_path;
+  uint32_t word_bits = 0;
+  uint64_t base_addr = 0;
+  uint32_t address_unit_bytes = 0;
+  std::string endianness;
+  std::map<uint64_t, uint64_t> words;
+};
+
+struct ArrayPreloadPayloadStats {
+  size_t files_loaded = 0;
+  size_t targets_loaded = 0;
+  size_t words_loaded = 0;
   size_t lines_ignored = 0;
 };
 
@@ -1942,6 +1959,72 @@ static DirectPreloadStats applyDirectPreload(std::vector<uint32_t>& h_in, uint32
   return stats;
 }
 
+static ArrayPreloadPayloadStats loadArrayPreloadPayloads(
+    const std::vector<std::string>& payloadPaths,
+    std::unordered_map<std::string, ArrayPreloadTargetData>* targetsp) {
+  ArrayPreloadPayloadStats stats;
+  targetsp->clear();
+
+  for (const std::string& payloadPath : payloadPaths) {
+    std::ifstream inf(payloadPath);
+    if (!inf) {
+      std::cerr << "Warning: could not open array preload payload file: " << payloadPath << "\n";
+      continue;
+    }
+    ++stats.files_loaded;
+
+    std::string line;
+    while (std::getline(inf, line)) {
+      if (line.empty()) continue;
+      const auto cols = splitTabs(line);
+      if (cols.empty()) continue;
+      if (cols[0] == "target_path") continue;
+      if (cols.size() < 7) {
+        ++stats.lines_ignored;
+        continue;
+      }
+
+      uint64_t wordIndexRaw = 0;
+      uint64_t valueRaw = 0;
+      uint64_t wordBitsRaw = 0;
+      uint64_t baseAddrRaw = 0;
+      uint64_t addressUnitBytesRaw = 0;
+      if (!parseU64(cols[1], &wordIndexRaw) || !parseU64(cols[2], &valueRaw)
+          || !parseU64(cols[3], &wordBitsRaw) || !parseU64(cols[4], &baseAddrRaw)
+          || !parseU64(cols[5], &addressUnitBytesRaw)) {
+        ++stats.lines_ignored;
+        continue;
+      }
+
+      const std::string targetPath = cols[0];
+      auto it = targetsp->find(targetPath);
+      if (it == targetsp->end()) {
+        ArrayPreloadTargetData target;
+        target.target_path = targetPath;
+        target.word_bits = static_cast<uint32_t>(wordBitsRaw);
+        target.base_addr = baseAddrRaw;
+        target.address_unit_bytes = static_cast<uint32_t>(addressUnitBytesRaw);
+        target.endianness = cols[6];
+        it = targetsp->emplace(targetPath, std::move(target)).first;
+        ++stats.targets_loaded;
+      } else {
+        if (it->second.word_bits != static_cast<uint32_t>(wordBitsRaw)
+            || it->second.base_addr != baseAddrRaw
+            || it->second.address_unit_bytes != static_cast<uint32_t>(addressUnitBytesRaw)
+            || it->second.endianness != cols[6]) {
+          ++stats.lines_ignored;
+          continue;
+        }
+      }
+
+      it->second.words[wordIndexRaw] = valueRaw;
+      ++stats.words_loaded;
+    }
+  }
+
+  return stats;
+}
+
 #ifndef SIM_ACCEL_SKIP_CPU_REFERENCE_BUILD
 static void sim_accel_eval_assignw_cpu(const uint32_t* state_in, uint32_t* state_out,
                                        uint32_t nstates) {
@@ -2012,7 +2095,7 @@ static std::vector<uint32_t> unchunkToVarMajor(const std::vector<uint32_t>& chun
 static void printUsageAndExit(const char* argv0) {
   std::cerr << "Usage: " << argv0
               << " [--init-mode random|zero|ones|counter] [--init-seed N] [--init-file PATH]"
-            << " [--direct-preload-file PATH]..."
+            << " [--direct-preload-file PATH]... [--array-preload-payload PATH]..."
             << " --nstates N --gpu-reps N --cpu-reps N"
             << " [--state-chunk N] [--block-size N]"
             << " [--hybrid-mode off|single-partition|single-cluster|cluster-group]"
@@ -2100,6 +2183,7 @@ int main(int argc, char** argv) {
   uint32_t initSeed = 1;
   std::string initFile;
   std::vector<std::string> directPreloadFiles;
+  std::vector<std::string> arrayPreloadPayloadFiles;
   uint32_t nstates = 0;
   int gpu_reps = 0;
   int cpu_reps = 0;
@@ -2135,6 +2219,9 @@ int main(int argc, char** argv) {
     } else if (a == "--direct-preload-file") {
       if (i + 1 >= argc) printUsageAndExit(argv[0]);
       directPreloadFiles.emplace_back(argv[++i]);
+    } else if (a == "--array-preload-payload") {
+      if (i + 1 >= argc) printUsageAndExit(argv[0]);
+      arrayPreloadPayloadFiles.emplace_back(argv[++i]);
     } else if (a == "--nstates") {
       if (i + 1 >= argc) printUsageAndExit(argv[0]);
       uint64_t raw = 0;
@@ -2338,6 +2425,8 @@ int main(int argc, char** argv) {
   applyInitMode(h_seed_varmajor, nvars, nstates, initMode, initSeed);
   InitFileStats initStats;
   DirectPreloadStats directPreloadStats;
+  ArrayPreloadPayloadStats arrayPreloadStats;
+  std::unordered_map<std::string, ArrayPreloadTargetData> arrayPreloadTargets;
   if (!initFile.empty()) {
     initStats = applyInitFile(h_seed_varmajor, nvars, nstates, "kernel_generated.vars.tsv", initFile);
   }
@@ -2348,6 +2437,9 @@ int main(int argc, char** argv) {
     directPreloadStats.rules_applied += perFileStats.rules_applied;
     directPreloadStats.values_applied += perFileStats.values_applied;
     directPreloadStats.lines_ignored += perFileStats.lines_ignored;
+  }
+  if (!arrayPreloadPayloadFiles.empty()) {
+    arrayPreloadStats = loadArrayPreloadPayloads(arrayPreloadPayloadFiles, &arrayPreloadTargets);
   }
   const auto widths = loadVarWidths("kernel_generated.vars.tsv", nvars);
   std::vector<uint32_t> hybridReadVarIdxs;
@@ -3213,6 +3305,13 @@ int main(int argc, char** argv) {
     std::cout << "direct_preload_values_applied=" << directPreloadStats.values_applied << "\n";
     std::cout << "direct_preload_lines_ignored=" << directPreloadStats.lines_ignored << "\n";
   }
+  std::cout << "array_preload_payload_file_count=" << arrayPreloadPayloadFiles.size() << "\n";
+  if (!arrayPreloadPayloadFiles.empty()) {
+    std::cout << "array_preload_payload_files_loaded=" << arrayPreloadStats.files_loaded << "\n";
+    std::cout << "array_preload_targets_loaded=" << arrayPreloadStats.targets_loaded << "\n";
+    std::cout << "array_preload_words_loaded=" << arrayPreloadStats.words_loaded << "\n";
+    std::cout << "array_preload_lines_ignored=" << arrayPreloadStats.lines_ignored << "\n";
+  }
   std::cout << "hybrid_mode=" << hybridMode << "\n";
   std::cout << "gpu_ms_per_rep=" << gpu_ms_per_rep << "\n";
   std::cout << "cpu_ms_per_rep=" << cpu_ms_per_rep << "\n";
@@ -3640,6 +3739,12 @@ echo "[4/4] Running benchmark..."
   fi
   if [[ -n "$MEMORY_IMAGE_DIRECT_FILE" ]]; then
     BENCH_CMD+=(--direct-preload-file "$MEMORY_IMAGE_DIRECT_FILE")
+  fi
+  if [[ -n "$PROGRAM_HEX_PAYLOAD_TSV" && -f "$PROGRAM_HEX_PAYLOAD_TSV" ]]; then
+    BENCH_CMD+=(--array-preload-payload "$PROGRAM_HEX_PAYLOAD_TSV")
+  fi
+  if [[ -n "$MEMORY_IMAGE_PAYLOAD_TSV" && -f "$MEMORY_IMAGE_PAYLOAD_TSV" ]]; then
+    BENCH_CMD+=(--array-preload-payload "$MEMORY_IMAGE_PAYLOAD_TSV")
   fi
   if ! /usr/bin/time -f "%e" -o "$TIME_RUN" "${BENCH_CMD[@]}" > bench_run.log 2>&1; then
     echo "Benchmark execution failed. Last lines from bench_run.log:" >&2
