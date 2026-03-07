@@ -34,7 +34,7 @@ probe_cmd = (
     + " --sim-accel-only"
     + " --sim-accel-output " + kernel_path
     + " --top-module t"
-    + " " + test.t_dir + "/t_sim_accel_hidden_preload_target.v")
+    + " " + test.t_dir + "/t_sim_accel_hidden_preload_unmapped.v")
 test.run_capture(probe_cmd)
 
 if not os.path.exists(preload_targets_tsv):
@@ -47,12 +47,12 @@ if not os.path.exists(preload_targets_json):
 test.file_grep(preload_targets_tsv, r"^kind\tname\ttarget_path\tast_name\thierarchy\tword_bits\tdepth\tbase_addr\taddress_unit_bytes\tendianness\tis_primary_io$")
 test.file_grep(
     preload_targets_tsv,
-    r"^memory-array-preload-v1\thidden_mem\tt\.hidden_mem\tt__DOT__hidden_mem\tt\t32\t4\t0\t4\tlittle\t0$")
+    r"^memory-array-preload-v1\thidden_mem\tt\.hidden_mem\tt__DOT__hidden_mem\tt\t32\t17\t0\t4\tlittle\t0$")
 test.file_grep(preload_target_elements_tsv, r"^target_path\tname\tindex\toffset\tbyte_count\tvar_name$")
 test.file_grep(preload_targets_json, r'"format": "sim-accel-preload-targets-v1"')
 test.file_grep(preload_targets_json, r'"target_path": "t\.hidden_mem"')
 test.file_grep(preload_targets_json, r'"word_bits": 32')
-test.file_grep(preload_targets_json, r'"depth": 4')
+test.file_grep(preload_targets_json, r'"depth": 17')
 
 target_cmd = (
     target_gen
@@ -73,9 +73,9 @@ if payload.get("target_path") != "t.hidden_mem":
     test.error("Unexpected target path: " + str(payload.get("target_path")))
 if payload.get("word_bits") != 32:
     test.error("Unexpected word_bits: " + str(payload.get("word_bits")))
-if payload.get("depth") != 4:
+if payload.get("depth") != 17:
     test.error("Unexpected depth: " + str(payload.get("depth")))
 if payload.get("elements") != []:
-    test.error("Hidden preload target without constant-index reads should not expose elements")
+    test.error("Large hidden preload target should remain metadata-only")
 
 test.passes()

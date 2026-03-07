@@ -157,9 +157,9 @@ test.file_grep(
     r"^target_path\tword_index\tvalue_hex\tword_bits\tbase_addr\taddress_unit_bytes\tendianness\tvar_name\tvar_index\twidth\tvisible$")
 test.file_grep(
     memory_payload,
-    r"^t\.hidden_mem\t0\t0x0000000A\t32\t0x00000000\t4\tlittle\tt__DOT__hidden_mem__BRA__0__KET__\t1\t32\t1$")
+    r"^t\.hidden_mem\t0\t0x0000000A\t32\t0x00000000\t4\tlittle\tt__DOT__hidden_mem__BRA__0__KET__\t0\t32\t1$")
 test.file_grep(
     memory_payload,
-    r"^t\.hidden_mem\t3\t0x00000028\t32\t0x00000000\t4\tlittle\tt__DOT__hidden_mem__BRA__3__KET__\t5\t32\t1$")
+    r"^t\.hidden_mem\t3\t0x00000028\t32\t0x00000000\t4\tlittle\tt__DOT__hidden_mem__BRA__3__KET__\t3\t32\t1$")
 
 test.passes()

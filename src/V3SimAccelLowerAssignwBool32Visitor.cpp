@@ -70,6 +70,11 @@ const AstNodeDType* simAccelLeafUnpackedElementDType(const AstNodeDType* dtypep)
     return nullptr;
 }
 
+// Small hidden preload arrays can be materialized into synthetic vars so the
+// existing direct preload/runtime paths can seed them without a dedicated array
+// storage model. Large arrays stay metadata-only to avoid blowing up state size.
+static constexpr uint32_t kSimAccelPreloadMaterializeMaxDepth = 16;
+
 bool simAccelIsSupportedScalarVar(const AstVar* varp) {
     return varp && !simAccelIsInternalVar(varp) && simAccelWidthSupported(varp) && varp->dtypep()
            && !VN_IS(varp->dtypep()->skipRefp(), UnpackArrayDType);
@@ -247,7 +252,8 @@ private:
     void rememberPreloadTarget(const AstVar* varp) {
         if (!varp || simAccelIsInternalVar(varp) || !varp->dtypep()) return;
         const AstNodeDType* const dtypep = varp->dtypep()->skipRefp();
-        if (!VN_IS(dtypep, UnpackArrayDType)) return;
+        const AstUnpackArrayDType* const unpackp = VN_CAST(dtypep, UnpackArrayDType);
+        if (!unpackp) return;
         const AstNodeDType* const leafDTypep = simAccelLeafUnpackedElementDType(dtypep);
         const AstBasicDType* const basicp = VN_CAST(leafDTypep, BasicDType);
         if (!basicp || basicp->width() <= 0 || basicp->width() > 32) return;
@@ -270,6 +276,25 @@ private:
         const size_t targetIdx = m_program.m_preloadTargets.size();
         m_program.m_preloadTargets.push_back(std::move(target));
         m_preloadTargetPathToIndex.emplace(targetPath, targetIdx);
+
+        if (unpackp->elementsConst() <= 0
+            || static_cast<uint32_t>(unpackp->elementsConst()) > kSimAccelPreloadMaterializeMaxDepth) {
+            return;
+        }
+        const int logicalLo = unpackp->lo();
+        for (int offset = 0; offset < unpackp->elementsConst(); ++offset) {
+            ResolvedArrayElement resolved;
+            resolved.m_varp = varp;
+            resolved.m_logicalIndex = logicalLo + offset;
+            resolved.m_width = basicp->width();
+            const SimAccelArrayElementKey key{resolved.m_varp, resolved.m_logicalIndex};
+            const auto existing = m_arrayElementToIndex.find(key);
+            if (existing != m_arrayElementToIndex.end()) {
+                rememberPreloadTargetElement(resolved, m_program.m_vars.at(existing->second).m_name);
+            } else {
+                rememberArrayElement(resolved);
+            }
+        }
     }
 
     void rememberPreloadTargetElement(const ResolvedArrayElement& resolved, const string& varName) {

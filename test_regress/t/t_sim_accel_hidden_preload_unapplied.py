@@ -50,12 +50,9 @@ os.makedirs(probe_dir, exist_ok=True)
 image_dir = tempfile.mkdtemp(prefix="sim_accel_hidden_preload_unapplied_", dir=test.obj_dir)
 memory_image = image_dir + "/memory.bin"
 with open(memory_image, "wb") as fh:
-    fh.write(bytes([
-        0x0A, 0x00, 0x00, 0x00,
-        0x14, 0x00, 0x00, 0x00,
-        0x1E, 0x00, 0x00, 0x00,
-        0x28, 0x00, 0x00, 0x00,
-    ]))
+    for word in range(17):
+        value = (word + 1) * 10
+        fh.write(value.to_bytes(4, byteorder="little", signed=False))
 
 probe_cmd = (
     verilator_root + "/bin/verilator"
@@ -63,7 +60,7 @@ probe_cmd = (
     + " --sim-accel-only"
     + " --sim-accel-output " + kernel_path
     + " --top-module t"
-    + " " + test.t_dir + "/t_sim_accel_hidden_preload_target.v")
+    + " " + test.t_dir + "/t_sim_accel_hidden_preload_unmapped.v")
 test.run_capture(probe_cmd)
 
 for filename in [preload_targets_tsv, preload_target_elements_tsv, preload_targets_json]:
@@ -103,7 +100,7 @@ bench_cmd = (
     + " --memory-image-target " + target_path
     + " --memory-image-format bin"
     + " -- "
-    + test.t_dir + "/t_sim_accel_hidden_preload_target.v")
+    + test.t_dir + "/t_sim_accel_hidden_preload_unmapped.v")
 test.run_capture(bench_cmd)
 
 for filename in [bench_log, memory_payload]:
@@ -114,18 +111,18 @@ test.file_grep(bench_log, r"memory_image_target=.*hidden_mem\.target\.json")
 test.file_grep(bench_log, r"memory_image_preload_entries=0")
 test.file_grep(bench_log, r"memory_image_direct_entries=0")
 test.file_grep(bench_log, r"memory_image_payload_tsv=.*memory_image\.payload\.tsv")
-test.file_grep(bench_log, r"memory_image_payload_entries=4")
+test.file_grep(bench_log, r"memory_image_payload_entries=17")
 test.file_grep(bench_log, r"memory_image_payload_visible_entries=0")
-test.file_grep(bench_log, r"memory_image_payload_hidden_entries=4")
+test.file_grep(bench_log, r"memory_image_payload_hidden_entries=17")
 test.file_grep(bench_log, r"direct_preload_file_count=1")
 test.file_grep(bench_log, r"direct_preload_rules_applied=0")
 test.file_grep(bench_log, r"direct_preload_values_applied=0")
 test.file_grep(bench_log, r"array_preload_payload_file_count=1")
 test.file_grep(bench_log, r"array_preload_payload_files_loaded=1")
 test.file_grep(bench_log, r"array_preload_targets_loaded=1")
-test.file_grep(bench_log, r"array_preload_words_loaded=4")
+test.file_grep(bench_log, r"array_preload_words_loaded=17")
 test.file_grep(bench_log, r"array_preload_mapped_rows_loaded=0")
-test.file_grep(bench_log, r"array_preload_hidden_rows_loaded=4")
+test.file_grep(bench_log, r"array_preload_hidden_rows_loaded=17")
 test.file_grep(bench_log, r"array_preload_hidden_only_targets=1")
 test.file_grep(bench_log, r"array_preload_mapped_rules_applied=0")
 test.file_grep(bench_log, r"array_preload_mapped_values_applied=0")
@@ -133,6 +130,6 @@ test.file_grep(bench_log, r"array_preload_lines_ignored=0")
 test.file_grep(bench_log, r"mismatch=0")
 test.file_grep(memory_payload, r"^target_path\tword_index\tvalue_hex\tword_bits\tbase_addr\taddress_unit_bytes\tendianness\tvar_name\tvar_index\twidth\tvisible$")
 test.file_grep(memory_payload, r"^t\.hidden_mem\t0\t0x0000000A\t32\t0x00000000\t4\tlittle\t\t-1\t-1\t0$")
-test.file_grep(memory_payload, r"^t\.hidden_mem\t3\t0x00000028\t32\t0x00000000\t4\tlittle\t\t-1\t-1\t0$")
+test.file_grep(memory_payload, r"^t\.hidden_mem\t16\t0x000000AA\t32\t0x00000000\t4\tlittle\t\t-1\t-1\t0$")
 
 test.passes()
