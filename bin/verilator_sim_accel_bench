@@ -2119,6 +2119,23 @@ static bool writeArrayPreloadHiddenStorageTsv(
   return wroteAny;
 }
 
+static bool writeArrayPreloadTargetSummaryTsv(
+    const std::string& path, const std::unordered_map<std::string, ArrayPreloadTargetData>& targets) {
+  if (targets.empty()) return false;
+  std::ofstream out(path);
+  if (!out) return false;
+  out << "target_path\tword_bits\tbase_addr\taddress_unit_bytes\tendianness\ttotal_words\thidden_words\tmapped_values\thidden_only\n";
+  for (const auto& kv : targets) {
+    const ArrayPreloadTargetData& target = kv.second;
+    out << target.target_path << '\t' << target.word_bits << '\t'
+        << formatArrayPreloadHex(target.base_addr, 32) << '\t' << target.address_unit_bytes << '\t'
+        << target.endianness << '\t' << target.words.size() << '\t' << target.hidden_words.size()
+        << '\t' << target.mapped_values.size() << '\t'
+        << ((!target.words.empty() && target.mapped_values.empty()) ? 1 : 0) << '\n';
+  }
+  return true;
+}
+
 #ifndef SIM_ACCEL_SKIP_CPU_REFERENCE_BUILD
 static void sim_accel_eval_assignw_cpu(const uint32_t* state_in, uint32_t* state_out,
                                        uint32_t nstates) {
@@ -2522,7 +2539,9 @@ int main(int argc, char** argv) {
   ArrayPreloadPayloadStats arrayPreloadStats;
   std::unordered_map<std::string, ArrayPreloadTargetData> arrayPreloadTargets;
   const std::string arrayPreloadHiddenStoragePath = "array_preload.hidden.tsv";
+  const std::string arrayPreloadTargetSummaryPath = "array_preload.targets.tsv";
   bool wroteArrayPreloadHiddenStorage = false;
+  bool wroteArrayPreloadTargetSummary = false;
   if (!initFile.empty()) {
     initStats = applyInitFile(h_seed_varmajor, nvars, nstates, "kernel_generated.vars.tsv", initFile);
   }
@@ -2538,6 +2557,8 @@ int main(int argc, char** argv) {
     arrayPreloadStats = loadArrayPreloadPayloads(arrayPreloadPayloadFiles, &arrayPreloadTargets);
     applyArrayPreloadMappedValues(h_seed_varmajor, nvars, nstates, arrayPreloadTargets,
                                   &arrayPreloadStats);
+    wroteArrayPreloadTargetSummary
+        = writeArrayPreloadTargetSummaryTsv(arrayPreloadTargetSummaryPath, arrayPreloadTargets);
     wroteArrayPreloadHiddenStorage
         = writeArrayPreloadHiddenStorageTsv(arrayPreloadHiddenStoragePath, arrayPreloadTargets);
   }
@@ -3420,6 +3441,9 @@ int main(int argc, char** argv) {
               << arrayPreloadStats.hidden_storage_targets << "\n";
     std::cout << "array_preload_hidden_storage_words="
               << arrayPreloadStats.hidden_storage_words << "\n";
+    if (wroteArrayPreloadTargetSummary) {
+      std::cout << "array_preload_target_summary_tsv=" << arrayPreloadTargetSummaryPath << "\n";
+    }
     if (wroteArrayPreloadHiddenStorage) {
       std::cout << "array_preload_hidden_storage_tsv=" << arrayPreloadHiddenStoragePath << "\n";
     }

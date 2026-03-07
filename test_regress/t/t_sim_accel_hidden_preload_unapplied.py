@@ -43,6 +43,7 @@ target_path = probe_dir + "/hidden_mem.target.json"
 bench_log = bench_dir + "/bench_run.log"
 memory_payload = bench_dir + "/memory_image.payload.tsv"
 hidden_storage = bench_dir + "/array_preload.hidden.tsv"
+target_summary = bench_dir + "/array_preload.targets.tsv"
 
 for path in [cache_dir, probe_dir, bench_dir]:
     shutil.rmtree(path, ignore_errors=True)
@@ -104,7 +105,7 @@ bench_cmd = (
     + test.t_dir + "/t_sim_accel_hidden_preload_unmapped.v")
 test.run_capture(bench_cmd)
 
-for filename in [bench_log, memory_payload, hidden_storage]:
+for filename in [bench_log, memory_payload, hidden_storage, target_summary]:
     if not os.path.exists(filename):
         test.error("Expected bench artifact not found: " + filename)
 
@@ -127,6 +128,7 @@ test.file_grep(bench_log, r"array_preload_hidden_rows_loaded=17")
 test.file_grep(bench_log, r"array_preload_hidden_only_targets=1")
 test.file_grep(bench_log, r"array_preload_hidden_storage_targets=1")
 test.file_grep(bench_log, r"array_preload_hidden_storage_words=17")
+test.file_grep(bench_log, r"array_preload_target_summary_tsv=array_preload\.targets\.tsv")
 test.file_grep(bench_log, r"array_preload_hidden_storage_tsv=array_preload\.hidden\.tsv")
 test.file_grep(bench_log, r"array_preload_mapped_rules_applied=0")
 test.file_grep(bench_log, r"array_preload_mapped_values_applied=0")
@@ -137,6 +139,12 @@ test.file_grep(
     r"^target_path\tword_index\tvalue_hex\tword_bits\tbase_addr\taddress_unit_bytes\tendianness$")
 test.file_grep(hidden_storage, r"^t\.hidden_mem\t0\t0x0000000A\t32\t0x00000000\t4\tlittle$")
 test.file_grep(hidden_storage, r"^t\.hidden_mem\t16\t0x000000AA\t32\t0x00000000\t4\tlittle$")
+test.file_grep(
+    target_summary,
+    r"^target_path\tword_bits\tbase_addr\taddress_unit_bytes\tendianness\ttotal_words\thidden_words\tmapped_values\thidden_only$")
+test.file_grep(
+    target_summary,
+    r"^t\.hidden_mem\t32\t0x00000000\t4\tlittle\t17\t17\t0\t1$")
 test.file_grep(memory_payload, r"^target_path\tword_index\tvalue_hex\tword_bits\tbase_addr\taddress_unit_bytes\tendianness\tvar_name\tvar_index\twidth\tvisible$")
 test.file_grep(memory_payload, r"^t\.hidden_mem\t0\t0x0000000A\t32\t0x00000000\t4\tlittle\t\t-1\t-1\t0$")
 test.file_grep(memory_payload, r"^t\.hidden_mem\t16\t0x000000AA\t32\t0x00000000\t4\tlittle\t\t-1\t-1\t0$")

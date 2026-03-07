@@ -44,6 +44,7 @@ target_path = probe_dir + "/memory.target.json"
 bench_log = bench_dir + "/bench_run.log"
 memory_init = bench_dir + "/memory_image.init"
 memory_payload = bench_dir + "/memory_image.payload.tsv"
+target_summary = bench_dir + "/array_preload.targets.tsv"
 
 for path in [cache_dir, probe_dir, bench_dir]:
     shutil.rmtree(path, ignore_errors=True)
@@ -111,7 +112,7 @@ bench_cmd = (
     + test.t_dir + "/t_sim_accel_memory_preload.v")
 test.run_capture(bench_cmd)
 
-for filename in [bench_log, memory_init, memory_payload]:
+for filename in [bench_log, memory_init, memory_payload, target_summary]:
     if not os.path.exists(filename):
         test.error("Expected output file not found: " + filename)
 
@@ -136,6 +137,7 @@ test.file_grep(bench_log, r"array_preload_words_loaded=4")
 test.file_grep(bench_log, r"array_preload_mapped_rows_loaded=4")
 test.file_grep(bench_log, r"array_preload_hidden_rows_loaded=0")
 test.file_grep(bench_log, r"array_preload_hidden_only_targets=0")
+test.file_grep(bench_log, r"array_preload_target_summary_tsv=array_preload\.targets\.tsv")
 test.file_grep(bench_log, r"array_preload_mapped_rules_applied=4")
 test.file_grep(bench_log, r"array_preload_mapped_values_applied=8192")
 test.file_grep(bench_log, r"array_preload_lines_ignored=0")
@@ -154,5 +156,11 @@ test.file_grep(memory_payload, r"^t\.mem\t0\t0x0000000A\t32\t0x00000000\t4\tlitt
 test.file_grep(memory_payload, r"^t\.mem\t1\t0x00000014\t32\t0x00000000\t4\tlittle\tmem_1\t2\t32\t1$")
 test.file_grep(memory_payload, r"^t\.mem\t2\t0x0000001E\t32\t0x00000000\t4\tlittle\tmem_2\t3\t32\t1$")
 test.file_grep(memory_payload, r"^t\.mem\t3\t0x00000028\t32\t0x00000000\t4\tlittle\tmem_3\t4\t32\t1$")
+test.file_grep(
+    target_summary,
+    r"^target_path\tword_bits\tbase_addr\taddress_unit_bytes\tendianness\ttotal_words\thidden_words\tmapped_values\thidden_only$")
+test.file_grep(
+    target_summary,
+    r"^t\.mem\t32\t0x00000000\t4\tlittle\t4\t0\t4\t0$")
 
 test.passes()
