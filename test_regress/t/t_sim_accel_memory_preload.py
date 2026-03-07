@@ -9,7 +9,6 @@
 
 import json
 import os
-import pathlib
 import shutil
 import tempfile
 
@@ -31,8 +30,7 @@ if not test.run_capture("nvidia-smi -L", check=False):
     require_or_skip("No visible NVIDIA GPU")
 
 verilator_root = os.environ["VERILATOR_ROOT"]
-workspace_root = str(pathlib.Path(__file__).resolve().parents[3])
-target_gen = workspace_root + "/scripts/generate_memory_array_target_from_vars.py"
+target_gen = verilator_root + "/bin/verilator_sim_accel_generate_preload_target"
 
 if not os.path.exists(target_gen):
     require_or_skip("Missing generate_memory_array_target_from_vars.py helper")
@@ -73,7 +71,7 @@ if not os.path.exists(vars_tsv):
     test.error("Expected vars.tsv not found: " + vars_tsv)
 
 target_cmd = (
-    "python3 " + target_gen
+    target_gen
     + " --vars-tsv " + vars_tsv
     + " --name generated_mem_target"
     + " --target-path t.mem"
