@@ -134,6 +134,9 @@ test.file_grep(bench_log, r"array_preload_payload_file_count=1")
 test.file_grep(bench_log, r"array_preload_payload_files_loaded=1")
 test.file_grep(bench_log, r"array_preload_targets_loaded=1")
 test.file_grep(bench_log, r"array_preload_words_loaded=4")
+test.file_grep(bench_log, r"array_preload_mapped_rows_loaded=4")
+test.file_grep(bench_log, r"array_preload_mapped_rules_applied=4")
+test.file_grep(bench_log, r"array_preload_mapped_values_applied=8192")
 test.file_grep(bench_log, r"array_preload_lines_ignored=0")
 test.file_grep(bench_log, r"direct_preload_file_count=1")
 test.file_grep(bench_log, r"direct_preload_rules_applied=4")
@@ -143,8 +146,14 @@ test.file_grep(memory_init, r"^t__DOT__hidden_mem__BRA__0__KET__ 0x0000000A$")
 test.file_grep(memory_init, r"^t__DOT__hidden_mem__BRA__1__KET__ 0x00000014$")
 test.file_grep(memory_init, r"^t__DOT__hidden_mem__BRA__2__KET__ 0x0000001E$")
 test.file_grep(memory_init, r"^t__DOT__hidden_mem__BRA__3__KET__ 0x00000028$")
-test.file_grep(memory_payload, r"^target_path\tword_index\tvalue_hex\tword_bits\tbase_addr\taddress_unit_bytes\tendianness$")
-test.file_grep(memory_payload, r"^t\.hidden_mem\t0\t0x0000000A\t32\t0x00000000\t4\tlittle$")
-test.file_grep(memory_payload, r"^t\.hidden_mem\t3\t0x00000028\t32\t0x00000000\t4\tlittle$")
+test.file_grep(
+    memory_payload,
+    r"^target_path\tword_index\tvalue_hex\tword_bits\tbase_addr\taddress_unit_bytes\tendianness\tvar_name\tvar_index\twidth\tvisible$")
+test.file_grep(
+    memory_payload,
+    r"^t\.hidden_mem\t0\t0x0000000A\t32\t0x00000000\t4\tlittle\tt__DOT__hidden_mem__BRA__0__KET__\t1\t32\t1$")
+test.file_grep(
+    memory_payload,
+    r"^t\.hidden_mem\t3\t0x00000028\t32\t0x00000000\t4\tlittle\tt__DOT__hidden_mem__BRA__3__KET__\t5\t32\t1$")
 
 test.passes()

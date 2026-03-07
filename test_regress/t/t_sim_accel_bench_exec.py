@@ -356,6 +356,9 @@ test.file_grep(bench_memory_image_log, r"array_preload_payload_file_count=1")
 test.file_grep(bench_memory_image_log, r"array_preload_payload_files_loaded=1")
 test.file_grep(bench_memory_image_log, r"array_preload_targets_loaded=1")
 test.file_grep(bench_memory_image_log, r"array_preload_words_loaded=4")
+test.file_grep(bench_memory_image_log, r"array_preload_mapped_rows_loaded=4")
+test.file_grep(bench_memory_image_log, r"array_preload_mapped_rules_applied=4")
+test.file_grep(bench_memory_image_log, r"array_preload_mapped_values_applied=8192")
 test.file_grep(bench_memory_image_log, r"array_preload_lines_ignored=0")
 test.file_grep(bench_memory_image_log, r"direct_preload_file_count=1")
 test.file_grep(bench_memory_image_log, r"direct_preload_rules_applied=4")
@@ -365,9 +368,15 @@ test.file_grep(bench_dir_memory_image + r"/memory_image.init", r"^a 0x0000000A$"
 test.file_grep(bench_dir_memory_image + r"/memory_image.init", r"^b 0x00000002$")
 test.file_grep(bench_dir_memory_image + r"/memory_image.init", r"^c 0x00000003$")
 test.file_grep(bench_dir_memory_image + r"/memory_image.init", r"^d 0x00000004$")
-test.file_grep(bench_dir_memory_image + r"/memory_image.payload.tsv", r"^target_path\tword_index\tvalue_hex\tword_bits\tbase_addr\taddress_unit_bytes\tendianness$")
-test.file_grep(bench_dir_memory_image + r"/memory_image.payload.tsv", r"^t\.mem\t0\t0x0000000A\t32\t0x00000000\t4\tlittle$")
-test.file_grep(bench_dir_memory_image + r"/memory_image.payload.tsv", r"^t\.mem\t3\t0x00000004\t32\t0x00000000\t4\tlittle$")
+test.file_grep(
+    bench_dir_memory_image + r"/memory_image.payload.tsv",
+    r"^target_path\tword_index\tvalue_hex\tword_bits\tbase_addr\taddress_unit_bytes\tendianness\tvar_name\tvar_index\twidth\tvisible$")
+test.file_grep(
+    bench_dir_memory_image + r"/memory_image.payload.tsv",
+    r"^t\.mem\t0\t0x0000000A\t32\t0x00000000\t4\tlittle\ta\t3\t32\t1$")
+test.file_grep(
+    bench_dir_memory_image + r"/memory_image.payload.tsv",
+    r"^t\.mem\t3\t0x00000004\t32\t0x00000000\t4\tlittle\td\t2\t32\t1$")
 test.file_grep(bench_run_log, r"speedup_gpu_over_cpu=")
 test.file_grep(bench_run_log, r"kernel_partitions=[2-9][0-9]*")
 test.file_grep(bench_run_log, r"auto_engine_recommendation=")

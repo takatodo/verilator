@@ -189,6 +189,7 @@ def memory_value(memory: dict[int, int], addr: int, byte_count: int, little_endi
 def build_memory_array_payload_rows(
     descriptor: dict[str, Any],
     memory: dict[int, int],
+    name_to_meta: dict[str, tuple[int, int]],
 ) -> list[str]:
     word_bits = int(descriptor["word_bits"])
     word_bytes = max(1, (word_bits + 7) // 8)
@@ -197,15 +198,33 @@ def build_memory_array_payload_rows(
     address_unit_bytes = int(descriptor.get("address_unit_bytes", word_bytes))
     endianness = str(descriptor.get("endianness", "little"))
     little_endian = endianness.lower() != "big"
+    element_by_index: dict[int, dict[str, Any]] = {}
+    for entry in descriptor.get("elements", []):
+        try:
+            index = int(entry.get("index"))
+        except (TypeError, ValueError):
+            continue
+        element_by_index[index] = entry
     rows = [
-        "target_path\tword_index\tvalue_hex\tword_bits\tbase_addr\taddress_unit_bytes\tendianness"
+        "target_path\tword_index\tvalue_hex\tword_bits\tbase_addr\taddress_unit_bytes\tendianness\tvar_name\tvar_index\twidth\tvisible"
     ]
     for word_index in range(depth):
         addr = base_addr + word_index * address_unit_bytes
         value = memory_value(memory, addr, word_bytes, little_endian)
+        element = element_by_index.get(word_index)
+        var_name = "" if element is None else str(element.get("var_name", ""))
+        meta = None if not var_name else name_to_meta.get(var_name)
+        if meta is None:
+            var_index = -1
+            width = -1
+            visible = 0
+        else:
+            var_index, width = meta
+            visible = 1
         rows.append(
             f"{descriptor['target_path']}\t{word_index}\t0x{value:0{word_bytes * 2}X}\t"
-            f"{word_bits}\t0x{base_addr:08X}\t{address_unit_bytes}\t{endianness}"
+            f"{word_bits}\t0x{base_addr:08X}\t{address_unit_bytes}\t{endianness}\t"
+            f"{var_name}\t{var_index}\t{width}\t{visible}"
         )
     return rows
 
@@ -245,7 +264,7 @@ def main() -> int:
                 init_lines.append(f"{var_name} 0x{value:08X}")
                 visible_entry_count += 1
         else:
-            payload_rows = build_memory_array_payload_rows(desc, memory)
+            payload_rows = build_memory_array_payload_rows(desc, memory, name_to_meta)
             little_endian = str(desc.get("endianness", "little")).lower() != "big"
             for entry in desc["elements"]:
                 addr = int(entry["offset"])

@@ -1542,18 +1542,27 @@ struct DirectPreloadStats {
 };
 
 struct ArrayPreloadTargetData {
+  struct MappedValue {
+    uint32_t var_idx = 0;
+    uint32_t width = 0;
+    uint32_t value = 0;
+  };
   std::string target_path;
   uint32_t word_bits = 0;
   uint64_t base_addr = 0;
   uint32_t address_unit_bytes = 0;
   std::string endianness;
   std::map<uint64_t, uint64_t> words;
+  std::vector<MappedValue> mapped_values;
 };
 
 struct ArrayPreloadPayloadStats {
   size_t files_loaded = 0;
   size_t targets_loaded = 0;
   size_t words_loaded = 0;
+  size_t mapped_rows_loaded = 0;
+  size_t mapped_rules_applied = 0;
+  size_t mapped_values_applied = 0;
   size_t lines_ignored = 0;
 };
 
@@ -2019,10 +2028,42 @@ static ArrayPreloadPayloadStats loadArrayPreloadPayloads(
 
       it->second.words[wordIndexRaw] = valueRaw;
       ++stats.words_loaded;
+      if (cols.size() >= 11) {
+        uint64_t varIndexRaw = 0;
+        uint64_t widthRaw = 0;
+        uint64_t visibleRaw = 0;
+        if (parseU64(cols[8], &varIndexRaw) && parseU64(cols[9], &widthRaw)
+            && parseU64(cols[10], &visibleRaw) && visibleRaw != 0) {
+          ArrayPreloadTargetData::MappedValue mapped;
+          mapped.var_idx = static_cast<uint32_t>(varIndexRaw);
+          mapped.width = static_cast<uint32_t>(widthRaw);
+          mapped.value = maskToWidth(valueRaw, mapped.width);
+          it->second.mapped_values.push_back(mapped);
+          ++stats.mapped_rows_loaded;
+        }
+      }
     }
   }
 
   return stats;
+}
+
+static void applyArrayPreloadMappedValues(
+    std::vector<uint32_t>& h_in, uint32_t nvars, uint32_t nstates,
+    const std::unordered_map<std::string, ArrayPreloadTargetData>& targets,
+    ArrayPreloadPayloadStats* statsp) {
+  for (const auto& kv : targets) {
+    const ArrayPreloadTargetData& target = kv.second;
+    for (const auto& mapped : target.mapped_values) {
+      if (mapped.var_idx >= nvars) continue;
+      const size_t base = static_cast<size_t>(mapped.var_idx) * nstates;
+      for (uint32_t tid = 0; tid < nstates; ++tid) h_in[base + tid] = mapped.value;
+      if (statsp) {
+        ++statsp->mapped_rules_applied;
+        statsp->mapped_values_applied += nstates;
+      }
+    }
+  }
 }
 
 #ifndef SIM_ACCEL_SKIP_CPU_REFERENCE_BUILD
@@ -2440,6 +2481,8 @@ int main(int argc, char** argv) {
   }
   if (!arrayPreloadPayloadFiles.empty()) {
     arrayPreloadStats = loadArrayPreloadPayloads(arrayPreloadPayloadFiles, &arrayPreloadTargets);
+    applyArrayPreloadMappedValues(h_seed_varmajor, nvars, nstates, arrayPreloadTargets,
+                                  &arrayPreloadStats);
   }
   const auto widths = loadVarWidths("kernel_generated.vars.tsv", nvars);
   std::vector<uint32_t> hybridReadVarIdxs;
@@ -3310,6 +3353,12 @@ int main(int argc, char** argv) {
     std::cout << "array_preload_payload_files_loaded=" << arrayPreloadStats.files_loaded << "\n";
     std::cout << "array_preload_targets_loaded=" << arrayPreloadStats.targets_loaded << "\n";
     std::cout << "array_preload_words_loaded=" << arrayPreloadStats.words_loaded << "\n";
+    std::cout << "array_preload_mapped_rows_loaded=" << arrayPreloadStats.mapped_rows_loaded
+              << "\n";
+    std::cout << "array_preload_mapped_rules_applied="
+              << arrayPreloadStats.mapped_rules_applied << "\n";
+    std::cout << "array_preload_mapped_values_applied="
+              << arrayPreloadStats.mapped_values_applied << "\n";
     std::cout << "array_preload_lines_ignored=" << arrayPreloadStats.lines_ignored << "\n";
   }
   std::cout << "hybrid_mode=" << hybridMode << "\n";
