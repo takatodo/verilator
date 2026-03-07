@@ -37,22 +37,33 @@ seed1_log = batch_dir + "/scenarios/iter000008/driver_stdout.log"
 seed2_log = batch_dir + "/scenarios/iter000010/driver_stdout.log"
 program_hex1 = batch_dir + "/scenario_inputs/iter000008/program.hex"
 program_hex2 = batch_dir + "/scenario_inputs/iter000010/program.hex"
+program_init1 = batch_dir + "/scenario_inputs/iter000008/program_hex.init"
+program_init2 = batch_dir + "/scenario_inputs/iter000010/program_hex.init"
 
 for path in [cache_dir, batch_dir]:
     shutil.rmtree(path, ignore_errors=True)
 
 program_hex_dir = tempfile.mkdtemp(prefix="sim_accel_program_hex_", dir=test.obj_dir)
 program_hex_path = program_hex_dir + "/program.hex"
+program_map_path = program_hex_dir + "/program.map"
 manifest_path = program_hex_dir + "/scenarios.json"
 with open(program_hex_path, "w", encoding="utf-8") as fh:
     fh.write("@10000000\n")
     fh.write("01 00 00 00\n")
+    fh.write("02 00 00 00\n")
+    fh.write("03 00 00 00\n")
+    fh.write("04 00 00 00\n")
+with open(program_map_path, "w", encoding="utf-8") as fh:
+    fh.write("0x10000000 a\n")
+    fh.write("0x10000004 b\n")
+    fh.write("0x10000008 c\n")
+    fh.write("0x1000000C d\n")
 with open(manifest_path, "w", encoding="utf-8") as fh:
     json.dump(
         [
-            {"name": "iter000008", "program_hex": program_hex_path, "iterations": 8,
+            {"name": "iter000008", "program_hex": program_hex_path, "program_hex_map": program_map_path, "iterations": 8,
              "init_mode": "counter", "init_seed": 1},
-            {"name": "iter000010", "program_hex": program_hex_path, "iterations": 10,
+            {"name": "iter000010", "program_hex": program_hex_path, "program_hex_map": program_map_path, "iterations": 10,
              "init_mode": "counter", "init_seed": 2},
         ],
         fh,
@@ -74,7 +85,8 @@ cmd = (
 
 test.run_capture(cmd)
 
-for filename in [summary_json, summary_tsv, seed1_log, seed2_log, program_hex1, program_hex2]:
+for filename in [summary_json, summary_tsv, seed1_log, seed2_log, program_hex1, program_hex2,
+                 program_init1, program_init2]:
     if not os.path.exists(filename):
         test.error("Expected output file not found: " + filename)
 
@@ -82,6 +94,8 @@ test.file_grep(summary_json, r'"schema_version": "sim-accel-scenario-batch-v1"')
 test.file_grep(summary_json, r'"scenario_count": 2')
 test.file_grep(summary_json, r'"success_count": 2')
 test.file_grep(summary_json, r'"program_hex_materialized": ".*scenario_inputs/iter000008/program.hex"')
+test.file_grep(summary_json, r'"program_hex_map": ".*program.map"')
+test.file_grep(summary_json, r'"program_hex_init_file": ".*scenario_inputs/iter000008/program_hex.init"')
 test.file_grep(summary_json, r'"nvcc_cache_mode_counts": \{')
 test.file_grep(summary_json, r'"hit": 1')
 test.file_grep(summary_json, r'"miss": 1')
@@ -92,7 +106,19 @@ test.file_grep(seed1_log, r"nvcc_cache_mode=miss")
 test.file_grep(seed2_log, r"nvcc_cache_mode=hit")
 test.file_grep(seed1_log, r"verilator_artifact_cache_mode=miss")
 test.file_grep(seed2_log, r"verilator_artifact_cache_mode=hit")
+test.file_grep(seed1_log, r"init_file=.*program_hex\.init")
+test.file_grep(seed2_log, r"init_file=.*program_hex\.init")
+test.file_grep(seed1_log, r"init_file_values_applied=8192")
+test.file_grep(seed2_log, r"init_file_values_applied=8192")
 test.file_grep(program_hex1, r"08 00 00 00")
 test.file_grep(program_hex2, r"0A 00 00 00")
+test.file_grep(program_init1, r"^a 0x00000008$")
+test.file_grep(program_init1, r"^b 0x00000002$")
+test.file_grep(program_init1, r"^c 0x00000003$")
+test.file_grep(program_init1, r"^d 0x00000004$")
+test.file_grep(program_init2, r"^a 0x0000000A$")
+test.file_grep(program_init2, r"^b 0x00000002$")
+test.file_grep(program_init2, r"^c 0x00000003$")
+test.file_grep(program_init2, r"^d 0x00000004$")
 
 test.passes()

@@ -66,7 +66,8 @@ def parse_args() -> argparse.Namespace:
                         help="Comma-separated init override files")
     parser.add_argument("--scenario-manifest",
                         help=("JSON file with scenarios: "
-                              "[{name, init_mode, init_seed, init_file, program_hex, iterations}]"))
+                              "[{name, init_mode, init_seed, init_file, "
+                              "program_hex, program_hex_map, iterations}]"))
     parser.add_argument("--keep-going", action="store_true",
                         help="Continue after scenario failures")
     parser.add_argument("--keep-scenario-outdirs", action="store_true",
@@ -114,6 +115,88 @@ def materialize_program_hex_variant(outdir: pathlib.Path, scenario: dict[str, An
     return dst
 
 
+def load_program_hex_map(path: pathlib.Path) -> list[tuple[int, int, str]]:
+    entries: list[tuple[int, int, str]] = []
+    for lineno, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        toks = line.split()
+        if len(toks) == 2:
+            addr_text, var_name = toks
+            byte_count = 4
+        elif len(toks) == 3:
+            addr_text, byte_count_text, var_name = toks
+            try:
+                byte_count = int(byte_count_text, 0)
+            except ValueError as exc:
+                raise SystemExit(f"invalid byte count in program_hex_map {path}:{lineno}: {byte_count_text}") from exc
+        else:
+            raise SystemExit(
+                f"invalid program_hex_map line in {path}:{lineno}: expected 'addr var' or 'addr bytes var'"
+            )
+        try:
+            addr = int(addr_text, 0)
+        except ValueError as exc:
+            raise SystemExit(f"invalid address in program_hex_map {path}:{lineno}: {addr_text}") from exc
+        if byte_count <= 0 or byte_count > 4:
+            raise SystemExit(f"program_hex_map byte count must be in 1..4 at {path}:{lineno}")
+        entries.append((addr, byte_count, var_name))
+    if not entries:
+        raise SystemExit(f"program_hex_map is empty: {path}")
+    return entries
+
+
+def materialize_program_hex_init_file(outdir: pathlib.Path, scenario: dict[str, Any]) -> pathlib.Path | None:
+    program_hex_map = scenario.get("program_hex_map")
+    if not program_hex_map:
+        return None
+    program_hex_path = scenario.get("program_hex_materialized") or scenario.get("program_hex")
+    if not program_hex_path:
+        raise SystemExit(
+            f"scenario '{scenario['name']}' uses program_hex_map but has no program_hex/program_hex_materialized"
+        )
+    if load_program_hex is None:
+        raise SystemExit("program_hex_tools.py is required to lower program_hex_map into init files")
+    memory = load_program_hex(program_hex_path)
+    map_entries = load_program_hex_map(pathlib.Path(str(program_hex_map)).expanduser().resolve())
+    dst = outdir / "scenario_inputs" / sanitize_name(str(scenario["name"])) / "program_hex.init"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = []
+    for addr, byte_count, var_name in map_entries:
+        value = 0
+        for byte_idx in range(byte_count):
+            value |= (memory.get(addr + byte_idx, 0) & 0xFF) << (8 * byte_idx)
+        lines.append(f"{var_name} 0x{value:08X}")
+    dst.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return dst
+
+
+def materialize_effective_init_file(outdir: pathlib.Path, scenario: dict[str, Any]) -> pathlib.Path | None:
+    init_parts: list[pathlib.Path] = []
+    if scenario.get("init_file"):
+        init_parts.append(pathlib.Path(str(scenario["init_file"])).expanduser().resolve())
+    generated = materialize_program_hex_init_file(outdir, scenario)
+    if generated is not None:
+        scenario["program_hex_init_file"] = str(generated)
+        init_parts.append(generated)
+    if not init_parts:
+        return None
+    if len(init_parts) == 1:
+        return init_parts[0]
+    dst = outdir / "scenario_inputs" / sanitize_name(str(scenario["name"])) / "effective.init"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with dst.open("w", encoding="utf-8") as fh:
+        for idx, part in enumerate(init_parts):
+            text = part.read_text(encoding="utf-8")
+            if idx:
+                fh.write("\n")
+            fh.write(text)
+            if not text.endswith("\n"):
+                fh.write("\n")
+    return dst
+
+
 def load_manifest(path: pathlib.Path) -> list[dict[str, Any]]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(data, dict):
@@ -139,6 +222,7 @@ def build_scenarios(args: argparse.Namespace) -> list[dict[str, Any]]:
                 "init_seed": seed,
                 "init_file": None,
                 "program_hex": None,
+                "program_hex_map": None,
                 "iterations": None,
             })
     if args.scenario_init_files:
@@ -150,6 +234,7 @@ def build_scenarios(args: argparse.Namespace) -> list[dict[str, Any]]:
                 "init_seed": args.init_seed,
                 "init_file": str(path),
                 "program_hex": None,
+                "program_hex_map": None,
                 "iterations": None,
             })
     if args.scenario_manifest:
@@ -159,17 +244,21 @@ def build_scenarios(args: argparse.Namespace) -> list[dict[str, Any]]:
             init_seed = int(item.get("init_seed", args.init_seed))
             init_file = item.get("init_file")
             program_hex = item.get("program_hex")
+            program_hex_map = item.get("program_hex_map")
             iterations = item.get("iterations")
             if init_file:
                 init_file = str(pathlib.Path(str(init_file)).expanduser().resolve())
             if program_hex:
                 program_hex = str(pathlib.Path(str(program_hex)).expanduser().resolve())
+            if program_hex_map:
+                program_hex_map = str(pathlib.Path(str(program_hex_map)).expanduser().resolve())
             scenarios.append({
                 "name": name,
                 "init_mode": init_mode,
                 "init_seed": init_seed,
                 "init_file": init_file,
                 "program_hex": program_hex,
+                "program_hex_map": program_hex_map,
                 "iterations": iterations,
             })
     if not scenarios:
@@ -180,11 +269,11 @@ def build_scenarios(args: argparse.Namespace) -> list[dict[str, Any]]:
         base = sanitize_name(str(scenario["name"]))
         name_counts[base] += 1
         scenario["name"] = base if name_counts[base] == 1 else f"{base}_{name_counts[base]:02d}"
-        if scenario.get("program_hex") and not scenario.get("init_file"):
+        if scenario.get("program_hex") and not scenario.get("init_file") and not scenario.get("program_hex_map"):
             sys.stderr.write(
                 f"warning: scenario '{scenario['name']}' carries program_hex/iterations metadata, "
                 "but the current sim-accel path does not lower that into runtime state yet; "
-                "provide init_file if you need the scenario to affect execution.\n"
+                "provide init_file or program_hex_map if you need the scenario to affect execution.\n"
             )
     return scenarios
 
@@ -228,7 +317,10 @@ def write_tsv(path: pathlib.Path, rows: list[dict[str, Any]]) -> None:
         "init_seed",
         "init_file",
         "program_hex",
+        "program_hex_map",
         "program_hex_materialized",
+        "program_hex_init_file",
+        "effective_init_file",
         "iterations",
         "cpu_reference_checked",
         "mismatch",
@@ -280,6 +372,9 @@ def main() -> int:
         materialized_program_hex = materialize_program_hex_variant(outdir, scenario)
         if materialized_program_hex is not None:
             scenario["program_hex_materialized"] = str(materialized_program_hex)
+        effective_init_file = materialize_effective_init_file(outdir, scenario)
+        if effective_init_file is not None:
+            scenario["effective_init_file"] = str(effective_init_file)
         cmd = [
             str(bench),
             "--verilator", args.verilator,
@@ -299,8 +394,8 @@ def main() -> int:
             cmd.append("--no-compile-cache")
         if args.skip_cpu_reference_build:
             cmd.append("--skip-cpu-reference-build")
-        if scenario.get("init_file"):
-            cmd.extend(["--init-file", str(scenario["init_file"])])
+        if scenario.get("effective_init_file"):
+            cmd.extend(["--init-file", str(scenario["effective_init_file"])])
         cmd.append("--")
         cmd.extend(args.verilator_args)
 
@@ -331,7 +426,10 @@ def main() -> int:
             "init_seed": scenario["init_seed"],
             "init_file": scenario.get("init_file") or "",
             "program_hex": scenario.get("program_hex") or "",
+            "program_hex_map": scenario.get("program_hex_map") or "",
             "program_hex_materialized": scenario.get("program_hex_materialized") or "",
+            "program_hex_init_file": scenario.get("program_hex_init_file") or "",
+            "effective_init_file": scenario.get("effective_init_file") or "",
             "iterations": scenario.get("iterations") if scenario.get("iterations") is not None else "",
             "cpu_reference_checked": metrics.get("cpu_reference_checked", ""),
             "mismatch": metrics.get("mismatch", ""),
@@ -354,7 +452,10 @@ def main() -> int:
             "init_seed": scenario["init_seed"],
             "init_file": scenario.get("init_file"),
             "program_hex": scenario.get("program_hex"),
+            "program_hex_map": scenario.get("program_hex_map"),
             "program_hex_materialized": scenario.get("program_hex_materialized"),
+            "program_hex_init_file": scenario.get("program_hex_init_file"),
+            "effective_init_file": scenario.get("effective_init_file"),
             "iterations": scenario.get("iterations"),
             "outdir": str(scenario_outdir),
             "returncode": proc.returncode,
