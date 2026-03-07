@@ -7,6 +7,7 @@
 # SPDX-FileCopyrightText: 2026 Wilson Snyder
 # SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
+import json
 import os
 import shutil
 import tempfile
@@ -64,8 +65,10 @@ for path in [cache_dir, bench_dir_miss, bench_dir_hit, bench_dir_objhit, bench_d
 program_hex_dir = tempfile.mkdtemp(prefix="sim_accel_bench_program_hex_", dir=test.obj_dir)
 program_hex_path = program_hex_dir + "/program.hex"
 program_map_path = program_hex_dir + "/program.map"
+program_target_path = program_hex_dir + "/program.target.json"
 memory_image_path = program_hex_dir + "/memory.bin"
 memory_map_path = program_hex_dir + "/memory.map"
+memory_target_path = program_hex_dir + "/memory.target.json"
 with open(program_hex_path, "w", encoding="utf-8") as fh:
     fh.write("@10000000\n")
     fh.write("01 00 00 00\n")
@@ -77,6 +80,16 @@ with open(program_map_path, "w", encoding="utf-8") as fh:
     fh.write("0x10000004 b\n")
     fh.write("0x10000008 c\n")
     fh.write("0x1000000C d\n")
+with open(program_target_path, "w", encoding="utf-8") as fh:
+    json.dump(
+        {
+            "kind": "mapped-visible-preload-v1",
+            "name": "program_hex_target",
+            "map_file": program_map_path,
+            "default_format": "hex",
+        },
+        fh,
+    )
 with open(memory_image_path, "wb") as fh:
     fh.write(bytes([0x0A, 0x00, 0x00, 0x00,
                     0x02, 0x00, 0x00, 0x00,
@@ -87,6 +100,27 @@ with open(memory_map_path, "w", encoding="utf-8") as fh:
     fh.write("0x4 b\n")
     fh.write("0x8 c\n")
     fh.write("0xC d\n")
+with open(memory_target_path, "w", encoding="utf-8") as fh:
+    json.dump(
+        {
+            "kind": "memory-array-preload-v1",
+            "name": "memory_image_target",
+            "target_path": "t.mem",
+            "word_bits": 32,
+            "depth": 4,
+            "base_addr": 0,
+            "address_unit_bytes": 4,
+            "default_format": "bin",
+            "endianness": "little",
+            "elements": [
+                {"var_name": "a", "offset": 0, "byte_count": 4, "index": 0},
+                {"var_name": "b", "offset": 4, "byte_count": 4, "index": 1},
+                {"var_name": "c", "offset": 8, "byte_count": 4, "index": 2},
+                {"var_name": "d", "offset": 12, "byte_count": 4, "index": 3},
+            ],
+        },
+        fh,
+    )
 
 bench_cmd = (
     os.environ["VERILATOR_ROOT"] + "/bin/verilator --sim-accel-bench"
@@ -176,7 +210,7 @@ bench_cmd_program_hex = (
     + " --assigns-per-kernel 2"
     + " --compile-cache-dir " + cache_dir
     + " --program-hex " + program_hex_path
-    + " --program-hex-map " + program_map_path
+    + " --program-hex-target " + program_target_path
     + " --program-hex-iterations 8"
     + " -- "
     + test.t_dir + "/t_sim_accel_bench_exec.v")
@@ -189,7 +223,7 @@ bench_cmd_memory_image = (
     + " --assigns-per-kernel 2"
     + " --compile-cache-dir " + cache_dir
     + " --memory-image " + memory_image_path
-    + " --memory-image-map " + memory_map_path
+    + " --memory-image-target " + memory_target_path
     + " --memory-image-format bin"
     + " -- "
     + test.t_dir + "/t_sim_accel_bench_exec.v")
@@ -290,11 +324,11 @@ test.file_grep(bench_hybrid_cluster_auto_log, r"hybrid_transfer_ms_per_rep=")
 test.file_grep(bench_hybrid_cluster_auto_log, r"hybrid_cpu_dispatch_ms_per_rep=")
 test.file_grep(bench_hybrid_cluster_auto_log, r"hybrid_mismatch=0")
 test.file_grep(bench_program_hex_log, r"program_hex=.*program\.hex")
-test.file_grep(bench_program_hex_log, r"program_hex_map=.*program\.map")
+test.file_grep(bench_program_hex_log, r"program_hex_target=.*program\.target\.json")
 test.file_grep(bench_program_hex_log, r"program_hex_iterations=8")
 test.file_grep(bench_program_hex_log, r"program_hex_materialized=.*program_hex\.materialized")
 test.file_grep(bench_program_hex_log, r"program_hex_init_file=.*program_hex\.init")
-test.file_grep(bench_program_hex_log, r"program_hex_preload_tsv=.*program_hex\.preload\.tsv")
+test.file_grep(bench_program_hex_log, r"program_hex_preload_tsv=$")
 test.file_grep(bench_program_hex_log, r"program_hex_preload_entries=4")
 test.file_grep(bench_program_hex_log, r"effective_init_file=.*program_hex\.init")
 test.file_grep(bench_program_hex_log, r"init_file=.*program_hex\.init")
@@ -306,11 +340,11 @@ test.file_grep(bench_dir_program_hex + r"/program_hex.init", r"^b 0x00000002$")
 test.file_grep(bench_dir_program_hex + r"/program_hex.init", r"^c 0x00000003$")
 test.file_grep(bench_dir_program_hex + r"/program_hex.init", r"^d 0x00000004$")
 test.file_grep(bench_memory_image_log, r"memory_image=.*memory\.bin")
-test.file_grep(bench_memory_image_log, r"memory_image_map=.*memory\.map")
+test.file_grep(bench_memory_image_log, r"memory_image_target=.*memory\.target\.json")
 test.file_grep(bench_memory_image_log, r"memory_image_format=bin")
 test.file_grep(bench_memory_image_log, r"memory_image_materialized=.*memory_image\.materialized\.bin")
 test.file_grep(bench_memory_image_log, r"memory_image_init_file=.*memory_image\.init")
-test.file_grep(bench_memory_image_log, r"memory_image_preload_tsv=.*memory_image\.preload\.tsv")
+test.file_grep(bench_memory_image_log, r"memory_image_preload_tsv=$")
 test.file_grep(bench_memory_image_log, r"memory_image_preload_entries=4")
 test.file_grep(bench_memory_image_log, r"effective_init_file=.*memory_image\.init")
 test.file_grep(bench_memory_image_log, r"init_file=.*memory_image\.init")

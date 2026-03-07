@@ -23,11 +23,15 @@ Options:
   --program-hex PATH   Materialize a program.hex scenario input for sim-accel bench
   --program-hex-map PATH
                        Map program.hex addresses into visible vars via generated init-file
+  --program-hex-target PATH
+                       Target descriptor for program.hex lowering
   --program-hex-iterations N
                        Patch the first 32-bit word in program.hex before applying the map
   --memory-image PATH  Materialize a generic preload image for sim-accel bench
   --memory-image-map PATH
                        Map memory-image offsets into visible vars via generated init-file
+  --memory-image-target PATH
+                       Target descriptor for memory-image lowering
   --memory-image-format FMT
                        Input image format: auto|hex|bin (default: auto)
   --assigns-per-kernel N  Limit emitted assigns per generated CUDA kernel partition (default: 0)
@@ -88,6 +92,8 @@ PROGRAM_HEX=""
 PROGRAM_HEX_ABS=""
 PROGRAM_HEX_MAP=""
 PROGRAM_HEX_MAP_ABS=""
+PROGRAM_HEX_TARGET=""
+PROGRAM_HEX_TARGET_ABS=""
 PROGRAM_HEX_ITERATIONS=""
 PROGRAM_HEX_MATERIALIZED=""
 PROGRAM_HEX_INIT_FILE=""
@@ -97,6 +103,8 @@ MEMORY_IMAGE=""
 MEMORY_IMAGE_ABS=""
 MEMORY_IMAGE_MAP=""
 MEMORY_IMAGE_MAP_ABS=""
+MEMORY_IMAGE_TARGET=""
+MEMORY_IMAGE_TARGET_ABS=""
 MEMORY_IMAGE_FORMAT="auto"
 MEMORY_IMAGE_MATERIALIZED=""
 MEMORY_IMAGE_INIT_FILE=""
@@ -147,12 +155,16 @@ while [[ $# -gt 0 ]]; do
       PROGRAM_HEX="$2"; shift 2 ;;
     --program-hex-map)
       PROGRAM_HEX_MAP="$2"; shift 2 ;;
+    --program-hex-target)
+      PROGRAM_HEX_TARGET="$2"; shift 2 ;;
     --program-hex-iterations)
       PROGRAM_HEX_ITERATIONS="$2"; shift 2 ;;
     --memory-image)
       MEMORY_IMAGE="$2"; shift 2 ;;
     --memory-image-map)
       MEMORY_IMAGE_MAP="$2"; shift 2 ;;
+    --memory-image-target)
+      MEMORY_IMAGE_TARGET="$2"; shift 2 ;;
     --memory-image-format)
       MEMORY_IMAGE_FORMAT="$2"; shift 2 ;;
     --assigns-per-kernel)
@@ -368,16 +380,24 @@ if [[ -n "$INIT_FILE" ]]; then
   INIT_FILE_ABS="$(cd "$(dirname "$INIT_FILE")" && pwd)/$(basename "$INIT_FILE")"
 fi
 
+if [[ -n "$PROGRAM_HEX_MAP" && -n "$PROGRAM_HEX_TARGET" ]]; then
+  echo "--program-hex-map and --program-hex-target are mutually exclusive" >&2
+  exit 2
+fi
 if [[ -n "$PROGRAM_HEX_MAP" && -z "$PROGRAM_HEX" ]]; then
   echo "--program-hex-map requires --program-hex" >&2
+  exit 2
+fi
+if [[ -n "$PROGRAM_HEX_TARGET" && -z "$PROGRAM_HEX" ]]; then
+  echo "--program-hex-target requires --program-hex" >&2
   exit 2
 fi
 if [[ -n "$PROGRAM_HEX_ITERATIONS" && -z "$PROGRAM_HEX" ]]; then
   echo "--program-hex-iterations requires --program-hex" >&2
   exit 2
 fi
-if [[ -n "$PROGRAM_HEX" && -z "$PROGRAM_HEX_MAP" ]]; then
-  echo "--program-hex currently requires --program-hex-map" >&2
+if [[ -n "$PROGRAM_HEX" && -z "$PROGRAM_HEX_MAP" && -z "$PROGRAM_HEX_TARGET" ]]; then
+  echo "--program-hex currently requires --program-hex-map or --program-hex-target" >&2
   exit 2
 fi
 if [[ -n "$PROGRAM_HEX" ]]; then
@@ -394,16 +414,31 @@ if [[ -n "$PROGRAM_HEX_MAP" ]]; then
   fi
   PROGRAM_HEX_MAP_ABS="$(cd "$(dirname "$PROGRAM_HEX_MAP")" && pwd)/$(basename "$PROGRAM_HEX_MAP")"
 fi
+if [[ -n "$PROGRAM_HEX_TARGET" ]]; then
+  if [[ ! -f "$PROGRAM_HEX_TARGET" ]]; then
+    echo "--program-hex-target not found: $PROGRAM_HEX_TARGET" >&2
+    exit 2
+  fi
+  PROGRAM_HEX_TARGET_ABS="$(cd "$(dirname "$PROGRAM_HEX_TARGET")" && pwd)/$(basename "$PROGRAM_HEX_TARGET")"
+fi
 if [[ -n "$PROGRAM_HEX_ITERATIONS" ]] && ! [[ "$PROGRAM_HEX_ITERATIONS" =~ ^[0-9]+$ ]]; then
   echo "Invalid --program-hex-iterations: $PROGRAM_HEX_ITERATIONS (expected integer >= 0)" >&2
+  exit 2
+fi
+if [[ -n "$MEMORY_IMAGE_MAP" && -n "$MEMORY_IMAGE_TARGET" ]]; then
+  echo "--memory-image-map and --memory-image-target are mutually exclusive" >&2
   exit 2
 fi
 if [[ -n "$MEMORY_IMAGE_MAP" && -z "$MEMORY_IMAGE" ]]; then
   echo "--memory-image-map requires --memory-image" >&2
   exit 2
 fi
-if [[ -n "$MEMORY_IMAGE" && -z "$MEMORY_IMAGE_MAP" ]]; then
-  echo "--memory-image currently requires --memory-image-map" >&2
+if [[ -n "$MEMORY_IMAGE_TARGET" && -z "$MEMORY_IMAGE" ]]; then
+  echo "--memory-image-target requires --memory-image" >&2
+  exit 2
+fi
+if [[ -n "$MEMORY_IMAGE" && -z "$MEMORY_IMAGE_MAP" && -z "$MEMORY_IMAGE_TARGET" ]]; then
+  echo "--memory-image currently requires --memory-image-map or --memory-image-target" >&2
   exit 2
 fi
 case "$MEMORY_IMAGE_FORMAT" in
@@ -429,6 +464,13 @@ if [[ -n "$MEMORY_IMAGE_MAP" ]]; then
     exit 2
   fi
   MEMORY_IMAGE_MAP_ABS="$(cd "$(dirname "$MEMORY_IMAGE_MAP")" && pwd)/$(basename "$MEMORY_IMAGE_MAP")"
+fi
+if [[ -n "$MEMORY_IMAGE_TARGET" ]]; then
+  if [[ ! -f "$MEMORY_IMAGE_TARGET" ]]; then
+    echo "--memory-image-target not found: $MEMORY_IMAGE_TARGET" >&2
+    exit 2
+  fi
+  MEMORY_IMAGE_TARGET_ABS="$(cd "$(dirname "$MEMORY_IMAGE_TARGET")" && pwd)/$(basename "$MEMORY_IMAGE_TARGET")"
 fi
 
 mkdir -p "$COMPILE_CACHE_DIR"
@@ -1050,11 +1092,87 @@ LOG="$OUTDIR/verilator_cuda.log"
 TIME_VERILATOR="$OUTDIR/time_verilator_codegen_sec.txt"
 TIME_NVCC="$OUTDIR/time_nvcc_compile_sec.txt"
 TIME_RUN="$OUTDIR/time_bench_run_sec.txt"
+MEMORY_IMAGE_INIT_HELPER="$(cd "$(dirname "$0")/../../scripts" && pwd)/materialize_memory_image_init.py"
 
 materialize_program_hex_inputs() {
   [[ -n "$PROGRAM_HEX_ABS" ]] || return 0
   local outdir="$1"
   local vars_tsv="$2"
+  if [[ -n "$PROGRAM_HEX_TARGET_ABS" ]]; then
+    local pyout
+    pyout="$(python3 - "$PROGRAM_HEX_ABS" "${PROGRAM_HEX_ITERATIONS:-}" "$outdir" <<'PY'
+import pathlib
+import sys
+
+def load_program_hex(path: pathlib.Path) -> dict[int, int]:
+    memory: dict[int, int] = {}
+    current_addr = 0
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.split("//", 1)[0].strip()
+        if not line:
+            continue
+        for token in line.split():
+            if token.startswith("@"):
+                current_addr = int(token[1:], 16)
+                continue
+            value = int(token, 16)
+            memory[current_addr] = value
+            current_addr += 1
+    return memory
+
+def patch_iterations(memory: dict[int, int], iterations: int, base_addr: int = 0x10000000) -> dict[int, int]:
+    patched = dict(memory)
+    for byte_idx in range(4):
+        patched[base_addr + byte_idx] = (iterations >> (8 * byte_idx)) & 0xFF
+    return patched
+
+def store_program_hex(path: pathlib.Path, memory: dict[int, int], bytes_per_line: int = 16) -> None:
+    addrs = sorted(memory.keys())
+    lines: list[str] = []
+    run_start = addrs[0]
+    run_bytes = [memory[run_start]]
+    last_addr = run_start
+    def flush(start_addr: int, data: list[int]) -> None:
+        lines.append(f"@{start_addr:08X}")
+        for idx in range(0, len(data), bytes_per_line):
+            chunk = data[idx: idx + bytes_per_line]
+            lines.append(" ".join(f"{byte:02X}" for byte in chunk))
+    for addr in addrs[1:]:
+        if addr == last_addr + 1:
+            run_bytes.append(memory[addr])
+        else:
+            flush(run_start, run_bytes)
+            run_start = addr
+            run_bytes = [memory[addr]]
+        last_addr = addr
+    flush(run_start, run_bytes)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+program_hex = pathlib.Path(sys.argv[1]).resolve()
+iterations = sys.argv[2]
+outdir = pathlib.Path(sys.argv[3]).resolve()
+memory = load_program_hex(program_hex)
+if iterations:
+    memory = patch_iterations(memory, int(iterations))
+materialized = outdir / "program_hex.materialized"
+store_program_hex(materialized, memory)
+print(f"materialized={materialized}")
+PY
+)"
+    while IFS='=' read -r key value; do
+      case "$key" in
+        materialized) PROGRAM_HEX_MATERIALIZED="$value" ;;
+      esac
+    done <<<"$pyout"
+    PROGRAM_HEX_INIT_FILE="$outdir/program_hex.init"
+    python3 "$MEMORY_IMAGE_INIT_HELPER" \
+      --memory-image "$PROGRAM_HEX_MATERIALIZED" \
+      --target-descriptor "$PROGRAM_HEX_TARGET_ABS" \
+      --format hex \
+      --out "$PROGRAM_HEX_INIT_FILE"
+    PROGRAM_HEX_PRELOAD_ENTRIES="$(wc -l < "$PROGRAM_HEX_INIT_FILE" | tr -d ' ')"
+    return 0
+  fi
   local pyout
   pyout="$(python3 - "$PROGRAM_HEX_ABS" "$PROGRAM_HEX_MAP_ABS" "${PROGRAM_HEX_ITERATIONS:-}" "$outdir" "$vars_tsv" <<'PY'
 import csv
@@ -1194,6 +1312,28 @@ materialize_memory_image_inputs() {
   [[ -n "$MEMORY_IMAGE_ABS" ]] || return 0
   local outdir="$1"
   local vars_tsv="$2"
+  if [[ -n "$MEMORY_IMAGE_TARGET_ABS" ]]; then
+    if [[ "$MEMORY_IMAGE_FORMAT" == "auto" ]]; then
+      if [[ "${MEMORY_IMAGE_ABS##*.}" == "bin" || "${MEMORY_IMAGE_ABS##*.}" == "img" ]]; then
+        MEMORY_IMAGE_MATERIALIZED="$outdir/memory_image.materialized.bin"
+      else
+        MEMORY_IMAGE_MATERIALIZED="$outdir/memory_image.materialized.hex"
+      fi
+    elif [[ "$MEMORY_IMAGE_FORMAT" == "bin" ]]; then
+      MEMORY_IMAGE_MATERIALIZED="$outdir/memory_image.materialized.bin"
+    else
+      MEMORY_IMAGE_MATERIALIZED="$outdir/memory_image.materialized.hex"
+    fi
+    cp "$MEMORY_IMAGE_ABS" "$MEMORY_IMAGE_MATERIALIZED"
+    MEMORY_IMAGE_INIT_FILE="$outdir/memory_image.init"
+    python3 "$MEMORY_IMAGE_INIT_HELPER" \
+      --memory-image "$MEMORY_IMAGE_MATERIALIZED" \
+      --target-descriptor "$MEMORY_IMAGE_TARGET_ABS" \
+      --format "$MEMORY_IMAGE_FORMAT" \
+      --out "$MEMORY_IMAGE_INIT_FILE"
+    MEMORY_IMAGE_PRELOAD_ENTRIES="$(wc -l < "$MEMORY_IMAGE_INIT_FILE" | tr -d ' ')"
+    return 0
+  fi
   local pyout
   pyout="$(python3 - "$MEMORY_IMAGE_ABS" "$MEMORY_IMAGE_MAP_ABS" "$MEMORY_IMAGE_FORMAT" "$outdir" "$vars_tsv" <<'PY'
 import csv
@@ -3458,6 +3598,7 @@ if [[ -n "$PROGRAM_HEX_ABS" ]]; then
   {
     echo "program_hex=$PROGRAM_HEX_ABS"
     echo "program_hex_map=$PROGRAM_HEX_MAP_ABS"
+    echo "program_hex_target=$PROGRAM_HEX_TARGET_ABS"
     if [[ -n "$PROGRAM_HEX_ITERATIONS" ]]; then
       echo "program_hex_iterations=$PROGRAM_HEX_ITERATIONS"
     fi
@@ -3474,6 +3615,7 @@ if [[ -n "$MEMORY_IMAGE_ABS" ]]; then
   {
     echo "memory_image=$MEMORY_IMAGE_ABS"
     echo "memory_image_map=$MEMORY_IMAGE_MAP_ABS"
+    echo "memory_image_target=$MEMORY_IMAGE_TARGET_ABS"
     echo "memory_image_format=$MEMORY_IMAGE_FORMAT"
     echo "memory_image_materialized=$MEMORY_IMAGE_MATERIALIZED"
     echo "memory_image_init_file=$MEMORY_IMAGE_INIT_FILE"

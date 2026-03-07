@@ -46,8 +46,10 @@ for path in [cache_dir, batch_dir]:
 program_hex_dir = tempfile.mkdtemp(prefix="sim_accel_program_hex_", dir=test.obj_dir)
 program_hex_path = program_hex_dir + "/program.hex"
 program_map_path = program_hex_dir + "/program.map"
+program_target_path = program_hex_dir + "/program.target.json"
 memory_bin_path = program_hex_dir + "/memory.bin"
 memory_map_path = program_hex_dir + "/memory.map"
+memory_target_path = program_hex_dir + "/memory.target.json"
 manifest_path = program_hex_dir + "/scenarios.json"
 with open(program_hex_path, "w", encoding="utf-8") as fh:
     fh.write("@10000000\n")
@@ -60,6 +62,16 @@ with open(program_map_path, "w", encoding="utf-8") as fh:
     fh.write("0x10000004 b\n")
     fh.write("0x10000008 c\n")
     fh.write("0x1000000C d\n")
+with open(program_target_path, "w", encoding="utf-8") as fh:
+    json.dump(
+        {
+            "kind": "mapped-visible-preload-v1",
+            "name": "program_hex_target",
+            "map_file": program_map_path,
+            "default_format": "hex",
+        },
+        fh,
+    )
 with open(memory_bin_path, "wb") as fh:
     fh.write(bytes([0x0A, 0x00, 0x00, 0x00,
                     0x02, 0x00, 0x00, 0x00,
@@ -70,12 +82,33 @@ with open(memory_map_path, "w", encoding="utf-8") as fh:
     fh.write("0x4 b\n")
     fh.write("0x8 c\n")
     fh.write("0xC d\n")
+with open(memory_target_path, "w", encoding="utf-8") as fh:
+    json.dump(
+        {
+            "kind": "memory-array-preload-v1",
+            "name": "memory_image_target",
+            "target_path": "t.mem",
+            "word_bits": 32,
+            "depth": 4,
+            "base_addr": 0,
+            "address_unit_bytes": 4,
+            "default_format": "bin",
+            "endianness": "little",
+            "elements": [
+                {"var_name": "a", "offset": 0, "byte_count": 4, "index": 0},
+                {"var_name": "b", "offset": 4, "byte_count": 4, "index": 1},
+                {"var_name": "c", "offset": 8, "byte_count": 4, "index": 2},
+                {"var_name": "d", "offset": 12, "byte_count": 4, "index": 3},
+            ],
+        },
+        fh,
+    )
 with open(manifest_path, "w", encoding="utf-8") as fh:
     json.dump(
         [
-            {"name": "iter000008", "program_hex": program_hex_path, "program_hex_map": program_map_path, "iterations": 8,
+            {"name": "iter000008", "program_hex": program_hex_path, "program_hex_target": program_target_path, "iterations": 8,
              "init_mode": "counter", "init_seed": 1},
-            {"name": "bin000010", "memory_image": memory_bin_path, "memory_image_map": memory_map_path,
+            {"name": "bin000010", "memory_image": memory_bin_path, "memory_image_target": memory_target_path,
              "memory_image_format": "bin", "init_mode": "counter", "init_seed": 2},
         ],
         fh,
@@ -106,7 +139,7 @@ test.file_grep(summary_json, r'"schema_version": "sim-accel-scenario-batch-v1"')
 test.file_grep(summary_json, r'"scenario_count": 2')
 test.file_grep(summary_json, r'"success_count": 2')
 test.file_grep(summary_json, r'"program_hex_materialized": ".*scenario_inputs/iter000008/program.hex"')
-test.file_grep(summary_json, r'"program_hex_map": ".*program.map"')
+test.file_grep(summary_json, r'"program_hex_target": ".*program.target.json"')
 test.file_grep(summary_json, r'"program_hex_init_file": ".*scenario_inputs/iter000008/program_hex.init"')
 test.file_grep(summary_json, r'"nvcc_cache_mode_counts": \{')
 test.file_grep(summary_json, r'"hit": 1')
@@ -128,7 +161,7 @@ test.file_grep(program_init1, r"^b 0x00000002$")
 test.file_grep(program_init1, r"^c 0x00000003$")
 test.file_grep(program_init1, r"^d 0x00000004$")
 test.file_grep(summary_json, r'"memory_image": ".*memory.bin"')
-test.file_grep(summary_json, r'"memory_image_map": ".*memory.map"')
+test.file_grep(summary_json, r'"memory_image_target": ".*memory.target.json"')
 test.file_grep(summary_json, r'"memory_image_materialized": ".*scenario_inputs/bin000010/memory_image.bin"')
 test.file_grep(summary_json, r'"memory_image_init_file": ".*scenario_inputs/bin000010/memory_image.init"')
 test.file_grep(memory_init2, r"^a 0x0000000A$")
