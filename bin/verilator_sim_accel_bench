@@ -101,8 +101,10 @@ PROGRAM_HEX_MATERIALIZED=""
 PROGRAM_HEX_INIT_FILE=""
 PROGRAM_HEX_DIRECT_FILE=""
 PROGRAM_HEX_PRELOAD_TSV=""
+PROGRAM_HEX_PAYLOAD_TSV=""
 PROGRAM_HEX_PRELOAD_ENTRIES=0
 PROGRAM_HEX_DIRECT_ENTRIES=0
+PROGRAM_HEX_PAYLOAD_ENTRIES=0
 MEMORY_IMAGE=""
 MEMORY_IMAGE_ABS=""
 MEMORY_IMAGE_MAP=""
@@ -114,8 +116,10 @@ MEMORY_IMAGE_MATERIALIZED=""
 MEMORY_IMAGE_INIT_FILE=""
 MEMORY_IMAGE_DIRECT_FILE=""
 MEMORY_IMAGE_PRELOAD_TSV=""
+MEMORY_IMAGE_PAYLOAD_TSV=""
 MEMORY_IMAGE_PRELOAD_ENTRIES=0
 MEMORY_IMAGE_DIRECT_ENTRIES=0
+MEMORY_IMAGE_PAYLOAD_ENTRIES=0
 EFFECTIVE_INIT_FILE=""
 ASSIGNS_PER_KERNEL=0
 HYBRID_MODE="off"
@@ -1180,6 +1184,7 @@ PY
   PROGRAM_HEX_INIT_FILE="$outdir/program_hex.init"
   PROGRAM_HEX_PRELOAD_TSV="$outdir/program_hex.preload.tsv"
   PROGRAM_HEX_DIRECT_FILE="$outdir/program_hex.direct.tsv"
+  PROGRAM_HEX_PAYLOAD_TSV="$outdir/program_hex.payload.tsv"
   local helper_out
   if [[ -n "$PROGRAM_HEX_TARGET_ABS" ]]; then
     helper_out="$(python3 "$PRELOAD_MATERIALIZE_HELPER" \
@@ -1189,7 +1194,8 @@ PY
       --target-descriptor "$PROGRAM_HEX_TARGET_ABS" \
       --out-init "$PROGRAM_HEX_INIT_FILE" \
       --out-preload-tsv "$PROGRAM_HEX_PRELOAD_TSV" \
-      --out-direct "$PROGRAM_HEX_DIRECT_FILE")"
+      --out-direct "$PROGRAM_HEX_DIRECT_FILE" \
+      --out-payload-tsv "$PROGRAM_HEX_PAYLOAD_TSV")"
   else
     helper_out="$(python3 "$PRELOAD_MATERIALIZE_HELPER" \
       --memory-image "$PROGRAM_HEX_MATERIALIZED" \
@@ -1207,6 +1213,8 @@ PY
       direct_file) PROGRAM_HEX_DIRECT_FILE="$value" ;;
       entry_count) PROGRAM_HEX_PRELOAD_ENTRIES="$value" ;;
       visible_entry_count) PROGRAM_HEX_DIRECT_ENTRIES="$value" ;;
+      payload_tsv) PROGRAM_HEX_PAYLOAD_TSV="$value" ;;
+      payload_entry_count) PROGRAM_HEX_PAYLOAD_ENTRIES="$value" ;;
     esac
   done <<<"$helper_out"
 }
@@ -1230,6 +1238,7 @@ materialize_memory_image_inputs() {
   MEMORY_IMAGE_INIT_FILE="$outdir/memory_image.init"
   MEMORY_IMAGE_PRELOAD_TSV="$outdir/memory_image.preload.tsv"
   MEMORY_IMAGE_DIRECT_FILE="$outdir/memory_image.direct.tsv"
+  MEMORY_IMAGE_PAYLOAD_TSV="$outdir/memory_image.payload.tsv"
   local helper_out
   if [[ -n "$MEMORY_IMAGE_TARGET_ABS" ]]; then
     helper_out="$(python3 "$PRELOAD_MATERIALIZE_HELPER" \
@@ -1239,7 +1248,8 @@ materialize_memory_image_inputs() {
       --target-descriptor "$MEMORY_IMAGE_TARGET_ABS" \
       --out-init "$MEMORY_IMAGE_INIT_FILE" \
       --out-preload-tsv "$MEMORY_IMAGE_PRELOAD_TSV" \
-      --out-direct "$MEMORY_IMAGE_DIRECT_FILE")"
+      --out-direct "$MEMORY_IMAGE_DIRECT_FILE" \
+      --out-payload-tsv "$MEMORY_IMAGE_PAYLOAD_TSV")"
   else
     helper_out="$(python3 "$PRELOAD_MATERIALIZE_HELPER" \
       --memory-image "$MEMORY_IMAGE_MATERIALIZED" \
@@ -1257,6 +1267,8 @@ materialize_memory_image_inputs() {
       direct_file) MEMORY_IMAGE_DIRECT_FILE="$value" ;;
       entry_count) MEMORY_IMAGE_PRELOAD_ENTRIES="$value" ;;
       visible_entry_count) MEMORY_IMAGE_DIRECT_ENTRIES="$value" ;;
+      payload_tsv) MEMORY_IMAGE_PAYLOAD_TSV="$value" ;;
+      payload_entry_count) MEMORY_IMAGE_PAYLOAD_ENTRIES="$value" ;;
     esac
   done <<<"$helper_out"
 }
@@ -3765,6 +3777,10 @@ if [[ -n "$PROGRAM_HEX_ABS" ]]; then
     echo "program_hex_preload_entries=$PROGRAM_HEX_PRELOAD_ENTRIES"
     echo "program_hex_direct_file=$PROGRAM_HEX_DIRECT_FILE"
     echo "program_hex_direct_entries=$PROGRAM_HEX_DIRECT_ENTRIES"
+    if [[ -n "$PROGRAM_HEX_PAYLOAD_TSV" && -f "$PROGRAM_HEX_PAYLOAD_TSV" ]]; then
+      echo "program_hex_payload_tsv=$PROGRAM_HEX_PAYLOAD_TSV"
+      echo "program_hex_payload_entries=$PROGRAM_HEX_PAYLOAD_ENTRIES"
+    fi
     if [[ -n "$EFFECTIVE_INIT_FILE" ]]; then
       echo "effective_init_file=$EFFECTIVE_INIT_FILE"
     fi
@@ -3782,6 +3798,10 @@ if [[ -n "$MEMORY_IMAGE_ABS" ]]; then
     echo "memory_image_preload_entries=$MEMORY_IMAGE_PRELOAD_ENTRIES"
     echo "memory_image_direct_file=$MEMORY_IMAGE_DIRECT_FILE"
     echo "memory_image_direct_entries=$MEMORY_IMAGE_DIRECT_ENTRIES"
+    if [[ -n "$MEMORY_IMAGE_PAYLOAD_TSV" && -f "$MEMORY_IMAGE_PAYLOAD_TSV" ]]; then
+      echo "memory_image_payload_tsv=$MEMORY_IMAGE_PAYLOAD_TSV"
+      echo "memory_image_payload_entries=$MEMORY_IMAGE_PAYLOAD_ENTRIES"
+    fi
     if [[ -n "$EFFECTIVE_INIT_FILE" ]]; then
       echo "effective_init_file=$EFFECTIVE_INIT_FILE"
     fi

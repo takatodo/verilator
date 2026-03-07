@@ -31,6 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-init", required=True)
     parser.add_argument("--out-preload-tsv", required=True)
     parser.add_argument("--out-direct", required=True)
+    parser.add_argument("--out-payload-tsv")
     args = parser.parse_args()
     if bool(args.target_descriptor) == bool(args.map_file):
         parser.error("exactly one of --target-descriptor or --map-file is required")
@@ -116,6 +117,15 @@ def load_target_descriptor(path: str | pathlib.Path) -> dict[str, Any]:
             "map_file": str(pathlib.Path(str(map_path)).expanduser().resolve()),
         }
     if kind == FULL_MEMORY_ARRAY_KIND:
+        target_path = payload.get("target_path")
+        word_bits = payload.get("word_bits")
+        depth = payload.get("depth")
+        if not target_path:
+            raise ValueError(f"missing target_path in target descriptor: {src}")
+        if word_bits is None or int(word_bits) <= 0:
+            raise ValueError(f"invalid word_bits in target descriptor: {src}")
+        if depth is None or int(depth) <= 0:
+            raise ValueError(f"invalid depth in target descriptor: {src}")
         elements_payload = payload.get("elements", [])
         if not isinstance(elements_payload, list):
             raise ValueError(f"elements must be a JSON array in target descriptor: {src}")
@@ -137,6 +147,11 @@ def load_target_descriptor(path: str | pathlib.Path) -> dict[str, Any]:
             )
         return {
             "kind": kind,
+            "target_path": str(target_path),
+            "word_bits": int(word_bits),
+            "depth": int(depth),
+            "base_addr": int(payload.get("base_addr", 0)),
+            "address_unit_bytes": int(payload.get("address_unit_bytes", max(1, (int(word_bits) + 7) // 8))),
             "endianness": str(payload.get("endianness") or "little"),
             "elements": elements,
         }
@@ -171,6 +186,30 @@ def memory_value(memory: dict[int, int], addr: int, byte_count: int, little_endi
     return value
 
 
+def build_memory_array_payload_rows(
+    descriptor: dict[str, Any],
+    memory: dict[int, int],
+) -> list[str]:
+    word_bits = int(descriptor["word_bits"])
+    word_bytes = max(1, (word_bits + 7) // 8)
+    depth = int(descriptor["depth"])
+    base_addr = int(descriptor.get("base_addr", 0))
+    address_unit_bytes = int(descriptor.get("address_unit_bytes", word_bytes))
+    endianness = str(descriptor.get("endianness", "little"))
+    little_endian = endianness.lower() != "big"
+    rows = [
+        "target_path\tword_index\tvalue_hex\tword_bits\tbase_addr\taddress_unit_bytes\tendianness"
+    ]
+    for word_index in range(depth):
+        addr = base_addr + word_index * address_unit_bytes
+        value = memory_value(memory, addr, word_bytes, little_endian)
+        rows.append(
+            f"{descriptor['target_path']}\t{word_index}\t0x{value:0{word_bytes * 2}X}\t"
+            f"{word_bits}\t0x{base_addr:08X}\t{address_unit_bytes}\t{endianness}"
+        )
+    return rows
+
+
 def main() -> int:
     args = parse_args()
     memory = load_memory_image(args.memory_image, args.format)
@@ -179,6 +218,7 @@ def main() -> int:
     init_lines: list[str] = []
     preload_rows: list[str] = ["address\tbyte_count\tvar_name\tvar_index\twidth\tvisible\tvalue"]
     direct_rows: list[str] = ["var_idx\tvalue\tvar_name\twidth\taddress\tbyte_count"]
+    payload_rows: list[str] = []
     entry_count = 0
     visible_entry_count = 0
 
@@ -205,6 +245,7 @@ def main() -> int:
                 init_lines.append(f"{var_name} 0x{value:08X}")
                 visible_entry_count += 1
         else:
+            payload_rows = build_memory_array_payload_rows(desc, memory)
             little_endian = str(desc.get("endianness", "little")).lower() != "big"
             for entry in desc["elements"]:
                 addr = int(entry["offset"])
@@ -255,18 +296,26 @@ def main() -> int:
     out_init = pathlib.Path(args.out_init).expanduser().resolve()
     out_preload = pathlib.Path(args.out_preload_tsv).expanduser().resolve()
     out_direct = pathlib.Path(args.out_direct).expanduser().resolve()
+    out_payload = None if not args.out_payload_tsv else pathlib.Path(args.out_payload_tsv).expanduser().resolve()
     out_init.parent.mkdir(parents=True, exist_ok=True)
     out_preload.parent.mkdir(parents=True, exist_ok=True)
     out_direct.parent.mkdir(parents=True, exist_ok=True)
+    if out_payload is not None:
+        out_payload.parent.mkdir(parents=True, exist_ok=True)
     out_init.write_text(("\n".join(init_lines) + "\n") if init_lines else "", encoding="utf-8")
     out_preload.write_text("\n".join(preload_rows) + "\n", encoding="utf-8")
     out_direct.write_text("\n".join(direct_rows) + "\n", encoding="utf-8")
+    if out_payload is not None and payload_rows:
+        out_payload.write_text("\n".join(payload_rows) + "\n", encoding="utf-8")
 
     print(f"init_file={out_init}")
     print(f"preload_tsv={out_preload}")
     print(f"direct_file={out_direct}")
     print(f"entry_count={entry_count}")
     print(f"visible_entry_count={visible_entry_count}")
+    if out_payload is not None and payload_rows:
+        print(f"payload_tsv={out_payload}")
+        print(f"payload_entry_count={len(payload_rows) - 1}")
     return 0
 
 

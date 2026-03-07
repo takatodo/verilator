@@ -43,6 +43,7 @@ vars_tsv = kernel_path + ".vars.tsv"
 target_path = probe_dir + "/memory.target.json"
 bench_log = bench_dir + "/bench_run.log"
 memory_init = bench_dir + "/memory_image.init"
+memory_payload = bench_dir + "/memory_image.payload.tsv"
 
 for path in [cache_dir, probe_dir, bench_dir]:
     shutil.rmtree(path, ignore_errors=True)
@@ -110,7 +111,7 @@ bench_cmd = (
     + test.t_dir + "/t_sim_accel_memory_preload.v")
 test.run_capture(bench_cmd)
 
-for filename in [bench_log, memory_init]:
+for filename in [bench_log, memory_init, memory_payload]:
     if not os.path.exists(filename):
         test.error("Expected output file not found: " + filename)
 
@@ -124,6 +125,8 @@ test.file_grep(bench_log, r"memory_image_target=.*memory\.target\.json")
 test.file_grep(bench_log, r"memory_image_preload_entries=4")
 test.file_grep(bench_log, r"memory_image_direct_file=.*memory_image\.direct\.tsv")
 test.file_grep(bench_log, r"memory_image_direct_entries=4")
+test.file_grep(bench_log, r"memory_image_payload_tsv=.*memory_image\.payload\.tsv")
+test.file_grep(bench_log, r"memory_image_payload_entries=4")
 test.file_grep(bench_log, r"direct_preload_file_count=1")
 test.file_grep(bench_log, r"direct_preload_rules_applied=4")
 test.file_grep(bench_log, r"direct_preload_values_applied=8192")
@@ -132,5 +135,10 @@ test.file_grep(memory_init, r"^mem_0 0x0000000A$")
 test.file_grep(memory_init, r"^mem_1 0x00000014$")
 test.file_grep(memory_init, r"^mem_2 0x0000001E$")
 test.file_grep(memory_init, r"^mem_3 0x00000028$")
+test.file_grep(memory_payload, r"^target_path\tword_index\tvalue_hex\tword_bits\tbase_addr\taddress_unit_bytes\tendianness$")
+test.file_grep(memory_payload, r"^t\.mem\t0\t0x0000000A\t32\t0x00000000\t4\tlittle$")
+test.file_grep(memory_payload, r"^t\.mem\t1\t0x00000014\t32\t0x00000000\t4\tlittle$")
+test.file_grep(memory_payload, r"^t\.mem\t2\t0x0000001E\t32\t0x00000000\t4\tlittle$")
+test.file_grep(memory_payload, r"^t\.mem\t3\t0x00000028\t32\t0x00000000\t4\tlittle$")
 
 test.passes()
