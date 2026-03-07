@@ -40,6 +40,18 @@ Options:
   --worthy-min-margin-ms X
                         Minimum cpu_ms - gpu_ms margin to mark a cluster as offload-worthy
                         (default: 0.50)
+  --measure-dedup
+                        Also measure cluster-group batch dedup when group size > 1
+                        and emit separate dedup-worthy metrics
+  --dedup-max-unique-ratio-pct X
+                        Maximum average unique-state ratio to mark a group as dedup-worthy
+                        (default: 80.0)
+  --dedup-max-build-ms X
+                        Maximum dedup build/scatter overhead per rep to mark a group as dedup-worthy
+                        (default: 1.00)
+  --dedup-min-transfer-reduction-pct X
+                        Minimum transfer reduction to mark a group as dedup-worthy
+                        (default: 50.0)
   --keep-cluster-outdirs
                         Keep per-cluster output directories (default: off)
 
@@ -77,6 +89,10 @@ CLUSTER_INDICES=""
 WORTHY_MIN_SPEEDUP="1.05"
 WORTHY_MIN_MARGIN_MS="0.50"
 KEEP_CLUSTER_OUTDIRS=0
+MEASURE_DEDUP=0
+DEDUP_MAX_UNIQUE_RATIO_PCT="80.0"
+DEDUP_MAX_BUILD_MS="1.00"
+DEDUP_MIN_TRANSFER_REDUCTION_PCT="50.0"
 declare -a SOURCES=()
 INVOCATION_CWD="$(pwd)"
 
@@ -120,6 +136,14 @@ while [[ $# -gt 0 ]]; do
       WORTHY_MIN_SPEEDUP="$2"; shift 2 ;;
     --worthy-min-margin-ms)
       WORTHY_MIN_MARGIN_MS="$2"; shift 2 ;;
+    --measure-dedup)
+      MEASURE_DEDUP=1; shift ;;
+    --dedup-max-unique-ratio-pct)
+      DEDUP_MAX_UNIQUE_RATIO_PCT="$2"; shift 2 ;;
+    --dedup-max-build-ms)
+      DEDUP_MAX_BUILD_MS="$2"; shift 2 ;;
+    --dedup-min-transfer-reduction-pct)
+      DEDUP_MIN_TRANSFER_REDUCTION_PCT="$2"; shift 2 ;;
     --keep-cluster-outdirs)
       KEEP_CLUSTER_OUTDIRS=1; shift ;;
     --help|-h)
@@ -152,6 +176,16 @@ for v in WORTHY_MIN_SPEEDUP WORTHY_MIN_MARGIN_MS; do
     exit 2
   fi
 done
+for v in DEDUP_MAX_UNIQUE_RATIO_PCT DEDUP_MAX_BUILD_MS; do
+  if ! [[ "${!v}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    echo "Invalid numeric value for $v: ${!v}" >&2
+    exit 2
+  fi
+done
+if ! [[ "${DEDUP_MIN_TRANSFER_REDUCTION_PCT}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  echo "Invalid numeric value for DEDUP_MIN_TRANSFER_REDUCTION_PCT: ${DEDUP_MIN_TRANSFER_REDUCTION_PCT}" >&2
+  exit 2
+fi
 if [[ "$NSTATES" -eq 0 || "$BLOCK_SIZE" -eq 0 || "$CLUSTER_LIMIT" -eq 0 ]]; then
   echo "NSTATES, BLOCK_SIZE, and CLUSTER_LIMIT must be > 0" >&2
   exit 2
@@ -310,7 +344,7 @@ if (( ${#SELECTED_LINES[@]} == 0 )); then
   exit 2
 fi
 
-printf 'cluster_indices\tcluster_group_size\tgroup_assign_count\tgroup_operator_count\tgroup_weighted_operator_count\tgroup_input_signature_bits\towner_hint\ttopo_rank\ttopo_span\tdominant_hierarchy\tgroup_expr_kind_counts\thybrid_gpu_ms_per_rep\thybrid_cpu_ms_per_rep\thybrid_speedup_gpu_over_cpu\thybrid_margin_ms\thybrid_setup_h2d_ms\thybrid_dynamic_h2d_ms_per_rep\thybrid_kernel_ms_per_rep\thybrid_d2h_ms_per_rep\thybrid_transfer_ms_per_rep\thybrid_cpu_dispatch_ms_per_rep\thybrid_static_h2d_bytes_per_batch\thybrid_dynamic_h2d_bytes_per_batch\thybrid_actual_h2d_bytes_per_batch\thybrid_actual_d2h_bytes_per_batch\thybrid_transfer_total_bytes_per_batch\tassigns_per_kib_transferred\tweighted_ops_per_kib_transferred\toffload_score\toffload_worthy\thybrid_mismatch\tnvcc_compile_s\tbench_run_s\ttotal_elapsed_s\n' > "$SUMMARY_TSV"
+printf 'cluster_indices\tcluster_group_size\tgroup_assign_count\tgroup_operator_count\tgroup_weighted_operator_count\tgroup_input_signature_bits\towner_hint\ttopo_rank\ttopo_span\tdominant_hierarchy\tgroup_expr_kind_counts\thybrid_gpu_ms_per_rep\thybrid_cpu_ms_per_rep\thybrid_speedup_gpu_over_cpu\thybrid_margin_ms\thybrid_setup_h2d_ms\thybrid_dynamic_h2d_ms_per_rep\thybrid_kernel_ms_per_rep\thybrid_d2h_ms_per_rep\thybrid_transfer_ms_per_rep\thybrid_cpu_dispatch_ms_per_rep\thybrid_static_h2d_bytes_per_batch\thybrid_dynamic_h2d_bytes_per_batch\thybrid_actual_h2d_bytes_per_batch\thybrid_actual_d2h_bytes_per_batch\thybrid_transfer_total_bytes_per_batch\tassigns_per_kib_transferred\tweighted_ops_per_kib_transferred\toffload_score\toffload_worthy\tdedup_measured\tdedup_build_ms_per_rep\tdedup_unique_states_avg\tdedup_unique_ratio_pct\tdedup_effective_h2d_bytes_per_rep\tdedup_effective_d2h_bytes_per_rep\tdedup_transfer_total_bytes_per_rep\tdedup_transfer_reduction_pct\tdedup_score\tdedup_worthy\thybrid_mismatch\tnvcc_compile_s\tbench_run_s\ttotal_elapsed_s\n' > "$SUMMARY_TSV"
 
 echo "[3/3] Running cluster benches..."
 for line in "${SELECTED_LINES[@]}"; do
@@ -330,6 +364,9 @@ for line in "${SELECTED_LINES[@]}"; do
     BENCH_CMD+=(--hybrid-mode single-cluster --hybrid-cluster-index "${CLUSTER_INDICES%%,*}")
   else
     BENCH_CMD+=(--hybrid-mode cluster-group --hybrid-cluster-indices "$CLUSTER_INDICES")
+    if [[ "$MEASURE_DEDUP" -eq 1 ]]; then
+      BENCH_CMD+=(--hybrid-batch-dedup)
+    fi
   fi
   BENCH_CMD+=(
     --compile-cache-dir "$COMPILE_CACHE_DIR" \
@@ -338,9 +375,29 @@ for line in "${SELECTED_LINES[@]}"; do
 
   python3 - "$CLUSTER_OUTDIR/bench_run.log" "$SUMMARY_TSV" "$CLUSTER_INDICES" "$GROUP_SIZE" "$ASSIGN_COUNT" "$OPERATOR_COUNT" \
     "$INPUT_BITS" "$OWNER_HINT" "$TOPO_RANK" "$TOPO_SPAN" "$DOM_HIER" "$EXPR_KIND_COUNTS" "$WORTHY_MIN_SPEEDUP" \
-    "$WORTHY_MIN_MARGIN_MS" <<'PY'
+    "$WORTHY_MIN_MARGIN_MS" "$MEASURE_DEDUP" "$DEDUP_MAX_UNIQUE_RATIO_PCT" "$DEDUP_MAX_BUILD_MS" \
+    "$DEDUP_MIN_TRANSFER_REDUCTION_PCT" <<'PY'
 import sys
-log_path, out_tsv, cluster_indices, group_size, assign_count, operator_count, input_bits, owner_hint, topo_rank, topo_span, dom_hier, expr_kind_counts, worthy_min_speedup, worthy_min_margin_ms = sys.argv[1:15]
+(
+    log_path,
+    out_tsv,
+    cluster_indices,
+    group_size,
+    assign_count,
+    operator_count,
+    input_bits,
+    owner_hint,
+    topo_rank,
+    topo_span,
+    dom_hier,
+    expr_kind_counts,
+    worthy_min_speedup,
+    worthy_min_margin_ms,
+    measure_dedup,
+    dedup_max_unique_ratio_pct,
+    dedup_max_build_ms,
+    dedup_min_transfer_reduction_pct,
+) = sys.argv[1:19]
 WEIGHTS = {
     'and': 1.0,
     'or': 1.0,
@@ -392,6 +449,12 @@ want = {
     'hybrid_actual_h2d_bytes_per_batch': '',
     'hybrid_actual_d2h_bytes_per_batch': '',
     'hybrid_mismatch': '',
+    'hybrid_batch_dedup': '',
+    'hybrid_dedup_build_ms_per_rep': '',
+    'hybrid_dedup_unique_states_avg': '',
+    'hybrid_dedup_unique_ratio_pct': '',
+    'hybrid_dedup_effective_h2d_bytes_per_rep': '',
+    'hybrid_dedup_effective_d2h_bytes_per_rep': '',
     'nvcc_compile_s': '',
     'bench_run_s': '',
     'total_elapsed_s': '',
@@ -426,6 +489,24 @@ offload_worthy = (
     and speedup >= float(worthy_min_speedup)
     and margin_ms >= float(worthy_min_margin_ms)
 )
+dedup_measured = (measure_dedup == '1' and group_size != '1')
+dedup_build_ms = float(want['hybrid_dedup_build_ms_per_rep'] or 0.0)
+dedup_unique_states_avg = float(want['hybrid_dedup_unique_states_avg'] or 0.0)
+dedup_unique_ratio_pct = float(want['hybrid_dedup_unique_ratio_pct'] or 100.0)
+dedup_effective_h2d_bytes = float(want['hybrid_dedup_effective_h2d_bytes_per_rep'] or 0.0)
+dedup_effective_d2h_bytes = float(want['hybrid_dedup_effective_d2h_bytes_per_rep'] or 0.0)
+dedup_transfer_total = dedup_effective_h2d_bytes + dedup_effective_d2h_bytes
+dedup_transfer_reduction_pct = (
+    100.0 * (1.0 - (dedup_transfer_total / transfer_total))
+) if transfer_total > 0 else 0.0
+dedup_score = dedup_transfer_reduction_pct * weighted_operator_count
+dedup_worthy = (
+    dedup_measured
+    and want['hybrid_mismatch'] == '0'
+    and dedup_unique_ratio_pct <= float(dedup_max_unique_ratio_pct)
+    and dedup_build_ms <= float(dedup_max_build_ms)
+    and dedup_transfer_reduction_pct >= float(dedup_min_transfer_reduction_pct)
+)
 with open(out_tsv, 'a', encoding='utf-8') as fh:
     fh.write('\t'.join([
         cluster_indices, group_size, assign_count, operator_count, f"{weighted_operator_count:.3f}", input_bits, owner_hint, topo_rank, topo_span, dom_hier, expr_kind_counts,
@@ -438,6 +519,16 @@ with open(out_tsv, 'a', encoding='utf-8') as fh:
         want['hybrid_actual_h2d_bytes_per_batch'], want['hybrid_actual_d2h_bytes_per_batch'],
         str(transfer_total), f"{assigns_per_kib:.6f}", f"{weighted_ops_per_kib:.6f}", f"{score:.6f}",
         '1' if offload_worthy else '0',
+        '1' if dedup_measured else '0',
+        f"{dedup_build_ms:.6f}",
+        f"{dedup_unique_states_avg:.6f}",
+        f"{dedup_unique_ratio_pct:.6f}",
+        f"{dedup_effective_h2d_bytes:.6f}",
+        f"{dedup_effective_d2h_bytes:.6f}",
+        f"{dedup_transfer_total:.6f}",
+        f"{dedup_transfer_reduction_pct:.6f}",
+        f"{dedup_score:.6f}",
+        '1' if dedup_worthy else '0',
         want['hybrid_mismatch'], want['nvcc_compile_s'], want['bench_run_s'],
         want['total_elapsed_s'],
     ]) + '\n')
@@ -450,7 +541,8 @@ done
 
 python3 - "$SUMMARY_TSV" "$SUMMARY_JSON" "$WORTHY_MIN_SPEEDUP" "$WORTHY_MIN_MARGIN_MS" \
   "$TOP_MODULE" "$OUTDIR" "$NSTATES" "$GPU_REPS" "$CPU_REPS" "$BLOCK_SIZE" "$CLUSTER_GROUP_SIZE" \
-  "$CLUSTER_LIMIT" "$CLUSTER_MAX_INPUT_BITS" "$CLUSTER_MIN_ASSIGNS" "$CLUSTER_OWNER_LIST" <<'PY'
+  "$CLUSTER_LIMIT" "$CLUSTER_MAX_INPUT_BITS" "$CLUSTER_MIN_ASSIGNS" "$CLUSTER_OWNER_LIST" \
+  "$DEDUP_MAX_UNIQUE_RATIO_PCT" "$DEDUP_MAX_BUILD_MS" "$DEDUP_MIN_TRANSFER_REDUCTION_PCT" <<'PY'
 import csv
 import json
 import sys
@@ -471,7 +563,10 @@ import sys
     cluster_max_input_bits,
     cluster_min_assigns,
     cluster_owner_list,
-) = sys.argv[1:16]
+    dedup_max_unique_ratio_pct,
+    dedup_max_build_ms,
+    dedup_min_transfer_reduction_pct,
+) = sys.argv[1:19]
 rows = list(csv.DictReader(open(tsv_path, newline=''), delimiter='\t'))
 for row in rows:
     row['cluster_group_size'] = int(row['cluster_group_size'])
@@ -496,11 +591,22 @@ for row in rows:
     row['weighted_ops_per_kib_transferred'] = float(row['weighted_ops_per_kib_transferred'])
     row['offload_score'] = float(row['offload_score'])
     row['offload_worthy'] = (row['offload_worthy'] == '1')
+    row['dedup_measured'] = (row['dedup_measured'] == '1')
+    row['dedup_build_ms_per_rep'] = float(row['dedup_build_ms_per_rep'])
+    row['dedup_unique_states_avg'] = float(row['dedup_unique_states_avg'])
+    row['dedup_unique_ratio_pct'] = float(row['dedup_unique_ratio_pct'])
+    row['dedup_effective_h2d_bytes_per_rep'] = float(row['dedup_effective_h2d_bytes_per_rep'])
+    row['dedup_effective_d2h_bytes_per_rep'] = float(row['dedup_effective_d2h_bytes_per_rep'])
+    row['dedup_transfer_total_bytes_per_rep'] = float(row['dedup_transfer_total_bytes_per_rep'])
+    row['dedup_transfer_reduction_pct'] = float(row['dedup_transfer_reduction_pct'])
+    row['dedup_score'] = float(row['dedup_score'])
+    row['dedup_worthy'] = (row['dedup_worthy'] == '1')
     row['hybrid_mismatch'] = int(row['hybrid_mismatch'])
     row['cluster_indices_list'] = [int(x) for x in row['cluster_indices'].split(',') if x]
 
 rows_by_score = sorted(rows, key=lambda r: (r['offload_score'], r['hybrid_speedup_gpu_over_cpu']), reverse=True)
 worthy = [r for r in rows_by_score if r['offload_worthy']]
+dedup_worthy = [r for r in rows_by_score if r['dedup_worthy']]
 
 def normalize_row(row):
     return {
@@ -543,6 +649,18 @@ def normalize_row(row):
             'assigns_per_kib_transferred': row['assigns_per_kib_transferred'],
             'weighted_ops_per_kib_transferred': row['weighted_ops_per_kib_transferred'],
         },
+        'dedup': {
+            'measured': row['dedup_measured'],
+            'build_ms_per_rep': row['dedup_build_ms_per_rep'],
+            'unique_states_avg': row['dedup_unique_states_avg'],
+            'unique_ratio_pct': row['dedup_unique_ratio_pct'],
+            'effective_h2d_bytes_per_rep': row['dedup_effective_h2d_bytes_per_rep'],
+            'effective_d2h_bytes_per_rep': row['dedup_effective_d2h_bytes_per_rep'],
+            'transfer_total_bytes_per_rep': row['dedup_transfer_total_bytes_per_rep'],
+            'transfer_reduction_pct': row['dedup_transfer_reduction_pct'],
+            'score': row['dedup_score'],
+            'worthy': row['dedup_worthy'],
+        },
         'compile': {
             'nvcc_compile_s': row['nvcc_compile_s'],
             'bench_run_s': row['bench_run_s'],
@@ -574,6 +692,9 @@ payload = {
     'heuristic': {
         'worthy_min_speedup': float(worthy_min_speedup),
         'worthy_min_margin_ms': float(worthy_min_margin_ms),
+        'dedup_max_unique_ratio_pct': float(dedup_max_unique_ratio_pct),
+        'dedup_max_build_ms': float(dedup_max_build_ms),
+        'dedup_min_transfer_reduction_pct': float(dedup_min_transfer_reduction_pct),
         'operator_weighting': {
             'bitwise_bool_cast': 1.0,
             'compare_concat': 2.0,
@@ -581,10 +702,13 @@ payload = {
             'arith_shift': 3.0,
         },
         'score_definition': 'score = (cpu_ms - gpu_ms) * (weighted_operator_count / (transfer_total_bytes / 1024))',
+        'dedup_worthy_definition': 'measured && mismatch==0 && unique_ratio<=threshold && build_ms<=threshold && transfer_reduction>=threshold',
     },
     'cluster_count': len(rows),
     'worthy_cluster_count': len(worthy),
     'worthy_cluster_indices': [r['cluster_indices'] for r in worthy],
+    'dedup_worthy_cluster_count': len(dedup_worthy),
+    'dedup_worthy_cluster_indices': [r['cluster_indices'] for r in dedup_worthy],
     'top_clusters_by_score': rows_by_score[:10],
     'normalized_top_clusters_by_score': [normalize_row(r) for r in rows_by_score[:10]],
     'rows': rows,
