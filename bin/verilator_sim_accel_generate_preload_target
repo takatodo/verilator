@@ -24,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--vars-tsv")
     parser.add_argument("--preload-targets-tsv")
+    parser.add_argument("--preload-targets-json")
     parser.add_argument("--preload-target-elements-tsv")
     parser.add_argument("--name")
     parser.add_argument("--target-path")
@@ -41,8 +42,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--endianness", default="little")
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
-    if bool(args.vars_tsv) == bool(args.preload_targets_tsv):
-        parser.error("exactly one of --vars-tsv or --preload-targets-tsv is required")
+    input_modes = sum(bool(value) for value in [args.vars_tsv, args.preload_targets_tsv, args.preload_targets_json])
+    if input_modes != 1:
+        parser.error(
+            "exactly one of --vars-tsv, --preload-targets-tsv, or --preload-targets-json is required"
+        )
     if args.vars_tsv:
         missing = []
         if not args.name:
@@ -57,13 +61,40 @@ def parse_args() -> argparse.Namespace:
             parser.error("vars-tsv mode requires " + ", ".join(missing))
     else:
         if not args.name and not args.target_path:
-            parser.error("preload-targets-tsv mode requires --name or --target-path")
+            parser.error("preload target metadata mode requires --name or --target-path")
     return args
 
 
 def main() -> int:
     args = parse_args()
     out = pathlib.Path(args.out).expanduser().resolve()
+
+    if args.preload_targets_json:
+        targets_json = pathlib.Path(args.preload_targets_json).expanduser().resolve()
+        with targets_json.open(encoding="utf-8") as fh:
+            payload = json.load(fh)
+        targets = payload.get("targets")
+        if not isinstance(targets, list):
+            raise SystemExit(f"preload_targets.json is missing a 'targets' list: {targets_json}")
+        matched_target = None
+        for target in targets:
+            if not isinstance(target, dict):
+                continue
+            if args.target_path and target.get("target_path") != args.target_path:
+                continue
+            if args.name and target.get("name") != args.name:
+                continue
+            matched_target = target
+            break
+        if matched_target is None:
+            selector = args.target_path or args.name
+            raise SystemExit(f"no preload target matched '{selector}' in {targets_json}")
+        if args.description:
+            matched_target = dict(matched_target)
+            matched_target["description"] = args.description
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(matched_target, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return 0
 
     if args.preload_targets_tsv:
         targets_tsv = pathlib.Path(args.preload_targets_tsv).expanduser().resolve()

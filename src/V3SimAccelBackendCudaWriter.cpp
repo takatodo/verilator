@@ -50,6 +50,22 @@ string simAccelEscapeCString(const string& in) {
     return out;
 }
 
+string simAccelEscapeJson(const string& in) {
+    string out;
+    out.reserve(in.size() + 8);
+    for (char ch : in) {
+        switch (ch) {
+        case '\\': out += "\\\\"; break;
+        case '"': out += "\\\""; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default: out += ch; break;
+        }
+    }
+    return out;
+}
+
 struct EmittedAssign final {
     size_t m_lhsIdx = 0;
     string m_lhsName;
@@ -99,6 +115,67 @@ std::vector<size_t> filterReadFromOutputVarIdxs(
         if (writtenBeforeIdxs.find(readIdx) != writtenBeforeIdxs.end()) out.push_back(readIdx);
     }
     return out;
+}
+
+void writePreloadTargetsJson(
+    const string& filename, const std::vector<V3SimAccelProgram::PreloadTarget>& preloadTargets) {
+    std::ofstream of{filename};
+    if (!of.is_open()) return;
+
+    std::vector<V3SimAccelProgram::PreloadTarget> targets = preloadTargets;
+    std::sort(targets.begin(), targets.end(),
+              [](const V3SimAccelProgram::PreloadTarget& lhs,
+                 const V3SimAccelProgram::PreloadTarget& rhs) {
+                  if (lhs.m_targetPath != rhs.m_targetPath) return lhs.m_targetPath < rhs.m_targetPath;
+                  return lhs.m_name < rhs.m_name;
+              });
+
+    of << "{\n";
+    of << "  \"format\": \"sim-accel-preload-targets-v1\",\n";
+    of << "  \"targets\": [\n";
+    for (size_t targetIdx = 0; targetIdx < targets.size(); ++targetIdx) {
+        const auto& target = targets.at(targetIdx);
+        std::vector<V3SimAccelProgram::PreloadTarget::Element> elements = target.m_elements;
+        std::sort(elements.begin(), elements.end(),
+                  [](const V3SimAccelProgram::PreloadTarget::Element& lhs,
+                     const V3SimAccelProgram::PreloadTarget::Element& rhs) {
+                      if (lhs.m_index != rhs.m_index) return lhs.m_index < rhs.m_index;
+                      if (lhs.m_offset != rhs.m_offset) return lhs.m_offset < rhs.m_offset;
+                      return lhs.m_varName < rhs.m_varName;
+                  });
+
+        of << "    {\n";
+        of << "      \"kind\": \"" << simAccelEscapeJson(target.m_kind) << "\",\n";
+        of << "      \"name\": \"" << simAccelEscapeJson(target.m_name) << "\",\n";
+        of << "      \"target_path\": \"" << simAccelEscapeJson(target.m_targetPath) << "\",\n";
+        of << "      \"ast_name\": \"" << simAccelEscapeJson(target.m_astName) << "\",\n";
+        of << "      \"hierarchy\": \"" << simAccelEscapeJson(target.m_hierarchy) << "\",\n";
+        of << "      \"word_bits\": " << target.m_wordBits << ",\n";
+        of << "      \"depth\": " << target.m_depth << ",\n";
+        of << "      \"base_addr\": " << target.m_baseAddr << ",\n";
+        of << "      \"address_unit_bytes\": " << target.m_addressUnitBytes << ",\n";
+        of << "      \"endianness\": \"" << simAccelEscapeJson(target.m_endianness) << "\",\n";
+        of << "      \"is_primary_io\": " << (target.m_isPrimaryIo ? "true" : "false")
+           << ",\n";
+        of << "      \"elements\": [\n";
+        for (size_t elemIdx = 0; elemIdx < elements.size(); ++elemIdx) {
+            const auto& elem = elements.at(elemIdx);
+            of << "        {\n";
+            of << "          \"index\": " << elem.m_index << ",\n";
+            of << "          \"offset\": " << elem.m_offset << ",\n";
+            of << "          \"byte_count\": " << elem.m_byteCount << ",\n";
+            of << "          \"var_name\": \"" << simAccelEscapeJson(elem.m_varName) << "\"\n";
+            of << "        }";
+            if (elemIdx + 1 != elements.size()) of << ",";
+            of << "\n";
+        }
+        of << "      ]\n";
+        of << "    }";
+        if (targetIdx + 1 != targets.size()) of << ",";
+        of << "\n";
+    }
+    of << "  ]\n";
+    of << "}\n";
 }
 
 string simAccelPartitionHierarchyLabel(const V3SimAccelProgram::Var& var) {
@@ -1217,6 +1294,9 @@ size_t V3SimAccelBackendCudaWriter::write(
                             << row.m_varName << '\n';
         }
     }
+
+    const string preloadTargetsJsonFilename = filename + ".preload_targets.json";
+    writePreloadTargetsJson(preloadTargetsJsonFilename, program.m_preloadTargets);
 
     return emittedAssigns.size();
 }
