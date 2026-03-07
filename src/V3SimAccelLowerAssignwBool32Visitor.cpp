@@ -23,6 +23,23 @@
 
 namespace {
 
+struct SimAccelArrayElementKey final {
+    const AstVar* m_varp = nullptr;
+    int m_logicalIndex = 0;
+
+    bool operator==(const SimAccelArrayElementKey& other) const {
+        return m_varp == other.m_varp && m_logicalIndex == other.m_logicalIndex;
+    }
+};
+
+struct SimAccelArrayElementKeyHash final {
+    size_t operator()(const SimAccelArrayElementKey& key) const {
+        const size_t varHash = std::hash<const AstVar*>{}(key.m_varp);
+        const size_t indexHash = std::hash<int>{}(key.m_logicalIndex);
+        return varHash ^ (indexHash + 0x9e3779b97f4a7c15ULL + (varHash << 6) + (varHash >> 2));
+    }
+};
+
 bool simAccelIsInternalVar(const AstVar* varp) {
     return varp->name().compare(0, 3, "__V") == 0;
 }
@@ -51,6 +68,15 @@ const AstNodeDType* simAccelLeafUnpackedElementDType(const AstNodeDType* dtypep)
         return currentp;
     }
     return nullptr;
+}
+
+bool simAccelIsSupportedScalarVar(const AstVar* varp) {
+    return varp && !simAccelIsInternalVar(varp) && simAccelWidthSupported(varp) && varp->dtypep()
+           && !VN_IS(varp->dtypep()->skipRefp(), UnpackArrayDType);
+}
+
+string simAccelSyntheticArrayElementName(const AstVar* varp, int logicalIndex) {
+    return varp->name() + "__BRA__" + cvtToStr(logicalIndex) + "__KET__";
 }
 
 class SimAccelVarRefCollector final : public VNVisitorConst {
@@ -116,8 +142,16 @@ bool simAccelIsActivator(const string& name) {
 
 class SimAccelAssignwBool32Lowerer final : public VNVisitorConst {
 private:
+    struct ResolvedArrayElement final {
+        const AstVar* m_varp = nullptr;
+        int m_logicalIndex = 0;
+        uint32_t m_width = 0;
+    };
+
     V3SimAccelProgram m_program;
     std::unordered_map<const AstVar*, size_t> m_varToIndex;
+    std::unordered_map<SimAccelArrayElementKey, size_t, SimAccelArrayElementKeyHash>
+        m_arrayElementToIndex;
     std::vector<const AstVar*> m_indexToVar;
     std::unordered_set<size_t> m_gpuReadVarIdxs;
     std::unordered_set<size_t> m_gpuWrittenVarIdxs;
@@ -145,6 +179,62 @@ private:
         m_program.m_vars.push_back(std::move(var));
         m_varToIndex.emplace(varp, idx);
         m_indexToVar.push_back(varp);
+        return idx;
+    }
+
+    bool resolveSupportedArrayElement(const AstNodeExpr* nodep, ResolvedArrayElement& resolved) const {
+        const AstArraySel* const selp = VN_CAST(nodep, ArraySel);
+        if (!selp) return false;
+
+        const AstVarRef* const baseRefp = VN_CAST(selp->fromp(), VarRef);
+        if (!baseRefp) return false;
+        const AstVar* const baseVarp = baseRefp->varp();
+        if (!baseVarp || simAccelIsInternalVar(baseVarp) || !baseVarp->dtypep()) return false;
+
+        const AstUnpackArrayDType* const unpackp
+            = VN_CAST(baseVarp->dtypep()->skipRefp(), UnpackArrayDType);
+        if (!unpackp) return false;
+        if (VN_IS(unpackp->subDTypep()->skipRefp(), UnpackArrayDType)) return false;
+
+        const AstBasicDType* const basicp
+            = VN_CAST(simAccelLeafUnpackedElementDType(unpackp->subDTypep()), BasicDType);
+        if (!basicp || basicp->width() <= 0 || basicp->width() > 32) return false;
+
+        const AstConst* const constp = VN_CAST(selp->bitp(), Const);
+        if (!constp || constp->num().isFourState()) return false;
+
+        const int64_t logicalIndex64 = constp->toSInt();
+        const int logicalLo = unpackp->lo();
+        const int logicalOffset = static_cast<int>(logicalIndex64) - logicalLo;
+        if (logicalIndex64 < logicalLo || logicalOffset < 0
+            || logicalOffset >= unpackp->elementsConst()) {
+            return false;
+        }
+
+        resolved.m_varp = baseVarp;
+        resolved.m_logicalIndex = static_cast<int>(logicalIndex64);
+        resolved.m_width = basicp->width();
+        return true;
+    }
+
+    size_t rememberArrayElement(const ResolvedArrayElement& resolved) {
+        UASSERT_OBJ(resolved.m_varp, v3Global.rootp(), "Unexpected null sim-accel array element");
+        const SimAccelArrayElementKey key{resolved.m_varp, resolved.m_logicalIndex};
+        const auto it = m_arrayElementToIndex.find(key);
+        if (it != m_arrayElementToIndex.end()) return it->second;
+
+        const size_t idx = m_program.m_vars.size();
+        V3SimAccelProgram::Var var;
+        var.m_name = simAccelSyntheticArrayElementName(resolved.m_varp, resolved.m_logicalIndex);
+        var.m_hierarchy = simAccelExtractHierarchy(resolved.m_varp->name());
+        var.m_direction = resolved.m_varp->direction().ascii();
+        var.m_width = resolved.m_width;
+        var.m_isPrimaryIo = false;
+        var.m_isActivator = simAccelIsActivator(resolved.m_varp->name());
+        var.m_isCpuVisible = false;
+        m_program.m_vars.push_back(std::move(var));
+        m_arrayElementToIndex.emplace(key, idx);
+        m_indexToVar.push_back(nullptr);
         return idx;
     }
 
@@ -183,11 +273,10 @@ private:
             V3SimAccelProgram::Var& var = m_program.m_vars.at(idx);
             const bool isGpuRead = (m_gpuReadVarIdxs.find(idx) != m_gpuReadVarIdxs.end());
             const bool isGpuWritten = (m_gpuWrittenVarIdxs.find(idx) != m_gpuWrittenVarIdxs.end());
+            const AstVar* const astVarp = idx < m_indexToVar.size() ? m_indexToVar.at(idx) : nullptr;
             const bool escapesExternally
                 = var.m_isCpuVisible
-                  || (idx < m_indexToVar.size()
-                      && m_externalTouchedVarps.find(m_indexToVar.at(idx))
-                             != m_externalTouchedVarps.end());
+                  || (astVarp && m_externalTouchedVarps.find(astVarp) != m_externalTouchedVarps.end());
             // Boundary inputs exclude GPU-local temporaries. Outputs require an external
             // consumer outside the supported GPU subset or a CPU-visible/public boundary.
             var.m_isGpuInput = isGpuRead && !isGpuWritten;
@@ -207,9 +296,11 @@ private:
 
     bool isSupportedExpr(const AstNodeExpr* nodep) const {
         if (!nodep || !simAccelWidthSupported(nodep)) return false;
+        ResolvedArrayElement resolvedArrayElement;
+        if (resolveSupportedArrayElement(nodep, resolvedArrayElement)) return true;
         if (const AstVarRef* const refp = VN_CAST(nodep, VarRef)) {
             const AstVar* const varp = refp->varp();
-            return varp && !simAccelIsInternalVar(varp) && simAccelWidthSupported(varp);
+            return simAccelIsSupportedScalarVar(varp);
         }
         if (const AstConst* const constp = VN_CAST(nodep, Const)) {
             return simAccelWidthSupported(constp) && !constp->num().isFourState();
@@ -282,13 +373,17 @@ private:
         return false;
     }
 
-    void collectExprVars(const AstNodeExpr* nodep, std::unordered_set<const AstVar*>& currentRhsVars) {
+    void collectExprVars(const AstNodeExpr* nodep, std::unordered_set<size_t>& currentRhsVars) {
         if (!nodep) return;
+        ResolvedArrayElement resolvedArrayElement;
+        if (resolveSupportedArrayElement(nodep, resolvedArrayElement)) {
+            currentRhsVars.insert(rememberArrayElement(resolvedArrayElement));
+            return;
+        }
         if (const AstVarRef* const refp = VN_CAST(nodep, VarRef)) {
             const AstVar* const varp = refp->varp();
-            if (varp && !simAccelIsInternalVar(varp) && simAccelWidthSupported(varp)) {
-                rememberVar(varp);
-                currentRhsVars.insert(varp);
+            if (simAccelIsSupportedScalarVar(varp)) {
+                currentRhsVars.insert(rememberVar(varp));
             }
             return;
         }
@@ -406,6 +501,12 @@ private:
 
         V3SimAccelProgram::Expr expr;
         expr.m_width = nodep->widthMin();
+        ResolvedArrayElement resolvedArrayElement;
+        if (resolveSupportedArrayElement(nodep, resolvedArrayElement)) {
+            expr.m_kind = V3SimAccelProgram::ExprKind::VAR;
+            expr.m_varIdx = rememberArrayElement(resolvedArrayElement);
+            return addExpr(std::move(expr));
+        }
         if (const AstVarRef* const refp = VN_CAST(nodep, VarRef)) {
             expr.m_kind = V3SimAccelProgram::ExprKind::VAR;
             expr.m_varIdx = rememberVar(refp->varp());
@@ -584,18 +685,10 @@ public:
         }
 
         const size_t lhsIdx = rememberVar(lhsVarp);
-        std::unordered_set<const AstVar*> rhsVars;
+        std::unordered_set<size_t> rhsVars;
         collectExprVars(nodep->rhsp(), rhsVars);
-        std::vector<const AstVar*> rhsVarsVec{rhsVars.begin(), rhsVars.end()};
-        std::sort(rhsVarsVec.begin(), rhsVarsVec.end(),
-                  [this](const AstVar* a, const AstVar* b) {
-                      const auto ita = m_varToIndex.find(a);
-                      const auto itb = m_varToIndex.find(b);
-                      if (ita != m_varToIndex.end() && itb != m_varToIndex.end()) {
-                          return ita->second < itb->second;
-                      }
-                      return a->name() < b->name();
-                  });
+        std::vector<size_t> rhsVarsVec{rhsVars.begin(), rhsVars.end()};
+        std::sort(rhsVarsVec.begin(), rhsVarsVec.end());
 
         V3SimAccelProgram::Assign assign;
         assign.m_lhsIdx = lhsIdx;
@@ -603,12 +696,9 @@ public:
         assign.m_exprIdx = lowerExpr(nodep->rhsp());
         assign.m_rhsIdxs.reserve(rhsVarsVec.size());
         m_gpuWrittenVarIdxs.emplace(lhsIdx);
-        for (const AstVar* const rhsVarp : rhsVarsVec) {
-            const auto it = m_varToIndex.find(rhsVarp);
-            if (it != m_varToIndex.end()) {
-                assign.m_rhsIdxs.push_back(it->second);
-                m_gpuReadVarIdxs.emplace(it->second);
-            }
+        for (const size_t rhsIdx : rhsVarsVec) {
+            assign.m_rhsIdxs.push_back(rhsIdx);
+            m_gpuReadVarIdxs.emplace(rhsIdx);
         }
         m_program.m_assigns.push_back(std::move(assign));
         ++m_program.m_stats.m_assignwSupported;
