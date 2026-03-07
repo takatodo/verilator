@@ -95,11 +95,26 @@ public:
         std::vector<size_t> m_cpuVisibleVarIdxs;
     };
 
+    struct PreloadTarget final {
+        string m_kind;
+        string m_name;
+        string m_targetPath;
+        string m_astName;
+        string m_hierarchy;
+        uint32_t m_wordBits = 0;
+        uint32_t m_depth = 0;
+        uint32_t m_baseAddr = 0;
+        uint32_t m_addressUnitBytes = 0;
+        string m_endianness;
+        bool m_isPrimaryIo = false;
+    };
+
     std::vector<Expr> m_exprs;
     std::vector<Var> m_vars;
     std::vector<Assign> m_assigns;
     Stats m_stats;
     CommPlan m_commPlan;
+    std::vector<PreloadTarget> m_preloadTargets;
 };
 
 #endif  // Guard

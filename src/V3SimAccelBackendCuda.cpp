@@ -91,6 +91,8 @@ void emitStats(const V3SimAccelProgram& program,
            << "cpu_boundary_heavy_clusters=" << approxRegCut.m_cpuBoundaryHeavyClusterCount
            << " "
            << "cpu_only_blocked_clusters=" << approxRegCut.m_cpuOnlyBlockedClusterCount);
+    v3info("--sim-accel-only preload_targets "
+           << "count=" << program.m_preloadTargets.size());
 }
 
 }  // namespace

@@ -31,6 +31,28 @@ bool simAccelWidthSupported(const AstNode* nodep) {
     return nodep && nodep->widthMin() > 0 && nodep->widthMin() <= 32;
 }
 
+string simAccelNormalizeTargetPath(const string& name) {
+    string out = name;
+    size_t pos = 0;
+    while ((pos = out.find("__DOT__", pos)) != string::npos) {
+        out.replace(pos, 7, ".");
+        pos += 1;
+    }
+    return out;
+}
+
+const AstNodeDType* simAccelLeafUnpackedElementDType(const AstNodeDType* dtypep) {
+    for (const AstNodeDType* currentp = dtypep; currentp;) {
+        currentp = currentp->skipRefp();
+        if (const AstUnpackArrayDType* const unpackp = VN_CAST(currentp, UnpackArrayDType)) {
+            currentp = unpackp->subDTypep();
+            continue;
+        }
+        return currentp;
+    }
+    return nullptr;
+}
+
 class SimAccelVarRefCollector final : public VNVisitorConst {
 private:
     std::unordered_set<const AstVar*>& m_varps;
@@ -100,6 +122,7 @@ private:
     std::unordered_set<size_t> m_gpuReadVarIdxs;
     std::unordered_set<size_t> m_gpuWrittenVarIdxs;
     std::unordered_set<const AstVar*> m_externalTouchedVarps;
+    std::unordered_set<string> m_preloadTargetPaths;
     size_t m_skippedUnsupported = 0;
     size_t m_skippedInternal = 0;
     size_t m_skippedNonVarLhs = 0;
@@ -127,6 +150,32 @@ private:
 
     void markExternalTouched(const AstNode* nodep) {
         simAccelCollectNodeVars(nodep, m_externalTouchedVarps);
+    }
+
+    void rememberPreloadTarget(const AstVar* varp) {
+        if (!varp || simAccelIsInternalVar(varp) || !varp->dtypep()) return;
+        const AstNodeDType* const dtypep = varp->dtypep()->skipRefp();
+        if (!VN_IS(dtypep, UnpackArrayDType)) return;
+        const AstNodeDType* const leafDTypep = simAccelLeafUnpackedElementDType(dtypep);
+        const AstBasicDType* const basicp = VN_CAST(leafDTypep, BasicDType);
+        if (!basicp || basicp->width() <= 0 || basicp->width() > 32) return;
+
+        const string targetPath = simAccelNormalizeTargetPath(varp->name());
+        if (!m_preloadTargetPaths.emplace(targetPath).second) return;
+
+        V3SimAccelProgram::PreloadTarget target;
+        target.m_kind = "memory-array-preload-v1";
+        target.m_name = simAccelExtractBaseName(varp->name());
+        target.m_targetPath = targetPath;
+        target.m_astName = varp->name();
+        target.m_hierarchy = simAccelExtractHierarchy(varp->name());
+        target.m_wordBits = basicp->width();
+        target.m_depth = varp->dtypep()->arrayUnpackedElements();
+        target.m_baseAddr = 0;
+        target.m_addressUnitBytes = std::max<uint32_t>(1, (target.m_wordBits + 7) / 8);
+        target.m_endianness = "little";
+        target.m_isPrimaryIo = varp->isPrimaryIO();
+        m_program.m_preloadTargets.push_back(std::move(target));
     }
 
     void finalizeCommPlan() {
@@ -501,6 +550,10 @@ public:
     explicit SimAccelAssignwBool32Lowerer(AstNetlist* rootp) { iterateConst(rootp); }
 
     void visit(AstNode* nodep) override { iterateChildrenConst(nodep); }
+    void visit(AstVar* nodep) override {
+        rememberPreloadTarget(nodep);
+        iterateChildrenConst(nodep);
+    }
     void visit(AstVarRef* nodep) override { markExternalTouched(nodep); }
 
     void visit(AstAssignW* nodep) override {

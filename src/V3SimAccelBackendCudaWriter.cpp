@@ -1164,5 +1164,20 @@ size_t V3SimAccelBackendCudaWriter::write(
         }
     }
 
+    const string preloadTargetsFilename = filename + ".preload_targets.tsv";
+    std::ofstream preload{preloadTargetsFilename};
+    if (preload.is_open()) {
+        preload << "kind\tname\ttarget_path\tast_name\thierarchy\tword_bits\tdepth\tbase_addr\t"
+                   "address_unit_bytes\tendianness\tis_primary_io\n";
+        for (const V3SimAccelProgram::PreloadTarget& target : program.m_preloadTargets) {
+            preload << target.m_kind << '\t' << target.m_name << '\t' << target.m_targetPath
+                    << '\t' << target.m_astName << '\t' << target.m_hierarchy << '\t'
+                    << target.m_wordBits << '\t' << target.m_depth << '\t'
+                    << target.m_baseAddr << '\t' << target.m_addressUnitBytes << '\t'
+                    << target.m_endianness << '\t'
+                    << (target.m_isPrimaryIo ? "1" : "0") << '\n';
+        }
+    }
+
     return emittedAssigns.size();
 }

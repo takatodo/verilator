@@ -210,6 +210,28 @@ void V3SimAccelProgramJson::write(const string& filename, const V3SimAccelProgra
     of << "\n";
     of << "  },\n";
 
+    of << "  \"preload_targets\": [\n";
+    for (size_t i = 0; i < program.m_preloadTargets.size(); ++i) {
+        const V3SimAccelProgram::PreloadTarget& target = program.m_preloadTargets.at(i);
+        of << "    {\n";
+        of << "      \"kind\": \"" << jsonEscape(target.m_kind) << "\",\n";
+        of << "      \"name\": \"" << jsonEscape(target.m_name) << "\",\n";
+        of << "      \"target_path\": \"" << jsonEscape(target.m_targetPath) << "\",\n";
+        of << "      \"ast_name\": \"" << jsonEscape(target.m_astName) << "\",\n";
+        of << "      \"hierarchy\": \"" << jsonEscape(target.m_hierarchy) << "\",\n";
+        of << "      \"word_bits\": " << target.m_wordBits << ",\n";
+        of << "      \"depth\": " << target.m_depth << ",\n";
+        of << "      \"base_addr\": " << target.m_baseAddr << ",\n";
+        of << "      \"address_unit_bytes\": " << target.m_addressUnitBytes << ",\n";
+        of << "      \"endianness\": \"" << jsonEscape(target.m_endianness) << "\",\n";
+        of << "      \"is_primary_io\": " << (target.m_isPrimaryIo ? "true" : "false")
+           << "\n";
+        of << "    }";
+        if (i + 1 != program.m_preloadTargets.size()) of << ",";
+        of << "\n";
+    }
+    of << "  ],\n";
+
     of << "  \"approx_regcut_analysis\": {\n";
     of << "    \"cluster_count\": " << approxRegCutSummary.m_clusterCount << ",\n";
     of << "    \"assign_count\": " << approxRegCutSummary.m_assignCount << ",\n";

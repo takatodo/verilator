@@ -20,17 +20,17 @@ FULL_MEMORY_ARRAY_KIND = "memory-array-preload-v1"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate a memory-array preload target descriptor from sim-accel vars.tsv"
+        description="Generate a sim-accel preload target descriptor from generated metadata"
     )
-    parser.add_argument("--vars-tsv", required=True)
-    parser.add_argument("--name", required=True)
-    parser.add_argument("--target-path", required=True)
+    parser.add_argument("--vars-tsv")
+    parser.add_argument("--preload-targets-tsv")
+    parser.add_argument("--name")
+    parser.add_argument("--target-path")
     parser.add_argument(
         "--var-regex",
-        required=True,
         help="Regex applied to vars.tsv 'name'; first capture group is the element index",
     )
-    parser.add_argument("--word-bits", type=int, required=True)
+    parser.add_argument("--word-bits", type=int)
     parser.add_argument("--base-addr", type=int, default=0)
     parser.add_argument("--address-unit-bytes", type=int)
     parser.add_argument("--index-base", type=int, default=0)
@@ -39,13 +39,80 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--default-format", default="auto")
     parser.add_argument("--endianness", default="little")
     parser.add_argument("--out", required=True)
-    return parser.parse_args()
+    args = parser.parse_args()
+    if bool(args.vars_tsv) == bool(args.preload_targets_tsv):
+        parser.error("exactly one of --vars-tsv or --preload-targets-tsv is required")
+    if args.vars_tsv:
+        missing = []
+        if not args.name:
+            missing.append("--name")
+        if not args.target_path:
+            missing.append("--target-path")
+        if not args.var_regex:
+            missing.append("--var-regex")
+        if args.word_bits is None:
+            missing.append("--word-bits")
+        if missing:
+            parser.error("vars-tsv mode requires " + ", ".join(missing))
+    else:
+        if not args.name and not args.target_path:
+            parser.error("preload-targets-tsv mode requires --name or --target-path")
+    return args
 
 
 def main() -> int:
     args = parse_args()
-    vars_tsv = pathlib.Path(args.vars_tsv).expanduser().resolve()
     out = pathlib.Path(args.out).expanduser().resolve()
+
+    if args.preload_targets_tsv:
+        targets_tsv = pathlib.Path(args.preload_targets_tsv).expanduser().resolve()
+        with targets_tsv.open(encoding="utf-8", newline="") as fh:
+            reader = csv.DictReader(fh, delimiter="\t")
+            fieldnames = set(reader.fieldnames or [])
+            required = {
+                "kind",
+                "name",
+                "target_path",
+                "word_bits",
+                "depth",
+                "base_addr",
+                "address_unit_bytes",
+                "endianness",
+            }
+            missing = sorted(required - fieldnames)
+            if missing:
+                raise SystemExit(
+                    f"preload_targets.tsv is missing columns {','.join(missing)}: {targets_tsv}"
+                )
+            matched_row = None
+            for row in reader:
+                if args.target_path and row["target_path"] != args.target_path:
+                    continue
+                if args.name and row["name"] != args.name:
+                    continue
+                matched_row = row
+                break
+        if matched_row is None:
+            selector = args.target_path or args.name
+            raise SystemExit(f"no preload target matched '{selector}' in {targets_tsv}")
+        payload = {
+            "kind": matched_row["kind"],
+            "name": matched_row["name"],
+            "description": args.description,
+            "target_path": matched_row["target_path"],
+            "word_bits": int(matched_row["word_bits"], 0),
+            "depth": int(matched_row["depth"], 0),
+            "base_addr": int(matched_row["base_addr"], 0),
+            "address_unit_bytes": int(matched_row["address_unit_bytes"], 0),
+            "endianness": matched_row["endianness"],
+            "default_format": args.default_format,
+            "elements": [],
+        }
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return 0
+
+    vars_tsv = pathlib.Path(args.vars_tsv).expanduser().resolve()
     pattern = re.compile(args.var_regex)
     word_bytes = args.address_unit_bytes or max(1, (args.word_bits + 7) // 8)
 
