@@ -813,6 +813,56 @@ with open(path, "w", encoding="utf-8") as fh:
 PY
 }
 
+prepare_no_cluster_link_source() {
+  local link_src="$1"
+  python3 - "$link_src" <<'PY'
+import sys
+
+path = sys.argv[1]
+func_name = 'extern "C" __host__ cudaError_t sim_accel_eval_assignw_launch_cluster('
+
+with open(path, "r", encoding="utf-8") as fh:
+    text = fh.read()
+
+start = text.find(func_name)
+if start < 0:
+    raise SystemExit(f"Could not find cluster launch function in {path}")
+brace_start = text.find("{", start)
+if brace_start < 0:
+    raise SystemExit(f"Could not find function body start in {path}")
+
+depth = 0
+end = None
+for idx in range(brace_start, len(text)):
+    ch = text[idx]
+    if ch == "{":
+        depth += 1
+    elif ch == "}":
+        depth -= 1
+        if depth == 0:
+            end = idx + 1
+            break
+if end is None:
+    raise SystemExit(f"Could not find function body end in {path}")
+
+replacement = '''extern "C" __host__ cudaError_t sim_accel_eval_assignw_launch_cluster(uint32_t index,
+                                                               const uint32_t* state_in,
+                                                               uint32_t* state_out,
+                                                               uint32_t nstates,
+                                                               uint32_t block_size) {
+    (void)index;
+    (void)state_in;
+    (void)state_out;
+    (void)nstates;
+    (void)block_size;
+    return cudaErrorInvalidValue;
+}'''
+
+with open(path, "w", encoding="utf-8") as fh:
+    fh.write(text[:start] + replacement + text[end:])
+PY
+}
+
 compute_object_cache_key() {
   local compiler_id="$1"
   local flags="$2"
@@ -2704,6 +2754,9 @@ elif [[ "$HYBRID_MODE" == "cluster-group" && "$USE_PARTITION_OBJECTS" -eq 1 ]]; 
   done
   prepare_cluster_group_link_source "$OUTDIR/kernel_generated.link.cu" "$HYBRID_CLUSTER_INDICES"
   CLUSTER_SOURCES=("${SELECTED_CLUSTER_SOURCES[@]}")
+elif [[ "$USE_PARTITION_OBJECTS" -eq 1 ]]; then
+  prepare_no_cluster_link_source "$OUTDIR/kernel_generated.link.cu"
+  CLUSTER_SOURCES=()
 fi
 
 BENCH_GENERATED_INCLUDE="kernel_generated.cu"
