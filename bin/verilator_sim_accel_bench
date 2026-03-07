@@ -105,6 +105,8 @@ PROGRAM_HEX_PAYLOAD_TSV=""
 PROGRAM_HEX_PRELOAD_ENTRIES=0
 PROGRAM_HEX_DIRECT_ENTRIES=0
 PROGRAM_HEX_PAYLOAD_ENTRIES=0
+PROGRAM_HEX_PAYLOAD_VISIBLE_ENTRIES=0
+PROGRAM_HEX_PAYLOAD_HIDDEN_ENTRIES=0
 MEMORY_IMAGE=""
 MEMORY_IMAGE_ABS=""
 MEMORY_IMAGE_MAP=""
@@ -120,6 +122,8 @@ MEMORY_IMAGE_PAYLOAD_TSV=""
 MEMORY_IMAGE_PRELOAD_ENTRIES=0
 MEMORY_IMAGE_DIRECT_ENTRIES=0
 MEMORY_IMAGE_PAYLOAD_ENTRIES=0
+MEMORY_IMAGE_PAYLOAD_VISIBLE_ENTRIES=0
+MEMORY_IMAGE_PAYLOAD_HIDDEN_ENTRIES=0
 EFFECTIVE_INIT_FILE=""
 ASSIGNS_PER_KERNEL=0
 HYBRID_MODE="off"
@@ -1215,6 +1219,8 @@ PY
       visible_entry_count) PROGRAM_HEX_DIRECT_ENTRIES="$value" ;;
       payload_tsv) PROGRAM_HEX_PAYLOAD_TSV="$value" ;;
       payload_entry_count) PROGRAM_HEX_PAYLOAD_ENTRIES="$value" ;;
+      payload_visible_entry_count) PROGRAM_HEX_PAYLOAD_VISIBLE_ENTRIES="$value" ;;
+      payload_hidden_entry_count) PROGRAM_HEX_PAYLOAD_HIDDEN_ENTRIES="$value" ;;
     esac
   done <<<"$helper_out"
 }
@@ -1269,6 +1275,8 @@ materialize_memory_image_inputs() {
       visible_entry_count) MEMORY_IMAGE_DIRECT_ENTRIES="$value" ;;
       payload_tsv) MEMORY_IMAGE_PAYLOAD_TSV="$value" ;;
       payload_entry_count) MEMORY_IMAGE_PAYLOAD_ENTRIES="$value" ;;
+      payload_visible_entry_count) MEMORY_IMAGE_PAYLOAD_VISIBLE_ENTRIES="$value" ;;
+      payload_hidden_entry_count) MEMORY_IMAGE_PAYLOAD_HIDDEN_ENTRIES="$value" ;;
     esac
   done <<<"$helper_out"
 }
@@ -1561,6 +1569,8 @@ struct ArrayPreloadPayloadStats {
   size_t targets_loaded = 0;
   size_t words_loaded = 0;
   size_t mapped_rows_loaded = 0;
+  size_t hidden_rows_loaded = 0;
+  size_t hidden_only_targets = 0;
   size_t mapped_rules_applied = 0;
   size_t mapped_values_applied = 0;
   size_t lines_ignored = 0;
@@ -2040,9 +2050,15 @@ static ArrayPreloadPayloadStats loadArrayPreloadPayloads(
           mapped.value = maskToWidth(valueRaw, mapped.width);
           it->second.mapped_values.push_back(mapped);
           ++stats.mapped_rows_loaded;
+        } else {
+          ++stats.hidden_rows_loaded;
         }
       }
     }
+  }
+
+  for (const auto& kv : *targetsp) {
+    if (!kv.second.words.empty() && kv.second.mapped_values.empty()) ++stats.hidden_only_targets;
   }
 
   return stats;
@@ -3355,6 +3371,10 @@ int main(int argc, char** argv) {
     std::cout << "array_preload_words_loaded=" << arrayPreloadStats.words_loaded << "\n";
     std::cout << "array_preload_mapped_rows_loaded=" << arrayPreloadStats.mapped_rows_loaded
               << "\n";
+    std::cout << "array_preload_hidden_rows_loaded=" << arrayPreloadStats.hidden_rows_loaded
+              << "\n";
+    std::cout << "array_preload_hidden_only_targets=" << arrayPreloadStats.hidden_only_targets
+              << "\n";
     std::cout << "array_preload_mapped_rules_applied="
               << arrayPreloadStats.mapped_rules_applied << "\n";
     std::cout << "array_preload_mapped_values_applied="
@@ -3934,6 +3954,8 @@ if [[ -n "$PROGRAM_HEX_ABS" ]]; then
     if [[ -n "$PROGRAM_HEX_PAYLOAD_TSV" && -f "$PROGRAM_HEX_PAYLOAD_TSV" ]]; then
       echo "program_hex_payload_tsv=$PROGRAM_HEX_PAYLOAD_TSV"
       echo "program_hex_payload_entries=$PROGRAM_HEX_PAYLOAD_ENTRIES"
+      echo "program_hex_payload_visible_entries=$PROGRAM_HEX_PAYLOAD_VISIBLE_ENTRIES"
+      echo "program_hex_payload_hidden_entries=$PROGRAM_HEX_PAYLOAD_HIDDEN_ENTRIES"
     fi
     if [[ -n "$EFFECTIVE_INIT_FILE" ]]; then
       echo "effective_init_file=$EFFECTIVE_INIT_FILE"
@@ -3955,6 +3977,8 @@ if [[ -n "$MEMORY_IMAGE_ABS" ]]; then
     if [[ -n "$MEMORY_IMAGE_PAYLOAD_TSV" && -f "$MEMORY_IMAGE_PAYLOAD_TSV" ]]; then
       echo "memory_image_payload_tsv=$MEMORY_IMAGE_PAYLOAD_TSV"
       echo "memory_image_payload_entries=$MEMORY_IMAGE_PAYLOAD_ENTRIES"
+      echo "memory_image_payload_visible_entries=$MEMORY_IMAGE_PAYLOAD_VISIBLE_ENTRIES"
+      echo "memory_image_payload_hidden_entries=$MEMORY_IMAGE_PAYLOAD_HIDDEN_ENTRIES"
     fi
     if [[ -n "$EFFECTIVE_INIT_FILE" ]]; then
       echo "effective_init_file=$EFFECTIVE_INIT_FILE"

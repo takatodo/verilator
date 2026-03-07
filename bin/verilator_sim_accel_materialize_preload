@@ -240,6 +240,8 @@ def main() -> int:
     payload_rows: list[str] = []
     entry_count = 0
     visible_entry_count = 0
+    payload_visible_entry_count = 0
+    payload_hidden_entry_count = 0
 
     if args.target_descriptor:
         desc = load_target_descriptor(args.target_descriptor)
@@ -325,6 +327,12 @@ def main() -> int:
     out_preload.write_text("\n".join(preload_rows) + "\n", encoding="utf-8")
     out_direct.write_text("\n".join(direct_rows) + "\n", encoding="utf-8")
     if out_payload is not None and payload_rows:
+        for row in payload_rows[1:]:
+            cols = row.split("\t")
+            if len(cols) >= 11 and cols[10] == "1":
+                payload_visible_entry_count += 1
+            else:
+                payload_hidden_entry_count += 1
         out_payload.write_text("\n".join(payload_rows) + "\n", encoding="utf-8")
 
     print(f"init_file={out_init}")
@@ -335,6 +343,8 @@ def main() -> int:
     if out_payload is not None and payload_rows:
         print(f"payload_tsv={out_payload}")
         print(f"payload_entry_count={len(payload_rows) - 1}")
+        print(f"payload_visible_entry_count={payload_visible_entry_count}")
+        print(f"payload_hidden_entry_count={payload_hidden_entry_count}")
     return 0
 
 
