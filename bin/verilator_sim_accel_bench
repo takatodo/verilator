@@ -20,6 +20,11 @@ Options:
   --init-mode MODE     Initial state mode: random|zero|ones|counter (default: random)
   --init-seed N        Seed for random init mode (default: 1)
   --init-file PATH     Optional init override file (index/name based)
+  --program-hex PATH   Materialize a program.hex scenario input for sim-accel bench
+  --program-hex-map PATH
+                       Map program.hex addresses into visible vars via generated init-file
+  --program-hex-iterations N
+                       Patch the first 32-bit word in program.hex before applying the map
   --assigns-per-kernel N  Limit emitted assigns per generated CUDA kernel partition (default: 0)
   --hybrid-mode MODE   Runtime path: off|single-partition|single-cluster|cluster-group (default: off)
   --hybrid-partition-index N  Selected partition for --hybrid-mode single-partition
@@ -74,6 +79,16 @@ INIT_MODE="random"
 INIT_SEED=1
 INIT_FILE=""
 INIT_FILE_ABS=""
+PROGRAM_HEX=""
+PROGRAM_HEX_ABS=""
+PROGRAM_HEX_MAP=""
+PROGRAM_HEX_MAP_ABS=""
+PROGRAM_HEX_ITERATIONS=""
+PROGRAM_HEX_MATERIALIZED=""
+PROGRAM_HEX_INIT_FILE=""
+PROGRAM_HEX_PRELOAD_TSV=""
+PROGRAM_HEX_PRELOAD_ENTRIES=0
+EFFECTIVE_INIT_FILE=""
 ASSIGNS_PER_KERNEL=0
 HYBRID_MODE="off"
 HYBRID_PARTITION_INDEX=""
@@ -114,6 +129,12 @@ while [[ $# -gt 0 ]]; do
       INIT_SEED="$2"; shift 2 ;;
     --init-file)
       INIT_FILE="$2"; shift 2 ;;
+    --program-hex)
+      PROGRAM_HEX="$2"; shift 2 ;;
+    --program-hex-map)
+      PROGRAM_HEX_MAP="$2"; shift 2 ;;
+    --program-hex-iterations)
+      PROGRAM_HEX_ITERATIONS="$2"; shift 2 ;;
     --assigns-per-kernel)
       ASSIGNS_PER_KERNEL="$2"; shift 2 ;;
     --hybrid-mode)
@@ -325,6 +346,37 @@ if [[ -n "$INIT_FILE" ]]; then
     exit 2
   fi
   INIT_FILE_ABS="$(cd "$(dirname "$INIT_FILE")" && pwd)/$(basename "$INIT_FILE")"
+fi
+
+if [[ -n "$PROGRAM_HEX_MAP" && -z "$PROGRAM_HEX" ]]; then
+  echo "--program-hex-map requires --program-hex" >&2
+  exit 2
+fi
+if [[ -n "$PROGRAM_HEX_ITERATIONS" && -z "$PROGRAM_HEX" ]]; then
+  echo "--program-hex-iterations requires --program-hex" >&2
+  exit 2
+fi
+if [[ -n "$PROGRAM_HEX" && -z "$PROGRAM_HEX_MAP" ]]; then
+  echo "--program-hex currently requires --program-hex-map" >&2
+  exit 2
+fi
+if [[ -n "$PROGRAM_HEX" ]]; then
+  if [[ ! -f "$PROGRAM_HEX" ]]; then
+    echo "--program-hex not found: $PROGRAM_HEX" >&2
+    exit 2
+  fi
+  PROGRAM_HEX_ABS="$(cd "$(dirname "$PROGRAM_HEX")" && pwd)/$(basename "$PROGRAM_HEX")"
+fi
+if [[ -n "$PROGRAM_HEX_MAP" ]]; then
+  if [[ ! -f "$PROGRAM_HEX_MAP" ]]; then
+    echo "--program-hex-map not found: $PROGRAM_HEX_MAP" >&2
+    exit 2
+  fi
+  PROGRAM_HEX_MAP_ABS="$(cd "$(dirname "$PROGRAM_HEX_MAP")" && pwd)/$(basename "$PROGRAM_HEX_MAP")"
+fi
+if [[ -n "$PROGRAM_HEX_ITERATIONS" ]] && ! [[ "$PROGRAM_HEX_ITERATIONS" =~ ^[0-9]+$ ]]; then
+  echo "Invalid --program-hex-iterations: $PROGRAM_HEX_ITERATIONS (expected integer >= 0)" >&2
+  exit 2
 fi
 
 mkdir -p "$COMPILE_CACHE_DIR"
@@ -947,6 +999,161 @@ TIME_VERILATOR="$OUTDIR/time_verilator_codegen_sec.txt"
 TIME_NVCC="$OUTDIR/time_nvcc_compile_sec.txt"
 TIME_RUN="$OUTDIR/time_bench_run_sec.txt"
 
+materialize_program_hex_inputs() {
+  [[ -n "$PROGRAM_HEX_ABS" ]] || return 0
+  local outdir="$1"
+  local vars_tsv="$2"
+  local pyout
+  pyout="$(python3 - "$PROGRAM_HEX_ABS" "$PROGRAM_HEX_MAP_ABS" "${PROGRAM_HEX_ITERATIONS:-}" "$outdir" "$vars_tsv" <<'PY'
+import csv
+import pathlib
+import sys
+
+def load_program_hex(path: pathlib.Path) -> dict[int, int]:
+    memory: dict[int, int] = {}
+    current_addr = 0
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.split("//", 1)[0].strip()
+        if not line:
+            continue
+        for token in line.split():
+            if token.startswith("@"):
+                current_addr = int(token[1:], 16)
+                continue
+            value = int(token, 16)
+            if value < 0 or value > 0xFF:
+                raise ValueError(f"program.hex token out of byte range in {path}: {token}")
+            memory[current_addr] = value
+            current_addr += 1
+    if not memory:
+        raise ValueError(f"No memory data found in {path}")
+    return memory
+
+def load_program_hex_map(path: pathlib.Path) -> list[tuple[int, int, str]]:
+    entries: list[tuple[int, int, str]] = []
+    for lineno, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        toks = line.split()
+        if len(toks) == 2:
+            addr_text, var_name = toks
+            byte_count = 4
+        elif len(toks) == 3:
+            addr_text, byte_count_text, var_name = toks
+            byte_count = int(byte_count_text, 0)
+        else:
+            raise ValueError(
+                f"invalid program_hex_map line in {path}:{lineno}: expected 'addr var' or 'addr bytes var'"
+            )
+        addr = int(addr_text, 0)
+        if byte_count <= 0 or byte_count > 4:
+            raise ValueError(f"program_hex_map byte count must be in 1..4 at {path}:{lineno}")
+        entries.append((addr, byte_count, var_name))
+    if not entries:
+        raise ValueError(f"program_hex_map is empty: {path}")
+    return entries
+
+def patch_iterations(memory: dict[int, int], iterations: int, base_addr: int = 0x10000000) -> dict[int, int]:
+    if iterations < 0 or iterations > 0xFFFFFFFF:
+        raise ValueError("iterations must fit in 32 bits")
+    patched = dict(memory)
+    for byte_idx in range(4):
+        patched[base_addr + byte_idx] = (iterations >> (8 * byte_idx)) & 0xFF
+    return patched
+
+def store_program_hex(path: pathlib.Path, memory: dict[int, int], bytes_per_line: int = 16) -> None:
+    if not memory:
+        raise ValueError("Cannot write empty program.hex memory image")
+    addrs = sorted(memory.keys())
+    lines: list[str] = []
+    run_start = addrs[0]
+    run_bytes = [memory[run_start]]
+    last_addr = run_start
+
+    def flush(start_addr: int, data: list[int]) -> None:
+        lines.append(f"@{start_addr:08X}")
+        for idx in range(0, len(data), bytes_per_line):
+            chunk = data[idx: idx + bytes_per_line]
+            lines.append(" ".join(f"{byte:02X}" for byte in chunk))
+
+    for addr in addrs[1:]:
+        if addr == last_addr + 1:
+            run_bytes.append(memory[addr])
+        else:
+            flush(run_start, run_bytes)
+            run_start = addr
+            run_bytes = [memory[addr]]
+        last_addr = addr
+    flush(run_start, run_bytes)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+program_hex = pathlib.Path(sys.argv[1]).resolve()
+program_hex_map = pathlib.Path(sys.argv[2]).resolve()
+iterations = sys.argv[3]
+outdir = pathlib.Path(sys.argv[4]).resolve()
+vars_tsv = pathlib.Path(sys.argv[5]).resolve()
+
+memory = load_program_hex(program_hex)
+if iterations:
+    memory = patch_iterations(memory, int(iterations))
+
+materialized = outdir / "program_hex.materialized"
+store_program_hex(materialized, memory)
+
+map_entries = load_program_hex_map(program_hex_map)
+name_to_meta = {}
+with vars_tsv.open(encoding="utf-8") as fh:
+    for row in csv.DictReader(fh, delimiter='\t'):
+        name_to_meta[row["name"]] = (row["index"], row["width"])
+
+init_file = outdir / "program_hex.init"
+preload_tsv = outdir / "program_hex.preload.tsv"
+with init_file.open("w", encoding="utf-8") as ifh, preload_tsv.open("w", encoding="utf-8") as pfh:
+    pfh.write("address\tbyte_count\tvar_name\tvar_index\twidth\tvisible\n")
+    for addr, byte_count, var_name in map_entries:
+        value = 0
+        for byte_idx in range(byte_count):
+            value |= (memory.get(addr + byte_idx, 0) & 0xFF) << (8 * byte_idx)
+        ifh.write(f"{var_name} 0x{value:08X}\n")
+        meta = name_to_meta.get(var_name)
+        if meta is None:
+            pfh.write(f"0x{addr:08X}\t{byte_count}\t{var_name}\t-1\t-1\t0\n")
+        else:
+            pfh.write(f"0x{addr:08X}\t{byte_count}\t{var_name}\t{meta[0]}\t{meta[1]}\t1\n")
+
+print(f"materialized={materialized}")
+print(f"init_file={init_file}")
+print(f"preload_tsv={preload_tsv}")
+print(f"entry_count={len(map_entries)}")
+PY
+)"
+  while IFS='=' read -r key value; do
+    case "$key" in
+      materialized) PROGRAM_HEX_MATERIALIZED="$value" ;;
+      init_file) PROGRAM_HEX_INIT_FILE="$value" ;;
+      preload_tsv) PROGRAM_HEX_PRELOAD_TSV="$value" ;;
+      entry_count) PROGRAM_HEX_PRELOAD_ENTRIES="$value" ;;
+    esac
+  done <<<"$pyout"
+}
+
+materialize_effective_init_file() {
+  EFFECTIVE_INIT_FILE=""
+  if [[ -n "$INIT_FILE_ABS" && -n "$PROGRAM_HEX_INIT_FILE" ]]; then
+    EFFECTIVE_INIT_FILE="$OUTDIR/effective.init"
+    cat "$INIT_FILE_ABS" > "$EFFECTIVE_INIT_FILE"
+    if [[ -s "$EFFECTIVE_INIT_FILE" ]] && [[ "$(tail -c1 "$EFFECTIVE_INIT_FILE" 2>/dev/null || true)" != "" ]]; then
+      echo >> "$EFFECTIVE_INIT_FILE"
+    fi
+    cat "$PROGRAM_HEX_INIT_FILE" >> "$EFFECTIVE_INIT_FILE"
+  elif [[ -n "$PROGRAM_HEX_INIT_FILE" ]]; then
+    EFFECTIVE_INIT_FILE="$PROGRAM_HEX_INIT_FILE"
+  elif [[ -n "$INIT_FILE_ABS" ]]; then
+    EFFECTIVE_INIT_FILE="$INIT_FILE_ABS"
+  fi
+}
+
 declare -a VERILATOR_SIM_ACCEL_ARGS=()
 if [[ "$ASSIGNS_PER_KERNEL" -gt 0 ]]; then
   VERILATOR_SIM_ACCEL_ARGS+=(--sim-accel-assigns-per-kernel "$ASSIGNS_PER_KERNEL")
@@ -1082,6 +1289,9 @@ if [[ ! -s "$KERNEL_CU" || ! -s "$KERNEL_VARS" ]]; then
   echo "Kernel generation failed: expected $KERNEL_CU and $KERNEL_VARS" >&2
   exit 1
 fi
+
+materialize_program_hex_inputs "$OUTDIR" "$KERNEL_VARS"
+materialize_effective_init_file
 
 echo "[2/4] Preparing benchmark sources..."
 
@@ -2908,8 +3118,8 @@ echo "[4/4] Running benchmark..."
   elif [[ "$HYBRID_MODE" == "cluster-group" ]]; then
     BENCH_CMD+=(--hybrid-mode "$HYBRID_MODE" --hybrid-cluster-indices "$HYBRID_CLUSTER_INDICES")
   fi
-  if [[ -n "$INIT_FILE_ABS" ]]; then
-    BENCH_CMD+=(--init-file "$INIT_FILE_ABS")
+  if [[ -n "$EFFECTIVE_INIT_FILE" ]]; then
+    BENCH_CMD+=(--init-file "$EFFECTIVE_INIT_FILE")
   fi
   if ! /usr/bin/time -f "%e" -o "$TIME_RUN" "${BENCH_CMD[@]}" > bench_run.log 2>&1; then
     echo "Benchmark execution failed. Last lines from bench_run.log:" >&2
@@ -3030,6 +3240,23 @@ if [[ -n "$VERILATOR_GEN_S" && -n "$NVCC_COMPILE_S" && -n "$BENCH_RUN_S" && -n "
     echo "bench_run_s=$BENCH_RUN_S"
     echo "total_elapsed_s=$TOTAL_S"
     echo "total_elapsed_cold_s=$TOTAL_COLD_S"
+  } >> "$OUTDIR/bench_run.log"
+fi
+
+if [[ -n "$PROGRAM_HEX_ABS" ]]; then
+  {
+    echo "program_hex=$PROGRAM_HEX_ABS"
+    echo "program_hex_map=$PROGRAM_HEX_MAP_ABS"
+    if [[ -n "$PROGRAM_HEX_ITERATIONS" ]]; then
+      echo "program_hex_iterations=$PROGRAM_HEX_ITERATIONS"
+    fi
+    echo "program_hex_materialized=$PROGRAM_HEX_MATERIALIZED"
+    echo "program_hex_init_file=$PROGRAM_HEX_INIT_FILE"
+    echo "program_hex_preload_tsv=$PROGRAM_HEX_PRELOAD_TSV"
+    echo "program_hex_preload_entries=$PROGRAM_HEX_PRELOAD_ENTRIES"
+    if [[ -n "$EFFECTIVE_INIT_FILE" ]]; then
+      echo "effective_init_file=$EFFECTIVE_INIT_FILE"
+    fi
   } >> "$OUTDIR/bench_run.log"
 fi
 

@@ -22,9 +22,61 @@ if PROGRAM_HEX_TOOLS_DIR.exists():
 try:
     from program_hex_tools import load_program_hex, patch_iterations, store_program_hex
 except ImportError:
-    load_program_hex = None
-    patch_iterations = None
-    store_program_hex = None
+    def load_program_hex(path: str | pathlib.Path) -> dict[int, int]:
+        src = pathlib.Path(path).expanduser().resolve()
+        memory: dict[int, int] = {}
+        current_addr = 0
+        for raw_line in src.read_text(encoding="utf-8").splitlines():
+            line = raw_line.split("//", 1)[0].strip()
+            if not line:
+                continue
+            for token in line.split():
+                if token.startswith("@"):
+                    current_addr = int(token[1:], 16)
+                    continue
+                value = int(token, 16)
+                if value < 0 or value > 0xFF:
+                    raise ValueError(f"program.hex token out of byte range in {src}: {token}")
+                memory[current_addr] = value
+                current_addr += 1
+        if not memory:
+            raise ValueError(f"No memory data found in {src}")
+        return memory
+
+    def patch_iterations(memory: dict[int, int], iterations: int, base_addr: int = 0x10000000) -> dict[int, int]:
+        if iterations < 0 or iterations > 0xFFFFFFFF:
+            raise ValueError("iterations must fit in 32 bits")
+        patched = dict(memory)
+        for byte_idx in range(4):
+            patched[base_addr + byte_idx] = (iterations >> (8 * byte_idx)) & 0xFF
+        return patched
+
+    def store_program_hex(path: str | pathlib.Path, memory: dict[int, int], bytes_per_line: int = 16) -> None:
+        dst = pathlib.Path(path).expanduser().resolve()
+        if not memory:
+            raise ValueError("Cannot write empty program.hex memory image")
+        addrs = sorted(memory.keys())
+        lines: list[str] = []
+        run_start = addrs[0]
+        run_bytes = [memory[run_start]]
+        last_addr = run_start
+
+        def flush(start_addr: int, data: list[int]) -> None:
+            lines.append(f"@{start_addr:08X}")
+            for idx in range(0, len(data), bytes_per_line):
+                chunk = data[idx: idx + bytes_per_line]
+                lines.append(" ".join(f"{byte:02X}" for byte in chunk))
+
+        for addr in addrs[1:]:
+            if addr == last_addr + 1:
+                run_bytes.append(memory[addr])
+            else:
+                flush(run_start, run_bytes)
+                run_start = addr
+                run_bytes = [memory[addr]]
+            last_addr = addr
+        flush(run_start, run_bytes)
+        dst.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 try:
     from scenario_manifest_tools import load_sim_accel_manifest
