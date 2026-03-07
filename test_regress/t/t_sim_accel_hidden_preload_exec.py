@@ -44,6 +44,7 @@ target_path = probe_dir + "/hidden_mem.target.json"
 bench_log = bench_dir + "/bench_run.log"
 memory_init = bench_dir + "/memory_image.init"
 memory_payload = bench_dir + "/memory_image.payload.tsv"
+hidden_storage = bench_dir + "/array_preload.hidden.tsv"
 
 for path in [cache_dir, probe_dir, bench_dir]:
     shutil.rmtree(path, ignore_errors=True)
@@ -121,6 +122,8 @@ test.run_capture(bench_cmd)
 for filename in [bench_log, memory_init, memory_payload]:
     if not os.path.exists(filename):
         test.error("Expected output file not found: " + filename)
+if os.path.exists(hidden_storage):
+    test.error("Did not expect hidden storage dump for fully materialized hidden preload")
 
 test.file_grep(target_path, r'"var_name": "t__DOT__hidden_mem__BRA__0__KET__"')
 test.file_grep(target_path, r'"var_name": "t__DOT__hidden_mem__BRA__3__KET__"')
@@ -141,6 +144,8 @@ test.file_grep(bench_log, r"array_preload_words_loaded=4")
 test.file_grep(bench_log, r"array_preload_mapped_rows_loaded=4")
 test.file_grep(bench_log, r"array_preload_hidden_rows_loaded=0")
 test.file_grep(bench_log, r"array_preload_hidden_only_targets=0")
+test.file_grep(bench_log, r"array_preload_hidden_storage_targets=0")
+test.file_grep(bench_log, r"array_preload_hidden_storage_words=0")
 test.file_grep(bench_log, r"array_preload_mapped_rules_applied=4")
 test.file_grep(bench_log, r"array_preload_mapped_values_applied=8192")
 test.file_grep(bench_log, r"array_preload_lines_ignored=0")

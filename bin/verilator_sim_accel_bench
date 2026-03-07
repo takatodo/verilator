@@ -1459,6 +1459,7 @@ cat > "$OUTDIR/bench_kernel.cu" <<'CU'
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
@@ -1561,6 +1562,7 @@ struct ArrayPreloadTargetData {
   uint32_t address_unit_bytes = 0;
   std::string endianness;
   std::map<uint64_t, uint64_t> words;
+  std::map<uint64_t, uint64_t> hidden_words;
   std::vector<MappedValue> mapped_values;
 };
 
@@ -1571,6 +1573,8 @@ struct ArrayPreloadPayloadStats {
   size_t mapped_rows_loaded = 0;
   size_t hidden_rows_loaded = 0;
   size_t hidden_only_targets = 0;
+  size_t hidden_storage_targets = 0;
+  size_t hidden_storage_words = 0;
   size_t mapped_rules_applied = 0;
   size_t mapped_values_applied = 0;
   size_t lines_ignored = 0;
@@ -2051,6 +2055,7 @@ static ArrayPreloadPayloadStats loadArrayPreloadPayloads(
           it->second.mapped_values.push_back(mapped);
           ++stats.mapped_rows_loaded;
         } else {
+          it->second.hidden_words[wordIndexRaw] = valueRaw;
           ++stats.hidden_rows_loaded;
         }
       }
@@ -2059,6 +2064,10 @@ static ArrayPreloadPayloadStats loadArrayPreloadPayloads(
 
   for (const auto& kv : *targetsp) {
     if (!kv.second.words.empty() && kv.second.mapped_values.empty()) ++stats.hidden_only_targets;
+    if (!kv.second.hidden_words.empty()) {
+      ++stats.hidden_storage_targets;
+      stats.hidden_storage_words += kv.second.hidden_words.size();
+    }
   }
 
   return stats;
@@ -2080,6 +2089,34 @@ static void applyArrayPreloadMappedValues(
       }
     }
   }
+}
+
+static std::string formatArrayPreloadHex(uint64_t value, uint32_t wordBits) {
+  const uint32_t widthDigits = std::max<uint32_t>(8, (wordBits + 3u) / 4u);
+  std::ostringstream os;
+  os << "0x" << std::uppercase << std::hex << std::setw(widthDigits) << std::setfill('0') << value;
+  return os.str();
+}
+
+static bool writeArrayPreloadHiddenStorageTsv(
+    const std::string& path, const std::unordered_map<std::string, ArrayPreloadTargetData>& targets) {
+  bool wroteAny = false;
+  std::ofstream out(path);
+  if (!out) return false;
+  out << "target_path\tword_index\tvalue_hex\tword_bits\tbase_addr\taddress_unit_bytes\tendianness\n";
+  for (const auto& kv : targets) {
+    const ArrayPreloadTargetData& target = kv.second;
+    for (const auto& word : target.hidden_words) {
+      wroteAny = true;
+      out << target.target_path << '\t' << word.first << '\t'
+          << formatArrayPreloadHex(word.second, target.word_bits) << '\t' << target.word_bits << '\t'
+          << formatArrayPreloadHex(target.base_addr, 32) << '\t' << target.address_unit_bytes << '\t'
+          << target.endianness << '\n';
+    }
+  }
+  out.close();
+  if (!wroteAny) std::remove(path.c_str());
+  return wroteAny;
 }
 
 #ifndef SIM_ACCEL_SKIP_CPU_REFERENCE_BUILD
@@ -2484,6 +2521,8 @@ int main(int argc, char** argv) {
   DirectPreloadStats directPreloadStats;
   ArrayPreloadPayloadStats arrayPreloadStats;
   std::unordered_map<std::string, ArrayPreloadTargetData> arrayPreloadTargets;
+  const std::string arrayPreloadHiddenStoragePath = "array_preload.hidden.tsv";
+  bool wroteArrayPreloadHiddenStorage = false;
   if (!initFile.empty()) {
     initStats = applyInitFile(h_seed_varmajor, nvars, nstates, "kernel_generated.vars.tsv", initFile);
   }
@@ -2499,6 +2538,8 @@ int main(int argc, char** argv) {
     arrayPreloadStats = loadArrayPreloadPayloads(arrayPreloadPayloadFiles, &arrayPreloadTargets);
     applyArrayPreloadMappedValues(h_seed_varmajor, nvars, nstates, arrayPreloadTargets,
                                   &arrayPreloadStats);
+    wroteArrayPreloadHiddenStorage
+        = writeArrayPreloadHiddenStorageTsv(arrayPreloadHiddenStoragePath, arrayPreloadTargets);
   }
   const auto widths = loadVarWidths("kernel_generated.vars.tsv", nvars);
   std::vector<uint32_t> hybridReadVarIdxs;
@@ -3375,6 +3416,13 @@ int main(int argc, char** argv) {
               << "\n";
     std::cout << "array_preload_hidden_only_targets=" << arrayPreloadStats.hidden_only_targets
               << "\n";
+    std::cout << "array_preload_hidden_storage_targets="
+              << arrayPreloadStats.hidden_storage_targets << "\n";
+    std::cout << "array_preload_hidden_storage_words="
+              << arrayPreloadStats.hidden_storage_words << "\n";
+    if (wroteArrayPreloadHiddenStorage) {
+      std::cout << "array_preload_hidden_storage_tsv=" << arrayPreloadHiddenStoragePath << "\n";
+    }
     std::cout << "array_preload_mapped_rules_applied="
               << arrayPreloadStats.mapped_rules_applied << "\n";
     std::cout << "array_preload_mapped_values_applied="

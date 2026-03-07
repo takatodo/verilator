@@ -42,6 +42,7 @@ preload_targets_json = kernel_path + ".preload_targets.json"
 target_path = probe_dir + "/hidden_mem.target.json"
 bench_log = bench_dir + "/bench_run.log"
 memory_payload = bench_dir + "/memory_image.payload.tsv"
+hidden_storage = bench_dir + "/array_preload.hidden.tsv"
 
 for path in [cache_dir, probe_dir, bench_dir]:
     shutil.rmtree(path, ignore_errors=True)
@@ -103,7 +104,7 @@ bench_cmd = (
     + test.t_dir + "/t_sim_accel_hidden_preload_unmapped.v")
 test.run_capture(bench_cmd)
 
-for filename in [bench_log, memory_payload]:
+for filename in [bench_log, memory_payload, hidden_storage]:
     if not os.path.exists(filename):
         test.error("Expected bench artifact not found: " + filename)
 
@@ -124,10 +125,18 @@ test.file_grep(bench_log, r"array_preload_words_loaded=17")
 test.file_grep(bench_log, r"array_preload_mapped_rows_loaded=0")
 test.file_grep(bench_log, r"array_preload_hidden_rows_loaded=17")
 test.file_grep(bench_log, r"array_preload_hidden_only_targets=1")
+test.file_grep(bench_log, r"array_preload_hidden_storage_targets=1")
+test.file_grep(bench_log, r"array_preload_hidden_storage_words=17")
+test.file_grep(bench_log, r"array_preload_hidden_storage_tsv=array_preload\.hidden\.tsv")
 test.file_grep(bench_log, r"array_preload_mapped_rules_applied=0")
 test.file_grep(bench_log, r"array_preload_mapped_values_applied=0")
 test.file_grep(bench_log, r"array_preload_lines_ignored=0")
 test.file_grep(bench_log, r"mismatch=0")
+test.file_grep(
+    hidden_storage,
+    r"^target_path\tword_index\tvalue_hex\tword_bits\tbase_addr\taddress_unit_bytes\tendianness$")
+test.file_grep(hidden_storage, r"^t\.hidden_mem\t0\t0x0000000A\t32\t0x00000000\t4\tlittle$")
+test.file_grep(hidden_storage, r"^t\.hidden_mem\t16\t0x000000AA\t32\t0x00000000\t4\tlittle$")
 test.file_grep(memory_payload, r"^target_path\tword_index\tvalue_hex\tword_bits\tbase_addr\taddress_unit_bytes\tendianness\tvar_name\tvar_index\twidth\tvisible$")
 test.file_grep(memory_payload, r"^t\.hidden_mem\t0\t0x0000000A\t32\t0x00000000\t4\tlittle\t\t-1\t-1\t0$")
 test.file_grep(memory_payload, r"^t\.hidden_mem\t16\t0x000000AA\t32\t0x00000000\t4\tlittle\t\t-1\t-1\t0$")
