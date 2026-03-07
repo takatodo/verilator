@@ -1,0 +1,352 @@
+#!/usr/bin/env python3
+"""Run multiple sim-accel benchmark scenarios and summarize total time."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import pathlib
+import re
+import subprocess
+import sys
+import time
+from collections import Counter
+from typing import Any
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="verilator_sim_accel_scenario_batch",
+        description=(
+            "Run multiple sim-accel benchmark scenarios against the same design "
+            "and summarize total walltime."
+        ),
+    )
+    parser.add_argument("--bench", default=None,
+                        help="Path to verilator_sim_accel_bench (default: sibling helper)")
+    parser.add_argument("--verilator", default="./bin/verilator",
+                        help="Verilator binary (forwarded to bench)")
+    parser.add_argument("--top-module", required=True, help="Top module name")
+    parser.add_argument("--outdir", required=True, help="Batch output directory")
+    parser.add_argument("--nstates", type=int, default=131072, help="Parallel state count")
+    parser.add_argument("--state-chunk", type=int, default=0, help="States per launch chunk")
+    parser.add_argument("--gpu-reps", type=int, default=200, help="GPU reps per scenario")
+    parser.add_argument("--cpu-reps", type=int, default=20, help="CPU reps per scenario")
+    parser.add_argument("--block-size", type=int, default=256, help="CUDA block size")
+    parser.add_argument("--assigns-per-kernel", type=int, default=0,
+                        help="Generated CUDA partition size limit")
+    parser.add_argument("--compile-cache-dir",
+                        default=os.environ.get("SIM_ACCEL_COMPILE_CACHE_DIR",
+                                               "/tmp/verilator-sim-accel-compile-cache"),
+                        help="Shared compile cache directory")
+    parser.add_argument("--no-compile-cache", action="store_true",
+                        help="Disable compile cache reuse")
+    parser.add_argument("--skip-cpu-reference-build", action="store_true",
+                        help="Forwarded to bench; keeps runtime focused on GPU path")
+    parser.add_argument("--init-mode", default="random",
+                        help="Default init mode for scenarios without override")
+    parser.add_argument("--init-seed", type=int, default=1,
+                        help="Default init seed for scenarios without override")
+    parser.add_argument("--scenario-seeds", default="",
+                        help="Comma-separated random seeds, e.g. 1,2,3")
+    parser.add_argument("--scenario-init-files", default="",
+                        help="Comma-separated init override files")
+    parser.add_argument("--scenario-manifest",
+                        help="JSON file with scenarios: [{name, init_mode, init_seed, init_file}]")
+    parser.add_argument("--keep-going", action="store_true",
+                        help="Continue after scenario failures")
+    parser.add_argument("--keep-scenario-outdirs", action="store_true",
+                        help="Do not delete scenario outdirs on failure")
+    parser.add_argument("verilator_args", nargs=argparse.REMAINDER,
+                        help="Arguments passed after -- to verilator_sim_accel_bench")
+    args = parser.parse_args()
+    if args.verilator_args and args.verilator_args[0] == "--":
+        args.verilator_args = args.verilator_args[1:]
+    if not args.verilator_args:
+        parser.error("expected Verilator source arguments after --")
+    if args.nstates <= 0 or args.gpu_reps <= 0 or args.cpu_reps <= 0 or args.block_size <= 0:
+        parser.error("nstates, gpu-reps, cpu-reps, and block-size must be > 0")
+    if args.assigns_per_kernel < 0 or args.state_chunk < 0:
+        parser.error("assigns-per-kernel and state-chunk must be >= 0")
+    return args
+
+
+def default_bench_path() -> str:
+    return str(pathlib.Path(__file__).with_name("verilator_sim_accel_bench"))
+
+
+def sanitize_name(raw: str) -> str:
+    cooked = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw).strip("._")
+    return cooked or "scenario"
+
+
+def load_manifest(path: pathlib.Path) -> list[dict[str, Any]]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(data, dict):
+        data = data.get("scenarios", [])
+    if not isinstance(data, list):
+        raise ValueError(f"scenario manifest must be a list or {{\"scenarios\": [...]}}: {path}")
+    scenarios: list[dict[str, Any]] = []
+    for idx, item in enumerate(data):
+        if not isinstance(item, dict):
+            raise ValueError(f"scenario manifest entry {idx} is not an object")
+        scenarios.append(item)
+    return scenarios
+
+
+def build_scenarios(args: argparse.Namespace) -> list[dict[str, Any]]:
+    scenarios: list[dict[str, Any]] = []
+    if args.scenario_seeds:
+        for seed_text in [x.strip() for x in args.scenario_seeds.split(",") if x.strip()]:
+            seed = int(seed_text, 0)
+            scenarios.append({
+                "name": f"seed{seed:06d}",
+                "init_mode": args.init_mode,
+                "init_seed": seed,
+                "init_file": None,
+            })
+    if args.scenario_init_files:
+        for path_text in [x.strip() for x in args.scenario_init_files.split(",") if x.strip()]:
+            path = pathlib.Path(path_text).expanduser().resolve()
+            scenarios.append({
+                "name": sanitize_name(path.stem),
+                "init_mode": args.init_mode,
+                "init_seed": args.init_seed,
+                "init_file": str(path),
+            })
+    if args.scenario_manifest:
+        for idx, item in enumerate(load_manifest(pathlib.Path(args.scenario_manifest).expanduser().resolve())):
+            name = sanitize_name(str(item.get("name") or f"manifest{idx:03d}"))
+            init_mode = str(item.get("init_mode") or args.init_mode)
+            init_seed = int(item.get("init_seed", args.init_seed))
+            init_file = item.get("init_file")
+            if init_file:
+                init_file = str(pathlib.Path(str(init_file)).expanduser().resolve())
+            scenarios.append({
+                "name": name,
+                "init_mode": init_mode,
+                "init_seed": init_seed,
+                "init_file": init_file,
+            })
+    if not scenarios:
+        raise SystemExit("No scenarios specified. Use --scenario-seeds, --scenario-init-files, or --scenario-manifest.")
+    # Preserve order but ensure stable unique names.
+    name_counts: Counter[str] = Counter()
+    for scenario in scenarios:
+        base = sanitize_name(str(scenario["name"]))
+        name_counts[base] += 1
+        scenario["name"] = base if name_counts[base] == 1 else f"{base}_{name_counts[base]:02d}"
+    return scenarios
+
+
+def parse_metrics(text: str) -> dict[str, str]:
+    metrics: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if re.fullmatch(r"[A-Za-z0-9_]+", key):
+            metrics[key] = value
+    return metrics
+
+
+def to_number(value: str | None) -> float | int | None:
+    if value is None:
+        return None
+    if value in {"skipped", ""}:
+        return None
+    if re.fullmatch(r"-?[0-9]+", value):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    if re.fullmatch(r"-?[0-9]+(?:\.[0-9]+)?", value):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def write_tsv(path: pathlib.Path, rows: list[dict[str, Any]]) -> None:
+    headers = [
+        "name",
+        "returncode",
+        "walltime_s",
+        "init_mode",
+        "init_seed",
+        "init_file",
+        "cpu_reference_checked",
+        "mismatch",
+        "compact_mismatch",
+        "gpu_ms_per_rep",
+        "cpu_ms_per_rep",
+        "speedup_gpu_over_cpu",
+        "verilator_codegen_s",
+        "nvcc_compile_s",
+        "bench_run_s",
+        "total_elapsed_s",
+        "verilator_artifact_cache_mode",
+        "nvcc_cache_mode",
+        "cuda_assignw_offload_pct",
+    ]
+    with path.open("w", encoding="utf-8") as fh:
+        fh.write("\t".join(headers) + "\n")
+        for row in rows:
+            values = [str(row.get(h, "")) for h in headers]
+            fh.write("\t".join(values) + "\n")
+
+
+def main() -> int:
+    args = parse_args()
+    bench = pathlib.Path(args.bench or default_bench_path()).resolve()
+    if not bench.exists():
+        raise SystemExit(f"Missing bench helper: {bench}")
+    scenarios = build_scenarios(args)
+    outdir = pathlib.Path(args.outdir).expanduser().resolve()
+    outdir.mkdir(parents=True, exist_ok=True)
+    scenario_root = outdir / "scenarios"
+    scenario_root.mkdir(exist_ok=True)
+    compile_cache_dir = pathlib.Path(args.compile_cache_dir).expanduser().resolve()
+    compile_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    aggregate_walltime = 0.0
+    aggregate_total_elapsed = 0.0
+    aggregate_bench_run = 0.0
+    success_count = 0
+    failure_count = 0
+    nvcc_modes: Counter[str] = Counter()
+    artifact_modes: Counter[str] = Counter()
+    rows: list[dict[str, Any]] = []
+    scenario_records: list[dict[str, Any]] = []
+
+    for index, scenario in enumerate(scenarios, start=1):
+        scenario_outdir = scenario_root / scenario["name"]
+        scenario_outdir.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            str(bench),
+            "--verilator", args.verilator,
+            "--top-module", args.top_module,
+            "--outdir", str(scenario_outdir),
+            "--nstates", str(args.nstates),
+            "--state-chunk", str(args.state_chunk),
+            "--gpu-reps", str(args.gpu_reps),
+            "--cpu-reps", str(args.cpu_reps),
+            "--block-size", str(args.block_size),
+            "--init-mode", str(scenario["init_mode"]),
+            "--init-seed", str(scenario["init_seed"]),
+            "--assigns-per-kernel", str(args.assigns_per_kernel),
+            "--compile-cache-dir", str(compile_cache_dir),
+        ]
+        if args.no_compile_cache:
+            cmd.append("--no-compile-cache")
+        if args.skip_cpu_reference_build:
+            cmd.append("--skip-cpu-reference-build")
+        if scenario.get("init_file"):
+            cmd.extend(["--init-file", str(scenario["init_file"])])
+        cmd.append("--")
+        cmd.extend(args.verilator_args)
+
+        print(f"[{index}/{len(scenarios)}] {scenario['name']}")
+        start = time.monotonic()
+        proc = subprocess.run(cmd, text=True, capture_output=True)
+        walltime = time.monotonic() - start
+        aggregate_walltime += walltime
+
+        (scenario_outdir / "driver_stdout.log").write_text(proc.stdout, encoding="utf-8")
+        (scenario_outdir / "driver_stderr.log").write_text(proc.stderr, encoding="utf-8")
+
+        metrics = parse_metrics(proc.stdout)
+        total_elapsed = to_number(metrics.get("total_elapsed_s"))
+        bench_run_s = to_number(metrics.get("bench_run_s"))
+        if isinstance(total_elapsed, (int, float)):
+            aggregate_total_elapsed += float(total_elapsed)
+        if isinstance(bench_run_s, (int, float)):
+            aggregate_bench_run += float(bench_run_s)
+        nvcc_modes[metrics.get("nvcc_cache_mode", "unknown")] += 1
+        artifact_modes[metrics.get("verilator_artifact_cache_mode", "unknown")] += 1
+
+        row = {
+            "name": scenario["name"],
+            "returncode": proc.returncode,
+            "walltime_s": f"{walltime:.6f}",
+            "init_mode": scenario["init_mode"],
+            "init_seed": scenario["init_seed"],
+            "init_file": scenario.get("init_file") or "",
+            "cpu_reference_checked": metrics.get("cpu_reference_checked", ""),
+            "mismatch": metrics.get("mismatch", ""),
+            "compact_mismatch": metrics.get("compact_mismatch", ""),
+            "gpu_ms_per_rep": metrics.get("gpu_ms_per_rep", ""),
+            "cpu_ms_per_rep": metrics.get("cpu_ms_per_rep", ""),
+            "speedup_gpu_over_cpu": metrics.get("speedup_gpu_over_cpu", ""),
+            "verilator_codegen_s": metrics.get("verilator_codegen_s", ""),
+            "nvcc_compile_s": metrics.get("nvcc_compile_s", ""),
+            "bench_run_s": metrics.get("bench_run_s", ""),
+            "total_elapsed_s": metrics.get("total_elapsed_s", ""),
+            "verilator_artifact_cache_mode": metrics.get("verilator_artifact_cache_mode", ""),
+            "nvcc_cache_mode": metrics.get("nvcc_cache_mode", ""),
+            "cuda_assignw_offload_pct": metrics.get("cuda_assignw_offload_pct", ""),
+        }
+        rows.append(row)
+        scenario_records.append({
+            "name": scenario["name"],
+            "init_mode": scenario["init_mode"],
+            "init_seed": scenario["init_seed"],
+            "init_file": scenario.get("init_file"),
+            "outdir": str(scenario_outdir),
+            "returncode": proc.returncode,
+            "walltime_s": walltime,
+            "metrics": metrics,
+        })
+
+        if proc.returncode == 0:
+            success_count += 1
+        else:
+            failure_count += 1
+            sys.stderr.write(proc.stderr)
+            sys.stderr.write(proc.stdout)
+            if not args.keep_going:
+                if not args.keep_scenario_outdirs:
+                    pass
+                break
+
+    summary_tsv = outdir / "scenario_batch.tsv"
+    summary_json = outdir / "scenario_batch.json"
+    write_tsv(summary_tsv, rows)
+    summary = {
+        "schema_version": "sim-accel-scenario-batch-v1",
+        "bench": str(bench),
+        "top_module": args.top_module,
+        "compile_cache_dir": str(compile_cache_dir),
+        "aggregate": {
+            "scenario_count": len(rows),
+            "success_count": success_count,
+            "failure_count": failure_count,
+            "walltime_s": round(aggregate_walltime, 6),
+            "reported_total_elapsed_s": round(aggregate_total_elapsed, 6),
+            "reported_bench_run_s": round(aggregate_bench_run, 6),
+            "nvcc_cache_mode_counts": dict(nvcc_modes),
+            "verilator_artifact_cache_mode_counts": dict(artifact_modes),
+        },
+        "scenarios": scenario_records,
+    }
+    summary_json.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
+
+    print("== scenario batch summary ==")
+    print(f"outdir={outdir}")
+    print(f"scenario_count={len(rows)}")
+    print(f"success_count={success_count}")
+    print(f"failure_count={failure_count}")
+    print(f"scenario_batch_walltime_s={aggregate_walltime:.6f}")
+    print(f"scenario_batch_reported_total_elapsed_s={aggregate_total_elapsed:.6f}")
+    print(f"scenario_batch_reported_bench_run_s={aggregate_bench_run:.6f}")
+    print(f"scenario_batch_summary_tsv={summary_tsv}")
+    print(f"scenario_batch_summary_json={summary_json}")
+
+    return 0 if failure_count == 0 else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
