@@ -60,6 +60,8 @@ expect_failure(["--hybrid-mode", "cluster-group", "--hybrid-cluster-group-auto",
                "--hybrid-cluster-indices and --hybrid-cluster-group-auto are mutually exclusive")
 expect_failure(["--hybrid-cluster-group-size", "2"],
                "--hybrid-cluster-group-size requires --hybrid-cluster-group-auto")
+expect_failure(["--hybrid-batch-dedup"],
+               "--hybrid-batch-dedup requires --hybrid-mode cluster-group")
 expect_failure(["--skip-cpu-reference-build", "--hybrid-mode", "single-cluster",
                 "--hybrid-cluster-index", "0"],
                "--skip-cpu-reference-build requires --hybrid-mode off")
