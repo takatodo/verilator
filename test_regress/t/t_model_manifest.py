@@ -21,7 +21,7 @@ test.scenarios('vlt')
 
 out_filename = test.obj_dir + "/model-manifest.json"
 
-test.compile(verilator_flags2=['--model-manifest-output', out_filename],
+test.compile(verilator_flags2=['--model-manifest-output', out_filename, '--stats'],
              verilator_make_gmake=False,
              make_top_shell=False,
              make_main=False)
@@ -40,7 +40,9 @@ fields = {field['field_id']: field for field in manifest['fields']}
 if manifest['field_count'] != len(fields):
     test.error('incorrect model manifest field count')
 for field_id, width, direction in (('rtl:t.clk', 1, 'INPUT'), ('rtl:t.data_i', 8, 'INPUT'),
-                                   ('rtl:t.data_o', 8, 'OUTPUT'), ('rtl:t.state_q', 8, 'NONE')):
+                                   ('rtl:t.data_o', 8, 'OUTPUT'), ('rtl:t.__Vuser_q', 1, 'NONE'),
+                                   ('rtl:t.state_q', 8, 'NONE'),
+                                   ('rtl:status_if.done', 1, 'NONE')):
     field = fields.get(field_id)
     if field is None:
         test.error('missing model manifest field ' + field_id)
@@ -63,5 +65,36 @@ for field in manifest['fields']:
         headers[container] = header_path.read_text(encoding='utf8')
     if not re.search(r'\b' + re.escape(binding['member']) + r'\b', headers[container]):
         test.error('generated binding is absent from header for ' + field['field_id'])
+
+instances = {instance['instance_id']: instance for instance in manifest['instances']}
+if manifest['instance_count'] != 2 or len(instances) != 2:
+    test.error('incorrect model manifest instance count')
+top_instance = instances.get('rtl_instance:t')
+status_instance = instances.get('rtl_instance:t.status')
+if top_instance is None or not top_instance['is_top']:
+    test.error('missing top model manifest instance')
+if status_instance is None:
+    test.error('missing interface model manifest instance')
+elif status_instance['parent_instance_id'] != 'rtl_instance:t':
+    test.error('incorrect interface parent instance')
+else:
+    status_field = fields['rtl:status_if.done']
+    if (status_instance['module_binding']['container']
+            != status_field['generated_binding']['container']):
+        test.error('interface instance does not bind its field container')
+    syms_header = Path(test.obj_dir) / (
+        status_instance['generated_binding']['container'] + '.h')
+    if not re.search(
+            r'\b' + re.escape(status_instance['generated_binding']['member']) + r'\b',
+            syms_header.read_text(encoding='utf8')):
+        test.error('generated interface instance binding is absent from symbol header')
+
+if manifest['limitations']['generated_storage_instances'] != 'provided':
+    test.error('model manifest does not declare generated storage instances')
+if manifest['limitations']['semantic_instance_topology'] != 'not_provided':
+    test.error('model manifest overclaims complete semantic instance topology')
+
+test.file_grep(test.stats, r'Model manifest, Fields emitted\s+(\d+)', len(fields))
+test.file_grep(test.stats, r'Model manifest, Instances emitted\s+(\d+)', 2)
 
 test.passes()

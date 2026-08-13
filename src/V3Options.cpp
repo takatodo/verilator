@@ -1633,7 +1633,7 @@ void V3Options::parseOptsList(FileLine* fl, const string& optdir, int argc,
     });
     DECL_OPTION("-func-recursion-depth", Set, &m_funcRecursion);
     DECL_OPTION("-max-num-width", Set, &m_maxNumWidth);
-    DECL_OPTION("-model-manifest-output", Set, &m_modelManifestOutput);
+    DECL_OPTION("-model-manifest-output", Set, &m_modelManifestOutput).notForRerun();
     DECL_OPTION("-mod-prefix", CbVal, [this, fl](const char* valp) {
         validateIdentifier(fl, valp, "--mod-prefix");
         m_modPrefix = valp;

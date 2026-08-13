@@ -1236,22 +1236,24 @@ Summary:
    dependency detection, similar to gcc -MMD option. By default this option
    is enabled for :vlopt:`--cc` or :vlopt:`--sc` modes.
 
-.. option:: --model-manifest-output <filename>
-
-   Experimental. Emit a versioned JSON inventory of design-specific fields
-   represented as members in the generated model. The inventory distinguishes
-   RTL-derived fields from compiler-generated fields and records their source,
-   width, and generated C++ binding.
-
-   This output does not define a checkpoint format or stable ABI. In
-   particular, it does not provide byte offsets, persistent-state
-   classification, coverage mappings, or evaluation regions. It currently
-   requires non-hierarchical :vlopt:`--cc` or :vlopt:`--sc` model generation.
-
 .. option:: --mod-prefix <topname>
 
    Specifies the name to prepend to all lower-level classes. Defaults to
    the same as :vlopt:`--prefix`.
+
+.. option:: --model-manifest-output <filename>
+
+   Experimental and for internal use only. Emit a versioned JSON inventory of
+   design-specific fields and stored module instances represented as members in
+   the generated model. The inventory distinguishes RTL-derived fields from
+   compiler-generated fields and records their source, width, generated C++
+   binding, and parent bindings among stored instances.
+
+   This output does not define a checkpoint format or stable ABI. In
+   particular, it does not provide byte offsets, persistent-state
+   classification, complete semantic instance topology, coverage mappings, or
+   evaluation regions. It currently requires non-hierarchical :vlopt:`--cc` or
+   :vlopt:`--sc` model generation.
 
 .. option:: --MP
 
