@@ -39,11 +39,8 @@ if manifest['model']['top'] != 't':
 fields = {field['field_id']: field for field in manifest['fields']}
 if manifest['field_count'] != len(fields):
     test.error('incorrect model manifest field count')
-for field_id, width, direction in (
-        ('rtl:t.clk', 1, 'INPUT'),
-        ('rtl:t.data_i', 8, 'INPUT'),
-        ('rtl:t.data_o', 8, 'OUTPUT'),
-        ('rtl:t.state_q', 8, 'NONE')):
+for field_id, width, direction in (('rtl:t.clk', 1, 'INPUT'), ('rtl:t.data_i', 8, 'INPUT'),
+                                   ('rtl:t.data_o', 8, 'OUTPUT'), ('rtl:t.state_q', 8, 'NONE')):
     field = fields.get(field_id)
     if field is None:
         test.error('missing model manifest field ' + field_id)
