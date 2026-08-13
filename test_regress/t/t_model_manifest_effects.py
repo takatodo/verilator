@@ -57,7 +57,8 @@ dpi_functions = []
 scheduler_functions = []
 for function in functions.values():
     categories = {
-        dependency['category'] for dependency in function['direct_effects']['host_dependencies']
+        dependency['category']
+        for dependency in function['direct_effects']['host_dependencies']
     }
     if 'dpi_vpi' in categories:
         dpi_functions.append(function)
@@ -69,8 +70,7 @@ if any(function['direct_classification'] != 'host_dependent' for function in dpi
     test.error('DPI function is not directly host-dependent')
 if not scheduler_functions:
     test.error('scheduler host dependency is absent from eval function inventory')
-if any(function['direct_classification'] != 'host_dependent'
-       for function in scheduler_functions):
+if any(function['direct_classification'] != 'host_dependent' for function in scheduler_functions):
     test.error('scheduler function is not directly host-dependent')
 
 metrics = eval_regions['metrics']

@@ -112,9 +112,9 @@ changed = True
 while changed:
     changed = False
     for function_id, function in functions.items():
-        propagated = max([computed[function_id]] + [
-            computed[call['callee_function_id']] for call in function['direct_calls']
-        ])
+        propagated = max(
+            [computed[function_id]] +
+            [computed[call['callee_function_id']] for call in function['direct_calls']])
         if propagated != computed[function_id]:
             computed[function_id] = propagated
             changed = True
@@ -128,40 +128,41 @@ if eval_metrics['function_count'] != len(functions):
 if eval_metrics['region_count'] != len(regions):
     test.error('incorrect eval region count')
 metric_sources = {
-    'direct_call_edge_count': sum(len(function['direct_calls']) for function in functions.values()),
-    'direct_call_site_count': sum(
-        call['site_count'] for function in functions.values() for call in function['direct_calls']),
-    'state_access_binding_count': sum(
-        len(function['direct_state_accesses']) for function in functions.values()),
-    'state_read_site_count': sum(
-        access['read_site_count'] for function in functions.values()
+    'direct_call_edge_count':
+    sum(len(function['direct_calls']) for function in functions.values()),
+    'direct_call_site_count':
+    sum(call['site_count'] for function in functions.values()
+        for call in function['direct_calls']),
+    'state_access_binding_count':
+    sum(len(function['direct_state_accesses']) for function in functions.values()),
+    'state_read_site_count':
+    sum(access['read_site_count'] for function in functions.values()
         for access in function['direct_state_accesses']),
-    'state_write_site_count': sum(
-        access['write_site_count'] for function in functions.values()
+    'state_write_site_count':
+    sum(access['write_site_count'] for function in functions.values()
         for access in function['direct_state_accesses']),
-    'coverage_update_site_count': sum(
-        function['direct_effects']['coverage_update_site_count']
+    'coverage_update_site_count':
+    sum(function['direct_effects']['coverage_update_site_count']
         for function in functions.values()),
-    'host_dependency_site_count': sum(
-        dependency['site_count'] for function in functions.values()
+    'host_dependency_site_count':
+    sum(dependency['site_count'] for function in functions.values()
         for dependency in function['direct_effects']['host_dependencies']),
-    'unknown_effect_site_count': sum(
-        effect['site_count'] for function in functions.values()
+    'unknown_effect_site_count':
+    sum(effect['site_count'] for function in functions.values()
         for effect in function['direct_effects']['unknown_effects']),
-    'direct_proven_device_clean_function_count': sum(
-        function['direct_classification'] == 'proven_device_clean'
+    'direct_proven_device_clean_function_count':
+    sum(function['direct_classification'] == 'proven_device_clean'
         for function in functions.values()),
-    'direct_unknown_function_count': sum(
-        function['direct_classification'] == 'unknown' for function in functions.values()),
-    'direct_host_dependent_function_count': sum(
-        function['direct_classification'] == 'host_dependent'
-        for function in functions.values()),
-    'proven_device_clean_function_count': sum(
-        function['classification'] == 'proven_device_clean' for function in functions.values()),
-    'unknown_function_count': sum(
-        function['classification'] == 'unknown' for function in functions.values()),
-    'host_dependent_function_count': sum(
-        function['classification'] == 'host_dependent' for function in functions.values()),
+    'direct_unknown_function_count':
+    sum(function['direct_classification'] == 'unknown' for function in functions.values()),
+    'direct_host_dependent_function_count':
+    sum(function['direct_classification'] == 'host_dependent' for function in functions.values()),
+    'proven_device_clean_function_count':
+    sum(function['classification'] == 'proven_device_clean' for function in functions.values()),
+    'unknown_function_count':
+    sum(function['classification'] == 'unknown' for function in functions.values()),
+    'host_dependent_function_count':
+    sum(function['classification'] == 'host_dependent' for function in functions.values()),
 }
 for metric, expected in metric_sources.items():
     if eval_metrics[metric] != expected:
