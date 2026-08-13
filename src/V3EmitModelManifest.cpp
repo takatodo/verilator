@@ -151,6 +151,7 @@ void emitField(V3OutJsonFile& of, const Field& field) {
     const AstVar* const varp = field.varp;
     const FileLine* const fl = varp->fileline();
     const bool generated = isCompilerGenerated(varp);
+    const EmitCUtil::SavableFieldKind savableKind = EmitCUtil::savableFieldKind(field.modp, varp);
 
     of.begin()
         .put("field_id", field.fieldId)
@@ -179,6 +180,12 @@ void emitField(V3OutJsonFile& of, const Field& field) {
         .put("has_user_init", varp->hasUserInit())
         .put("no_reset", varp->noReset())
         .end()
+        .begin("checkpoint_membership")
+        .put("status",
+             savableKind == EmitCUtil::SavableFieldKind::INCLUDED ? "included" : "excluded")
+        .put("authority", "verilator_savable_field_selection")
+        .put("reason", EmitCUtil::savableFieldKindAscii(savableKind))
+        .end()
         .end();
 }
 
@@ -187,9 +194,16 @@ void emitField(V3OutJsonFile& of, const Field& field) {
 void V3EmitModelManifest::emit() {
     UINFO(2, __FUNCTION__ << ":");
     const ManifestData data = CollectVisitor::collect(v3Global.rootp());
+    const size_t checkpointIncluded
+        = std::count_if(data.fields.begin(), data.fields.end(), [](const Field& field) {
+              return EmitCUtil::savableFieldKind(field.modp, field.varp)
+                     == EmitCUtil::SavableFieldKind::INCLUDED;
+          });
     V3Stats::addStat("Model manifest, Fields emitted", static_cast<double>(data.fields.size()));
     V3Stats::addStat("Model manifest, Instances emitted",
                      static_cast<double>(data.instances.size()));
+    V3Stats::addStat("Model manifest, Checkpoint fields included",
+                     static_cast<double>(checkpointIncluded));
     V3OutJsonFile of{v3Global.opt.modelManifestOutput()};
 
     of.put("schema_version", 1)
@@ -207,11 +221,21 @@ void V3EmitModelManifest::emit() {
         .begin("instances", '[');
     for (const Instance& instance : data.instances) emitInstance(of, instance);
     of.end()
+        .begin("checkpoint_projection")
+        .put("status", "field_membership_only")
+        .put("authority", "verilator_savable_field_selection")
+        .put("included_definition_field_count", static_cast<int>(checkpointIncluded))
+        .put("excluded_definition_field_count",
+             static_cast<int>(data.fields.size() - checkpointIncluded))
+        .put("runtime_state", "not_provided")
+        .put("packing", "not_provided")
+        .end()
         .begin("limitations")
         .put("semantic_id_stability", "experimental_not_guaranteed")
         .put("semantic_state_classification", "not_provided")
         .put("byte_offsets", "not_provided")
         .put("pointer_free_checkpoint", "not_provided")
+        .put("checkpoint_field_membership", "provided")
         .put("generated_storage_instances", "provided")
         .put("semantic_instance_topology", "not_provided")
         .put("coverage_mapping", "not_provided")

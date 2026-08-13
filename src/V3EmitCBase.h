@@ -51,6 +51,15 @@ public:
 
 class EmitCUtil final {
 public:
+    enum class SavableFieldKind : uint8_t {
+        INCLUDED,
+        EXCLUDED_SYSTEMC_TOP_IO,
+        EXCLUDED_PARAMETER,
+        EXCLUDED_STATIC_CONST,
+        EXCLUDED_NBA_COMMIT_QUEUE,
+        EXCLUDED_MTASK_STATE,
+    };
+
     static string voidSelfAssign(const AstNodeModule* modp) {
         const string className = prefixNameProtect(modp);
         return className + "* const __restrict vlSelf VL_ATTR_UNUSED = static_cast<" + className
@@ -73,6 +82,9 @@ public:
         return varp->isIO() || varp->isSignal() || varp->isClassMember() || varp->isTemp()
                || varp->isGenVar();
     }
+    static SavableFieldKind savableFieldKind(const AstNodeModule* modp,
+                                             const AstVar* varp) VL_MT_STABLE;
+    static const char* savableFieldKindAscii(SavableFieldKind kind) VL_MT_STABLE;
     static bool isAnonOk(const AstVar* varp) VL_MT_STABLE {
         AstNodeDType* const dtp = varp->dtypep()->skipRefp();
         return v3Global.opt.compLimitMembers() != 0  // Enabled

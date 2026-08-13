@@ -1247,13 +1247,16 @@ Summary:
    design-specific fields and stored module instances represented as members in
    the generated model. The inventory distinguishes RTL-derived fields from
    compiler-generated fields and records their source, width, generated C++
-   binding, and parent bindings among stored instances.
+   binding, and parent bindings among stored instances. It also records, for
+   each emitted field, whether the existing :vlopt:`--savable` field-selection
+   rule includes or excludes it.
 
    This output does not define a checkpoint format or stable ABI. In
-   particular, it does not provide byte offsets, persistent-state
-   classification, complete semantic instance topology, coverage mappings, or
-   evaluation regions. It currently requires non-hierarchical :vlopt:`--cc` or
-   :vlopt:`--sc` model generation.
+   particular, the field-selection inventory does not include runtime state or
+   prove persistence, pointer-free packing, or compatibility with coverage or
+   timing. It also does not provide byte offsets, complete semantic instance
+   topology, coverage mappings, or evaluation regions. It currently requires
+   non-hierarchical :vlopt:`--cc` or :vlopt:`--sc` model generation.
 
 .. option:: --MP
 

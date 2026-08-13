@@ -34,9 +34,21 @@ test.compile(verilator_flags2=[
 with open(out_filename, 'r', encoding='utf8') as fh:
     manifest = json.load(fh)
 
-serialized = json.dumps(manifest)
+
+def string_values(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from string_values(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from string_values(item)
+
+
+serialized_values = json.dumps(list(string_values(manifest)))
 for private_name in ('state_q', '__Vuser_q', 'status_if', 'status', 'done', 't_model_manifest.v'):
-    if private_name in serialized:
+    if private_name in serialized_values:
         test.error('model manifest exposes protected identifier ' + private_name)
 
 if manifest['field_count'] == 0:

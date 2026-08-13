@@ -311,13 +311,8 @@ class EmitCImp final : public EmitCFunc {
                 // Save all members
                 for (AstNode* nodep = modp->stmtsp(); nodep; nodep = nodep->nextp()) {
                     if (const AstVar* const varp = VN_CAST(nodep, Var)) {
-                        if (varp->isIO() && modp->isTop() && optSystemC()) {
-                            // System C top I/O doesn't need loading, as the
-                            // lower level subinst code does it.
-                        } else if (varp->isParam()) {
-                        } else if (varp->isStatic() && varp->isConst()) {
-                        } else if (VN_IS(varp->dtypep(), NBACommitQueueDType)) {
-                        } else {
+                        if (EmitCUtil::savableFieldKind(modp, varp)
+                            == EmitCUtil::SavableFieldKind::INCLUDED) {
                             int vects = 0;
                             AstNodeDType* elementp = varp->dtypeSkipRefp();
                             for (AstUnpackArrayDType* arrayp = VN_CAST(elementp, UnpackArrayDType);
@@ -332,8 +327,6 @@ class EmitCImp final : public EmitCFunc {
                                 elementp = arrayp->subDTypep()->skipRefp();
                             }
                             const AstBasicDType* const basicp = elementp->basicp();
-                            // Do not save MTask state, only matters within an evaluation
-                            if (basicp && basicp->keyword().isMTaskState()) continue;
                             // Want to detect types that are represented as arrays
                             // (i.e. packed types of more than 64 bits).
                             if (elementp->isWide()

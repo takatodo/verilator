@@ -74,6 +74,41 @@ string EmitCUtil::prefixNameProtect(const AstNode* nodep) VL_MT_STABLE {
     return result;
 }
 
+EmitCUtil::SavableFieldKind EmitCUtil::savableFieldKind(const AstNodeModule* const modp,
+                                                        const AstVar* const varp) VL_MT_STABLE {
+    // SystemC top I/O is restored through the lower-level instance state.
+    if (varp->isIO() && modp->isTop() && v3Global.opt.systemC()) {
+        return SavableFieldKind::EXCLUDED_SYSTEMC_TOP_IO;
+    }
+    if (varp->isParam()) return SavableFieldKind::EXCLUDED_PARAMETER;
+    if (varp->isStatic() && varp->isConst()) return SavableFieldKind::EXCLUDED_STATIC_CONST;
+    if (VN_IS(varp->dtypep(), NBACommitQueueDType)) {
+        return SavableFieldKind::EXCLUDED_NBA_COMMIT_QUEUE;
+    }
+    AstNodeDType* elementp = varp->dtypeSkipRefp();
+    while (const AstUnpackArrayDType* const arrayp = VN_CAST(elementp, UnpackArrayDType)) {
+        elementp = arrayp->subDTypep()->skipRefp();
+    }
+    const AstBasicDType* const basicp = elementp->basicp();
+    // MTask state matters only within an evaluation.
+    if (basicp && basicp->keyword().isMTaskState()) {
+        return SavableFieldKind::EXCLUDED_MTASK_STATE;
+    }
+    return SavableFieldKind::INCLUDED;
+}
+
+const char* EmitCUtil::savableFieldKindAscii(const SavableFieldKind kind) VL_MT_STABLE {
+    switch (kind) {
+    case SavableFieldKind::INCLUDED: return "serialized_field";
+    case SavableFieldKind::EXCLUDED_SYSTEMC_TOP_IO: return "systemc_top_io";
+    case SavableFieldKind::EXCLUDED_PARAMETER: return "parameter";
+    case SavableFieldKind::EXCLUDED_STATIC_CONST: return "static_const";
+    case SavableFieldKind::EXCLUDED_NBA_COMMIT_QUEUE: return "nba_commit_queue";
+    case SavableFieldKind::EXCLUDED_MTASK_STATE: return "mtask_state";
+    }
+    VL_UNREACHABLE;
+}
+
 //######################################################################
 // EmitCBaseVisitor implementation
 
