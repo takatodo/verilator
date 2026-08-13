@@ -533,6 +533,7 @@ class AstCFunc final : public AstNode {
                          // so adding/removing loose functions doesn't recompile everything.
     bool m_isVirtual : 1;  // Virtual function
     bool m_entryPoint : 1;  // User may call into this top level function
+    bool m_isEvalEntry : 1;  // Main generated evaluation entry function
     bool m_dpiPure : 1;  // Pure DPI function
     bool m_dpiContext : 1;  // Declared as 'context' DPI import/export function
     bool m_dpiExportDispatcher : 1;  // This is the DPI export entry point (i.e.: called by user)
@@ -564,6 +565,7 @@ public:
         m_isMethod = true;
         m_isLoose = false;
         m_isVirtual = false;
+        m_isEvalEntry = false;
         m_needProcess = false;
         m_entryPoint = false;
         m_dpiPure = false;
@@ -633,6 +635,8 @@ public:
     void setNeedProcess() { m_needProcess = true; }
     bool entryPoint() const { return m_entryPoint; }
     void entryPoint(bool flag) { m_entryPoint = flag; }
+    bool isEvalEntry() const { return m_isEvalEntry; }
+    void isEvalEntry(bool flag) { m_isEvalEntry = flag; }
     bool dpiPure() const { return m_dpiPure; }
     void dpiPure(bool flag) { m_dpiPure = flag; }
     bool dpiContext() const { return m_dpiContext; }

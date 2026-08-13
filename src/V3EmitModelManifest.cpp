@@ -153,6 +153,41 @@ struct CoverageData final {
     int updateOnlyPhysicalWordCount = 0;
 };
 
+enum class EvalClassification : uint8_t { PROVEN_DEVICE_CLEAN, UNKNOWN, HOST_DEPENDENT };
+
+struct EvalStateAccess final {
+    std::string fieldId;
+    int readSiteCount = 0;
+    int writeSiteCount = 0;
+};
+
+struct EvalFunction final {
+    const AstNodeModule* modp;
+    const AstCFunc* funcp;
+    std::string functionId;
+    std::map<std::string, EvalStateAccess> stateAccessByField;
+    std::map<const AstCFunc*, int> directCallSites;
+    std::map<std::string, int> hostDependencySites;
+    std::map<std::string, int> unknownEffectSites;
+    EvalClassification directClassification = EvalClassification::PROVEN_DEVICE_CLEAN;
+    EvalClassification classification = EvalClassification::PROVEN_DEVICE_CLEAN;
+    int coverageUpdateSiteCount = 0;
+};
+
+struct EvalData final {
+    std::string status;
+    std::vector<EvalFunction> functions;
+    std::string evalEntryFunctionId;
+    int directCallEdgeCount = 0;
+    int directCallSiteCount = 0;
+    int stateAccessBindingCount = 0;
+    int stateReadSiteCount = 0;
+    int stateWriteSiteCount = 0;
+    int coverageUpdateSiteCount = 0;
+    int hostDependencySiteCount = 0;
+    int unknownEffectSiteCount = 0;
+};
+
 std::string framedId(const std::string& kind,
                      const std::vector<std::pair<std::string, std::string>>& fields) {
     std::string framed = kind;
@@ -162,6 +197,40 @@ std::string framedId(const std::string& kind,
     }
     VHashSha256 hash{framed};
     return kind + ":" + hash.digestHex();
+}
+
+const char* evalClassificationName(EvalClassification classification) {
+    switch (classification) {
+    case EvalClassification::PROVEN_DEVICE_CLEAN: return "proven_device_clean";
+    case EvalClassification::UNKNOWN: return "unknown";
+    case EvalClassification::HOST_DEPENDENT: return "host_dependent";
+    }
+    VL_UNREACHABLE;
+    return "unknown";
+}
+
+EvalClassification evalClassification(const EvalFunction& function) {
+    if (!function.hostDependencySites.empty()) return EvalClassification::HOST_DEPENDENT;
+    if (!function.unknownEffectSites.empty()) return EvalClassification::UNKNOWN;
+    return EvalClassification::PROVEN_DEVICE_CLEAN;
+}
+
+std::string evalFunctionId(const AstNodeModule* const modp, const AstCFunc* const funcp) {
+    return framedId("eval-function:v1", {{"container", EmitCUtil::prefixNameProtect(modp)},
+                                         {"name", funcp->nameProtect()},
+                                         {"argument_types", funcp->argTypes()},
+                                         {"return_type", funcp->rtnTypeVoid()}});
+}
+
+std::string evalRegionId(const std::string& functionId) {
+    return framedId("eval-region:v1", {{"entry_function_id", functionId}});
+}
+
+template <typename T_Value>
+int sumCounts(const std::map<std::string, T_Value>& values) {
+    int total = 0;
+    for (const auto& pair : values) total += pair.second;
+    return total;
 }
 
 ToggleMetadata toggleMetadata(const AstCoverToggleDecl* const declp) {
@@ -302,6 +371,290 @@ public:
                              return lhs.scopep->nameDotless() < rhs.scopep->nameDotless();
                          });
         return std::move(visitor.m_data);
+    }
+};
+
+class EvalCollectVisitor final : public VNVisitorConst {
+    std::map<const AstVar*, std::string> m_fieldIds;
+    const AstNodeModule* m_modp = nullptr;
+    const AstCFunc* m_cfuncp = nullptr;
+    std::map<const AstCFunc*, size_t> m_functionIndex;
+    EvalData m_data;
+
+    EvalFunction& currentFunction() {
+        UASSERT(m_cfuncp, "Eval effect found outside a generated function");
+        return m_data.functions.at(m_functionIndex.at(m_cfuncp));
+    }
+
+    void addHostDependency(const std::string& category) {
+        if (m_cfuncp) ++currentFunction().hostDependencySites[category];
+    }
+    void addUnknownEffect(const std::string& kind) {
+        if (m_cfuncp) ++currentFunction().unknownEffectSites[kind];
+    }
+
+    void recordFunctionFlags(AstCFunc* const nodep) {
+        if (nodep->dpiContext() || nodep->dpiExportDispatcher() || nodep->dpiExportImpl()
+            || nodep->dpiImportPrototype() || nodep->dpiImportWrapper()
+            || nodep->dpiCDeclOverride()) {
+            addHostDependency("dpi_vpi");
+        }
+        if (nodep->needProcess() || nodep->isCoroutine()) addHostDependency("coroutine");
+        if (nodep->isConstructor() || nodep->isDestructor()) addHostDependency("allocation");
+        if (nodep->isTrace()) addHostDependency("io");
+        if (nodep->isVirtual()) addUnknownEffect("virtual_function");
+        if (nodep->recursive()) addUnknownEffect("recursive_function");
+    }
+
+    void recordCall(AstNodeCCall* const nodep) {
+        if (nodep->funcp()) {
+            ++currentFunction().directCallSites[nodep->funcp()];
+        } else {
+            addUnknownEffect("unresolved_call");
+        }
+    }
+
+    void recordHardMethod(AstCMethodHard* const nodep) {
+        const VCMethod::en method = nodep->method().m_e;
+        if (method >= VCMethod::ARRAY_AND && method <= VCMethod::DYN_SLICE_FRONT_BACK) {
+            addHostDependency("dynamic_storage");
+        } else if (method >= VCMethod::EVENT_CLEAR_FIRED
+                   && method <= VCMethod::EVENT_IS_TRIGGERED) {
+            addHostDependency("coroutine");
+        } else if (method >= VCMethod::FORCE_ADD && method <= VCMethod::FORCE_TOUCH) {
+            addHostDependency("runtime_context");
+        } else if (method >= VCMethod::FORK_DONE && method <= VCMethod::FORK_ON_KILL) {
+            addHostDependency("coroutine");
+        } else if (method >= VCMethod::RANDOMIZER_BASIC_STD_RANDOMIZATION
+                   && method <= VCMethod::RNG_SET_RANDSTATE) {
+            addHostDependency("runtime_context");
+        } else if (method >= VCMethod::SCHED_ANY_TRIGGERED && method <= VCMethod::SCHED_TRIGGER) {
+            addHostDependency("scheduler");
+        } else if (method < VCMethod::UNPACKED_ASSIGN || method > VCMethod::UNPACKED_NEQ) {
+            addUnknownEffect("unclassified_runtime_method");
+        }
+    }
+
+    void visit(AstNodeModule* nodep) override {
+        VL_RESTORER(m_modp);
+        m_modp = nodep;
+        iterateChildrenConst(nodep);
+    }
+    void visit(AstCFunc* nodep) override {
+        UASSERT_OBJ(m_modp, nodep, "Generated function is not under a module");
+        const size_t index = m_data.functions.size();
+        const std::string id = evalFunctionId(m_modp, nodep);
+        const auto pair = m_functionIndex.emplace(nodep, index);
+        UASSERT_OBJ(pair.second, nodep, "Duplicate generated function in eval manifest");
+        m_data.functions.push_back(EvalFunction{m_modp, nodep, id});
+        VL_RESTORER(m_cfuncp);
+        m_cfuncp = nodep;
+        recordFunctionFlags(nodep);
+        iterateChildrenConst(nodep);
+    }
+    void visit(AstNodeVarRef* nodep) override {
+        if (!m_cfuncp) return;
+        AstVar* const varp = nodep->varp();
+        if (!varp) {
+            addUnknownEffect("unresolved_variable_reference");
+            return;
+        }
+        const auto fieldIt = m_fieldIds.find(varp);
+        if (fieldIt != m_fieldIds.end()) {
+            EvalStateAccess& access
+                = currentFunction()
+                      .stateAccessByField
+                      .emplace(fieldIt->second, EvalStateAccess{fieldIt->second})
+                      .first->second;
+            if (nodep->access().isReadOrRW()) ++access.readSiteCount;
+            if (nodep->access().isWriteOrRW()) ++access.writeSiteCount;
+        } else if (!varp->isFuncLocalSticky() && !varp->isParam() && !varp->isConst()) {
+            addUnknownEffect("unmapped_nonlocal_variable_reference");
+        }
+    }
+    void visit(AstNodeCCall* nodep) override {
+        recordCall(nodep);
+        iterateChildrenConst(nodep);
+    }
+    void visit(AstCNew* nodep) override {
+        addHostDependency("allocation");
+        recordCall(nodep);
+        iterateChildrenConst(nodep);
+    }
+    void visit(AstCMethodHard* nodep) override {
+        recordHardMethod(nodep);
+        iterateChildrenConst(nodep);
+    }
+    void visit(AstCoverInc* nodep) override {
+        ++currentFunction().coverageUpdateSiteCount;
+        iterateChildrenConst(nodep);
+    }
+    void visit(AstCStmt* nodep) override {
+        addUnknownEffect("raw_cpp_statement");
+        iterateChildrenConst(nodep);
+    }
+    void visit(AstCStmtUser* nodep) override {
+        addUnknownEffect("user_cpp_statement");
+        iterateChildrenConst(nodep);
+    }
+    void visit(AstCExpr* nodep) override {
+        addUnknownEffect("raw_cpp_expression");
+        iterateChildrenConst(nodep);
+    }
+    void visit(AstCExprUser* nodep) override {
+        addUnknownEffect("user_cpp_expression");
+        iterateChildrenConst(nodep);
+    }
+    void visit(AstCAwait* nodep) override {
+        addHostDependency("coroutine");
+        iterateChildrenConst(nodep);
+    }
+    void visit(AstFireEvent* nodep) override {
+        addHostDependency("coroutine");
+        iterateChildrenConst(nodep);
+    }
+    void visit(AstSFormat* nodep) override {
+        addHostDependency("io");
+        iterateChildrenConst(nodep);
+    }
+    void visit(AstSFormatF* nodep) override {
+        addHostDependency("io");
+        iterateChildrenConst(nodep);
+    }
+    void visit(AstStop* nodep) override {
+        addHostDependency("termination");
+        iterateChildrenConst(nodep);
+    }
+    void visit(AstFinish* nodep) override {
+        addHostDependency("termination");
+        iterateChildrenConst(nodep);
+    }
+    void visit(AstFinishFork* nodep) override {
+        addHostDependency("termination");
+        iterateChildrenConst(nodep);
+    }
+    void visit(AstTime* nodep) override {
+        addHostDependency("time");
+        iterateChildrenConst(nodep);
+    }
+    void visit(AstTimeD* nodep) override {
+        addHostDependency("time");
+        iterateChildrenConst(nodep);
+    }
+    void visit(AstTimeImport* nodep) override {
+        addHostDependency("time");
+        iterateChildrenConst(nodep);
+    }
+    void visit(AstConstPool*) override {}
+    void visit(AstNode* nodep) override {
+        if (m_cfuncp) {
+            if (nodep->isTimingControl()) {
+                addHostDependency("scheduler");
+            } else if (nodep->isOutputter()) {
+                addHostDependency("io");
+            } else if (nodep->isSystemFunc()) {
+                addUnknownEffect("unclassified_system_operation");
+            } else if (VN_IS(nodep, NodeExpr) && !nodep->isPure()) {
+                addUnknownEffect("unclassified_effectful_expression");
+            } else if (VN_IS(nodep, NodeStmt) && !VN_IS(nodep, StmtExpr) && !nodep->isPure()) {
+                addUnknownEffect("unclassified_effectful_statement");
+            }
+        }
+        iterateChildrenConst(nodep);
+    }
+
+    EvalCollectVisitor(AstNetlist* const netlistp, const ManifestData& manifestData) {
+        for (const Field& field : manifestData.fields) {
+            const auto pair = m_fieldIds.emplace(field.varp, field.fieldId);
+            UASSERT(pair.second || pair.first->second == field.fieldId,
+                    "Conflicting model manifest field identity");
+        }
+        iterateConst(netlistp);
+    }
+
+public:
+    static EvalData collect(AstNetlist* const netlistp, const ManifestData& manifestData) {
+        EvalCollectVisitor visitor{netlistp, manifestData};
+        EvalData& data = visitor.m_data;
+        std::stable_sort(data.functions.begin(), data.functions.end(),
+                         [](const EvalFunction& lhs, const EvalFunction& rhs) {
+                             if (lhs.functionId != rhs.functionId) {
+                                 return lhs.functionId < rhs.functionId;
+                             }
+                             if (lhs.funcp->nameProtect() != rhs.funcp->nameProtect()) {
+                                 return lhs.funcp->nameProtect() < rhs.funcp->nameProtect();
+                             }
+                             return EmitCUtil::prefixNameProtect(lhs.modp)
+                                    < EmitCUtil::prefixNameProtect(rhs.modp);
+                         });
+
+        std::map<const AstCFunc*, size_t> functionIndex;
+        std::map<std::string, const AstCFunc*> functionById;
+        for (size_t index = 0; index < data.functions.size(); ++index) {
+            EvalFunction& function = data.functions[index];
+            UASSERT(functionIndex.emplace(function.funcp, index).second,
+                    "Duplicate eval function pointer");
+            const auto idPair = functionById.emplace(function.functionId, function.funcp);
+            UASSERT(idPair.second || idPair.first->second == function.funcp,
+                    "Conflicting eval function identity");
+        }
+        for (EvalFunction& function : data.functions) {
+            for (const auto& call : function.directCallSites) {
+                if (functionIndex.find(call.first) == functionIndex.end()) {
+                    function.unknownEffectSites["callee_not_in_function_inventory"] += call.second;
+                }
+            }
+            function.directClassification = evalClassification(function);
+            function.classification = function.directClassification;
+        }
+
+        bool changed = false;
+        do {
+            changed = false;
+            for (EvalFunction& function : data.functions) {
+                EvalClassification next = function.directClassification;
+                for (const auto& call : function.directCallSites) {
+                    const auto indexIt = functionIndex.find(call.first);
+                    if (indexIt == functionIndex.end()) continue;
+                    next = std::max(next, data.functions[indexIt->second].classification);
+                }
+                if (next != function.classification) {
+                    function.classification = next;
+                    changed = true;
+                }
+            }
+        } while (changed);
+
+        int evalEntryCount = 0;
+        for (const EvalFunction& function : data.functions) {
+            if (!function.funcp->isEvalEntry()) continue;
+            ++evalEntryCount;
+            data.evalEntryFunctionId = function.functionId;
+        }
+        if (evalEntryCount == 0) {
+            data.status = "not_present";
+        } else if (evalEntryCount != 1) {
+            data.status = "partial";
+            data.evalEntryFunctionId.clear();
+        } else {
+            data.status = "provided";
+        }
+        for (const EvalFunction& function : data.functions) {
+            for (const auto& call : function.directCallSites) {
+                if (functionIndex.find(call.first) == functionIndex.end()) continue;
+                ++data.directCallEdgeCount;
+                data.directCallSiteCount += call.second;
+            }
+            data.stateAccessBindingCount += static_cast<int>(function.stateAccessByField.size());
+            for (const auto& access : function.stateAccessByField) {
+                data.stateReadSiteCount += access.second.readSiteCount;
+                data.stateWriteSiteCount += access.second.writeSiteCount;
+            }
+            data.coverageUpdateSiteCount += function.coverageUpdateSiteCount;
+            data.hostDependencySiteCount += sumCounts(function.hostDependencySites);
+            data.unknownEffectSiteCount += sumCounts(function.unknownEffectSites);
+        }
+        return std::move(data);
     }
 };
 
@@ -762,6 +1115,155 @@ void emitCoverage(V3OutJsonFile& of, const CoverageData& coverage) {
         .end();
 }
 
+const char* evalClassificationReason(const EvalFunction& function) {
+    if (function.classification == EvalClassification::HOST_DEPENDENT) {
+        return function.directClassification == EvalClassification::HOST_DEPENDENT
+                   ? "direct_host_dependency"
+                   : "transitive_host_dependency";
+    }
+    if (function.classification == EvalClassification::UNKNOWN) {
+        return function.directClassification == EvalClassification::UNKNOWN
+                   ? "direct_unknown_effect"
+                   : "transitive_unknown_effect";
+    }
+    return "no_host_or_unknown_effect_in_final_ast_closure";
+}
+
+void emitEvalFunction(V3OutJsonFile& of, const EvalFunction& function,
+                      const std::map<const AstCFunc*, std::string>& functionIds) {
+    std::vector<std::pair<std::string, int>> calls;
+    for (const auto& call : function.directCallSites) {
+        const auto idIt = functionIds.find(call.first);
+        if (idIt != functionIds.end()) calls.emplace_back(idIt->second, call.second);
+    }
+    std::stable_sort(calls.begin(), calls.end());
+
+    const AstCFunc* const funcp = function.funcp;
+    of.begin()
+        .put("function_id", function.functionId)
+        .begin("generated_binding")
+        .put("container", EmitCUtil::prefixNameProtect(function.modp))
+        .put("name", funcp->nameProtect())
+        .put("kind", funcp->isProperMethod() ? "method" : "loose_function")
+        .end()
+        .put("is_eval_entry", funcp->isEvalEntry())
+        .put("entry_point", funcp->entryPoint())
+        .put("slow", funcp->slow())
+        .begin("direct_state_accesses", '[');
+    for (const auto& accessPair : function.stateAccessByField) {
+        const EvalStateAccess& access = accessPair.second;
+        of.begin()
+            .put("field_id", access.fieldId)
+            .put("read_site_count", access.readSiteCount)
+            .put("write_site_count", access.writeSiteCount)
+            .end();
+    }
+    of.end().begin("direct_calls", '[');
+    for (const auto& call : calls) {
+        of.begin().put("callee_function_id", call.first).put("site_count", call.second).end();
+    }
+    of.end()
+        .begin("direct_effects")
+        .put("coverage_update_site_count", function.coverageUpdateSiteCount)
+        .begin("host_dependencies", '[');
+    for (const auto& dependency : function.hostDependencySites) {
+        of.begin().put("category", dependency.first).put("site_count", dependency.second).end();
+    }
+    of.end().begin("unknown_effects", '[');
+    for (const auto& effect : function.unknownEffectSites) {
+        of.begin().put("kind", effect.first).put("site_count", effect.second).end();
+    }
+    of.end()
+        .end()
+        .put("direct_classification", evalClassificationName(function.directClassification))
+        .put("classification", evalClassificationName(function.classification))
+        .put("reason", evalClassificationReason(function))
+        .end();
+}
+
+void emitEvalRegions(V3OutJsonFile& of, const EvalData& eval) {
+    std::map<const AstCFunc*, std::string> functionIds;
+    const EvalFunction* entryFunctionp = nullptr;
+    int directClean = 0;
+    int directUnknown = 0;
+    int directHost = 0;
+    int clean = 0;
+    int unknown = 0;
+    int host = 0;
+    for (const EvalFunction& function : eval.functions) {
+        functionIds.emplace(function.funcp, function.functionId);
+        if (function.functionId == eval.evalEntryFunctionId) entryFunctionp = &function;
+        switch (function.directClassification) {
+        case EvalClassification::PROVEN_DEVICE_CLEAN: ++directClean; break;
+        case EvalClassification::UNKNOWN: ++directUnknown; break;
+        case EvalClassification::HOST_DEPENDENT: ++directHost; break;
+        }
+        switch (function.classification) {
+        case EvalClassification::PROVEN_DEVICE_CLEAN: ++clean; break;
+        case EvalClassification::UNKNOWN: ++unknown; break;
+        case EvalClassification::HOST_DEPENDENT: ++host; break;
+        }
+    }
+
+    of.begin("eval_regions")
+        .put("status", eval.status)
+        .put("authority", "verilator_final_ast")
+        .put("function_id_scheme", "sha256_length_prefixed_utf8_v1")
+        .put("region_id_scheme", "sha256_length_prefixed_utf8_v1")
+        .begin("classification_policy")
+        .put("policy", "conservative_final_ast_effects_v1")
+        .begin("precedence", '[')
+        .put(std::string{"host_dependent"})
+        .put(std::string{"unknown"})
+        .put(std::string{"proven_device_clean"})
+        .end()
+        .put("propagation", "transitive_call_closure_fixed_point")
+        .end()
+        .begin("metrics")
+        .put("function_count", static_cast<int>(eval.functions.size()))
+        .put("region_count", entryFunctionp ? 1 : 0)
+        .put("direct_call_edge_count", eval.directCallEdgeCount)
+        .put("direct_call_site_count", eval.directCallSiteCount)
+        .put("state_access_binding_count", eval.stateAccessBindingCount)
+        .put("state_read_site_count", eval.stateReadSiteCount)
+        .put("state_write_site_count", eval.stateWriteSiteCount)
+        .put("coverage_update_site_count", eval.coverageUpdateSiteCount)
+        .put("host_dependency_site_count", eval.hostDependencySiteCount)
+        .put("unknown_effect_site_count", eval.unknownEffectSiteCount)
+        .put("direct_proven_device_clean_function_count", directClean)
+        .put("direct_unknown_function_count", directUnknown)
+        .put("direct_host_dependent_function_count", directHost)
+        .put("proven_device_clean_function_count", clean)
+        .put("unknown_function_count", unknown)
+        .put("host_dependent_function_count", host)
+        .end()
+        .begin("functions", '[');
+    for (const EvalFunction& function : eval.functions) {
+        emitEvalFunction(of, function, functionIds);
+    }
+    of.end().begin("regions", '[');
+    if (entryFunctionp) {
+        of.begin()
+            .put("region_id", evalRegionId(entryFunctionp->functionId))
+            .put("kind", "main_eval")
+            .put("entry_function_id", entryFunctionp->functionId)
+            .put("classification", evalClassificationName(entryFunctionp->classification))
+            .put("reason", evalClassificationReason(*entryFunctionp))
+            .put("dependency_graph", "function_direct_calls")
+            .put("schedule_semantics", "not_provided")
+            .put("convergence_semantics", "not_provided")
+            .end();
+    }
+    of.end()
+        .begin("non_claims", '[')
+        .put(std::string{"manually_emitted_eval_step_wrapper_is_not_classified"})
+        .put(std::string{"schedule_and_convergence_semantics_are_not_provided"})
+        .put(std::string{"definition_field_accesses_are_not_instance_occurrence_projections"})
+        .put(std::string{"device_backend_codegen_is_not_provided"})
+        .end()
+        .end();
+}
+
 void emitInstance(V3OutJsonFile& of, const Instance& instance) {
     const AstScope* const scopep = instance.scopep;
     of.begin()
@@ -829,6 +1331,7 @@ void V3EmitModelManifest::emit() {
     const int globalCoverageWords = EmitCUtil::assignCoverageBinNumbers(v3Global.rootp());
     const EmitCParentModule emitCParentModule;
     const ManifestData data = CollectVisitor::collect(v3Global.rootp());
+    const EvalData eval = EvalCollectVisitor::collect(v3Global.rootp(), data);
     const CoverageCollection coverageCollection
         = CoverageCollectVisitor::collect(v3Global.rootp());
     const CoverageData coverage
@@ -847,6 +1350,10 @@ void V3EmitModelManifest::emit() {
                      static_cast<double>(coverage.observations.size()));
     V3Stats::addStat("Model manifest, Coverage physical words emitted",
                      static_cast<double>(coverage.physicalWords.size()));
+    V3Stats::addStat("Model manifest, Eval functions emitted",
+                     static_cast<double>(eval.functions.size()));
+    V3Stats::addStat("Model manifest, Eval regions emitted",
+                     eval.evalEntryFunctionId.empty() ? 0.0 : 1.0);
     V3OutJsonFile of{v3Global.opt.modelManifestOutput()};
 
     of.put("schema_version", 1)
@@ -865,6 +1372,7 @@ void V3EmitModelManifest::emit() {
     for (const Instance& instance : data.instances) emitInstance(of, instance);
     of.end();
     emitCoverage(of, coverage);
+    emitEvalRegions(of, eval);
     of.begin("checkpoint_projection")
         .put("status", "field_membership_only")
         .put("authority", "verilator_savable_field_selection")
@@ -883,6 +1391,6 @@ void V3EmitModelManifest::emit() {
         .put("generated_storage_instances", "provided")
         .put("semantic_instance_topology", "not_provided")
         .put("coverage_mapping", coverage.status)
-        .put("eval_regions", "not_provided")
+        .put("eval_regions", eval.status)
         .end();
 }

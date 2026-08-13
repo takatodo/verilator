@@ -1253,15 +1253,23 @@ Summary:
    also records versioned semantic identities for each toggle direction and
    their generated 32-bit counter-word bindings. The physical-word records
    identify when multiple semantic toggle observations share one counter and
-   therefore cannot be attributed separately after a hit.
+   therefore cannot be attributed separately after a hit. The manifest also
+   inventories generated evaluation functions, their direct calls, semantic
+   field reads and writes, coverage-update sites, and compiler-visible runtime
+   effects. It classifies each function and the main evaluation entry as
+   ``proven_device_clean``, ``unknown``, or ``host_dependent`` after propagating
+   effects through the generated call graph. Unrecognized or raw generated C++
+   effects fail closed as ``unknown``.
 
    This output does not define a checkpoint format or stable ABI. In
    particular, the field-selection inventory does not include runtime state or
    prove persistence, pointer-free packing, or compatibility with coverage or
    timing. Toggle counter bindings do not provide byte offsets, and coverage
-   types other than toggle coverage are reported as not provided. The manifest
-   also does not provide complete semantic instance topology or evaluation
-   regions. It currently requires non-hierarchical :vlopt:`--cc` or
+   types other than toggle coverage are reported as not provided. Evaluation
+   function records do not define event-region scheduling, fixed-point
+   convergence, instance-occurrence state projections, or device backend
+   code-generation. The manifest also does not provide complete semantic
+   instance topology. It currently requires non-hierarchical :vlopt:`--cc` or
    :vlopt:`--sc` model generation.
 
 .. option:: --MP

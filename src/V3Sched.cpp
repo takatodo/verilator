@@ -867,6 +867,7 @@ void createEval(AstNetlist* netlistp,  //
 
     // Now that we have build the loops, create the main 'eval' function
     AstCFunc* const funcp = util::makeTopFunction(netlistp, "_eval", false);
+    funcp->isEvalEntry(true);
     netlistp->evalp(funcp);
 
     if (v3Global.opt.profExec()) funcp->addStmtsp(AstCStmt::profExecSectionPush(flp, "eval"));
