@@ -30,11 +30,9 @@ with open(out_filename, 'r', encoding='utf8') as fh:
     manifest = json.load(fh)
 
 excluded = [
-    field for field in manifest['fields']
-    if field['checkpoint_membership']['status'] == 'excluded'
+    field for field in manifest['fields'] if field['checkpoint_membership']['status'] == 'excluded'
 ]
-if not any(field['checkpoint_membership']['reason'] == 'mtask_state'
-           for field in excluded):
+if not any(field['checkpoint_membership']['reason'] == 'mtask_state' for field in excluded):
     test.error('checkpoint membership does not exclude transient MTask state')
 if manifest['checkpoint_projection']['excluded_definition_field_count'] != len(excluded):
     test.error('incorrect excluded checkpoint field count')

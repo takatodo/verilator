@@ -58,12 +58,10 @@ if any('byte_offset' in field['generated_binding'] for field in manifest['fields
 
 checkpoint = manifest['checkpoint_projection']
 included_fields = [
-    field for field in manifest['fields']
-    if field['checkpoint_membership']['status'] == 'included'
+    field for field in manifest['fields'] if field['checkpoint_membership']['status'] == 'included'
 ]
 excluded_fields = [
-    field for field in manifest['fields']
-    if field['checkpoint_membership']['status'] == 'excluded'
+    field for field in manifest['fields'] if field['checkpoint_membership']['status'] == 'excluded'
 ]
 if checkpoint['status'] != 'field_membership_only':
     test.error('model manifest overclaims a complete checkpoint projection')
@@ -76,7 +74,8 @@ if len(included_fields) + len(excluded_fields) != len(fields):
 if fields['rtl:t.state_q']['checkpoint_membership'] != {
         'status': 'included',
         'authority': 'verilator_savable_field_selection',
-        'reason': 'serialized_field'}:
+        'reason': 'serialized_field'
+}:
     test.error('incorrect checkpoint membership for state_q')
 if checkpoint['runtime_state'] != 'not_provided' or checkpoint['packing'] != 'not_provided':
     test.error('model manifest overclaims checkpoint runtime state or packing')
