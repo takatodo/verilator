@@ -69,6 +69,10 @@ public:
     }
     // Return C++ class name for a module/class object
     static string prefixNameProtect(const AstNode* nodep) VL_MT_STABLE;
+    static bool isEmittedDesignVar(const AstVar* varp) VL_MT_STABLE {
+        return varp->isIO() || varp->isSignal() || varp->isClassMember() || varp->isTemp()
+               || varp->isGenVar();
+    }
     static bool isAnonOk(const AstVar* varp) VL_MT_STABLE {
         AstNodeDType* const dtp = varp->dtypep()->skipRefp();
         return v3Global.opt.compLimitMembers() != 0  // Enabled

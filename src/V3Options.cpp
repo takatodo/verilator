@@ -989,6 +989,11 @@ void V3Options::notify() VL_MT_DISABLED {
         cmdfl->v3error("--exe cannot be used together with --lib-create. Suggest see manual");
     }
 
+    if (!m_modelManifestOutput.empty()
+        && (m_preprocOnly || m_dpiHdrOnly || m_lintOnly || m_jsonOnly || m_hierarchical)) {
+        cmdfl->v3error("--model-manifest-output requires non-hierarchical model generation");
+    }
+
     // Make sure at least one make system is enabled
     if (!m_gmake && !m_makeJson) m_gmake = true;
 
@@ -1628,6 +1633,7 @@ void V3Options::parseOptsList(FileLine* fl, const string& optdir, int argc,
     });
     DECL_OPTION("-func-recursion-depth", Set, &m_funcRecursion);
     DECL_OPTION("-max-num-width", Set, &m_maxNumWidth);
+    DECL_OPTION("-model-manifest-output", Set, &m_modelManifestOutput);
     DECL_OPTION("-mod-prefix", CbVal, [this, fl](const char* valp) {
         validateIdentifier(fl, valp, "--mod-prefix");
         m_modPrefix = valp;

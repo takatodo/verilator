@@ -510,6 +510,7 @@ detailed descriptions of these arguments.
     --max-num-width <value>     Maximum number width (default: 64K)
     --Mdir <directory>          Name of output object directory
     --MMD                       Create .d dependency files
+    --model-manifest-output <filename>  Emit experimental model field inventory
     --mod-prefix <topname>      Name to prepend to lower classes
     --MP                        Create phony dependency targets
      +notimingchecks            Ignored

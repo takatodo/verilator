@@ -51,6 +51,7 @@
 #include "V3EmitCMain.h"
 #include "V3EmitMk.h"
 #include "V3EmitMkJson.h"
+#include "V3EmitModelManifest.h"
 #include "V3EmitV.h"
 #include "V3ExecGraph.h"
 #include "V3Expand.h"
@@ -628,6 +629,8 @@ static void process() {
 
             // Order variables
             V3VariableOrder::orderAll(v3Global.rootp());
+
+            if (!v3Global.opt.modelManifestOutput().empty()) V3EmitModelManifest::emit();
 
             // Create AstCUse to determine what class forward declarations/#includes needed in C
             V3CUse::cUseAll();

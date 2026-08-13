@@ -374,6 +374,7 @@ private:
     string      m_libCreate;    // main switch: --lib-create {lib_name}
     string      m_mainTopName;  // main switch: --main-top-name
     string      m_makeDir;      // main switch: -Mdir
+    string      m_modelManifestOutput;  // main switch: --model-manifest-output
     string      m_modPrefix;    // main switch: --mod-prefix
     string      m_pipeFilter;   // main switch: --pipe-filter
     string      m_prefix;       // main switch: --prefix
@@ -694,6 +695,7 @@ public:
     }
     string mainTopName() const { return m_mainTopName; }
     string makeDir() const VL_MT_SAFE { return m_makeDir; }
+    string modelManifestOutput() const { return m_modelManifestOutput; }
     string modPrefix() const VL_MT_SAFE { return m_modPrefix; }
     string pipeFilter() const { return m_pipeFilter; }
     string prefix() const VL_MT_SAFE { return m_prefix; }
