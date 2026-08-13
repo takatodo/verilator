@@ -1249,14 +1249,20 @@ Summary:
    compiler-generated fields and records their source, width, generated C++
    binding, and parent bindings among stored instances. It also records, for
    each emitted field, whether the existing :vlopt:`--savable` field-selection
-   rule includes or excludes it.
+   rule includes or excludes it. When :vlopt:`--coverage-toggle` is enabled, it
+   also records versioned semantic identities for each toggle direction and
+   their generated 32-bit counter-word bindings. The physical-word records
+   identify when multiple semantic toggle observations share one counter and
+   therefore cannot be attributed separately after a hit.
 
    This output does not define a checkpoint format or stable ABI. In
    particular, the field-selection inventory does not include runtime state or
    prove persistence, pointer-free packing, or compatibility with coverage or
-   timing. It also does not provide byte offsets, complete semantic instance
-   topology, coverage mappings, or evaluation regions. It currently requires
-   non-hierarchical :vlopt:`--cc` or :vlopt:`--sc` model generation.
+   timing. Toggle counter bindings do not provide byte offsets, and coverage
+   types other than toggle coverage are reported as not provided. The manifest
+   also does not provide complete semantic instance topology or evaluation
+   regions. It currently requires non-hierarchical :vlopt:`--cc` or
+   :vlopt:`--sc` model generation.
 
 .. option:: --MP
 

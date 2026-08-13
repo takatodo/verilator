@@ -349,6 +349,8 @@ public:
         UASSERT(!m_scope.empty(), "end() without begin()");
         puts("\n" + m_prefix + m_scope.top());
         m_scope.pop();
+        // A closed object or array is a value in its parent even when empty.
+        m_empty = false;
         return *this;
     }
 

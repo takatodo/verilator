@@ -23,6 +23,8 @@ out_filename = test.obj_dir + '/model-manifest.json'
 test.compile(verilator_flags2=[
     '--model-manifest-output',
     out_filename,
+    '--coverage-line',
+    '--coverage-toggle',
     '--protect-ids',
     '--protect-key',
     'SECRET_KEY',
@@ -53,5 +55,13 @@ for private_name in ('state_q', '__Vuser_q', 'status_if', 'status', 'done', 't_m
 
 if manifest['field_count'] == 0:
     test.error('protected model manifest has no fields')
+if manifest['coverage']['status'] != 'partial':
+    test.error('non-toggle coverage is not reported as a partial mapping')
+if not manifest['coverage']['semantic_observations']:
+    test.error('protected model manifest has no semantic coverage observations')
+if manifest['coverage']['metrics']['unsupported_declaration_count'] == 0:
+    test.error('non-toggle coverage is not reported as unsupported')
+if manifest['limitations']['coverage_mapping'] != 'partial':
+    test.error('model limitations overclaim protected coverage mapping')
 
 test.passes()

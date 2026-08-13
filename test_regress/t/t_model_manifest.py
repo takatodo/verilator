@@ -36,6 +36,16 @@ if manifest['surface'] != 'verilator_model_manifest_experimental':
 if manifest['model']['top'] != 't':
     test.error('unexpected model top')
 
+coverage = manifest['coverage']
+if coverage['status'] != 'not_present':
+    test.error('non-covered model reports a coverage mapping')
+if any(coverage[name] for name in ('storages', 'lowering_declarations',
+                                    'semantic_observations', 'bindings',
+                                    'physical_words', 'update_regions')):
+    test.error('non-covered model reports coverage records')
+if manifest['limitations']['coverage_mapping'] != 'not_present':
+    test.error('non-covered model overclaims a coverage mapping')
+
 fields = {field['field_id']: field for field in manifest['fields']}
 if manifest['field_count'] != len(fields):
     test.error('incorrect model manifest field count')
@@ -124,5 +134,7 @@ test.file_grep(test.stats, r'Model manifest, Fields emitted\s+(\d+)', len(fields
 test.file_grep(test.stats, r'Model manifest, Instances emitted\s+(\d+)', 2)
 test.file_grep(test.stats, r'Model manifest, Checkpoint fields included\s+(\d+)',
                len(included_fields))
+test.file_grep(test.stats, r'Model manifest, Coverage observations emitted\s+(\d+)', 0)
+test.file_grep(test.stats, r'Model manifest, Coverage physical words emitted\s+(\d+)', 0)
 
 test.passes()
