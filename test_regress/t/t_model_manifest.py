@@ -39,9 +39,8 @@ if manifest['model']['top'] != 't':
 coverage = manifest['coverage']
 if coverage['status'] != 'not_present':
     test.error('non-covered model reports a coverage mapping')
-if any(coverage[name] for name in ('storages', 'lowering_declarations',
-                                    'semantic_observations', 'bindings',
-                                    'physical_words', 'update_regions')):
+if any(coverage[name] for name in ('storages', 'lowering_declarations', 'semantic_observations',
+                                   'bindings', 'physical_words', 'update_regions')):
     test.error('non-covered model reports coverage records')
 if manifest['limitations']['coverage_mapping'] != 'not_present':
     test.error('non-covered model overclaims a coverage mapping')

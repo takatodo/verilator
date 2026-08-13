@@ -52,7 +52,8 @@ if coverage['counter_semantics'] != {
         'cpp_type': 'uint32_t',
         'hit': 'nonzero_word',
         'alias_aggregation': 'logical_or',
-        'transition_order': ['1->0', '0->1']}:
+        'transition_order': ['1->0', '0->1']
+}:
     test.error('toggle coverage counter semantics are incorrect')
 
 expected_metrics = {
@@ -104,14 +105,13 @@ for storage in storages:
         test.error('coverage storage identity is incorrect')
     header = Path(test.obj_dir) / (binding['container'] + '.h')
     text = header.read_text(encoding='utf8')
-    pattern = (r'\b' + re.escape(binding['member']) + r'\s*\[\s*'
-               + str(storage['word_count']) + r'\s*\]')
+    pattern = (r'\b' + re.escape(binding['member']) + r'\s*\[\s*' + str(storage['word_count']) +
+               r'\s*\]')
     if re.search(pattern, text) is None:
         test.error('coverage storage binding is absent from generated header')
 
 declarations = coverage['lowering_declarations']
-declaration_by_id = {declaration['lowering_id']: declaration
-                     for declaration in declarations}
+declaration_by_id = {declaration['lowering_id']: declaration for declaration in declarations}
 if len(declaration_by_id) != len(declarations):
     test.error('coverage lowering identities are not unique')
 for declaration in declarations:
@@ -138,8 +138,7 @@ for declaration in declarations:
         test.error('coverage lowering lies outside generated storage')
 
 observations = coverage['semantic_observations']
-observation_by_id = {observation['semantic_id']: observation
-                     for observation in observations}
+observation_by_id = {observation['semantic_id']: observation for observation in observations}
 if len(observation_by_id) != len(observations):
     test.error('semantic coverage identities are not unique')
 for observation in observations:
@@ -177,10 +176,9 @@ for word in physical_words:
         ('raw_word_index', str(word['raw_word_index'])),
     ])
     members = sorted(members_by_word[word['physical_word_id']])
-    expected_alias_id = framed_id(
-        'coverage-alias-group:v1', [('member', member) for member in members])
-    if (word['physical_word_id'] != expected_physical_id
-            or word['member_semantic_ids'] != members
+    expected_alias_id = framed_id('coverage-alias-group:v1',
+                                  [('member', member) for member in members])
+    if (word['physical_word_id'] != expected_physical_id or word['member_semantic_ids'] != members
             or word['member_count'] != len(members)
             or word['alias_group_id'] != expected_alias_id):
         test.error('physical coverage alias mapping is incorrect')
@@ -188,10 +186,11 @@ for word in physical_words:
 updated_words = set()
 for region in coverage['update_regions']:
     for offset in range(2 * region['width_bits']):
-        updated_words.add(framed_id('coverage-word:v1', [
-            ('storage_id', region['storage_id']),
-            ('raw_word_index', str(region['raw_base_word'] + offset)),
-        ]))
+        updated_words.add(
+            framed_id('coverage-word:v1', [
+                ('storage_id', region['storage_id']),
+                ('raw_word_index', str(region['raw_base_word'] + offset)),
+            ]))
 if updated_words != set(physical_by_id):
     test.error('coverage update regions do not match semantic physical words')
 
