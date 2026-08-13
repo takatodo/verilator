@@ -41,8 +41,8 @@ if manifest['field_count'] != len(fields):
     test.error('incorrect model manifest field count')
 for field_id, width, direction in (('rtl:t.clk', 1, 'INPUT'), ('rtl:t.data_i', 8, 'INPUT'),
                                    ('rtl:t.data_o', 8, 'OUTPUT'), ('rtl:t.__Vuser_q', 1, 'NONE'),
-                                   ('rtl:t.state_q', 8, 'NONE'),
-                                   ('rtl:status_if.done', 1, 'NONE')):
+                                   ('rtl:t.state_q', 8, 'NONE'), ('rtl:status_if.done', 1,
+                                                                  'NONE')):
     field = fields.get(field_id)
     if field is None:
         test.error('missing model manifest field ' + field_id)
@@ -82,11 +82,9 @@ else:
     if (status_instance['module_binding']['container']
             != status_field['generated_binding']['container']):
         test.error('interface instance does not bind its field container')
-    syms_header = Path(test.obj_dir) / (
-        status_instance['generated_binding']['container'] + '.h')
-    if not re.search(
-            r'\b' + re.escape(status_instance['generated_binding']['member']) + r'\b',
-            syms_header.read_text(encoding='utf8')):
+    syms_header = Path(test.obj_dir) / (status_instance['generated_binding']['container'] + '.h')
+    if not re.search(r'\b' + re.escape(status_instance['generated_binding']['member']) + r'\b',
+                     syms_header.read_text(encoding='utf8')):
         test.error('generated interface instance binding is absent from symbol header')
 
 if manifest['limitations']['generated_storage_instances'] != 'provided':

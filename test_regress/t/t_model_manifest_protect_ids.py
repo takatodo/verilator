@@ -21,8 +21,11 @@ test.top_filename = 't/t_model_manifest.v'
 out_filename = test.obj_dir + '/model-manifest.json'
 
 test.compile(verilator_flags2=[
-    '--model-manifest-output', out_filename,
-    '--protect-ids', '--protect-key', 'SECRET_KEY',
+    '--model-manifest-output',
+    out_filename,
+    '--protect-ids',
+    '--protect-key',
+    'SECRET_KEY',
 ],
              verilator_make_gmake=False,
              make_top_shell=False,
@@ -32,9 +35,7 @@ with open(out_filename, 'r', encoding='utf8') as fh:
     manifest = json.load(fh)
 
 serialized = json.dumps(manifest)
-for private_name in (
-        'state_q', '__Vuser_q', 'status_if', 'status', 'done',
-        't_model_manifest.v'):
+for private_name in ('state_q', '__Vuser_q', 'status_if', 'status', 'done', 't_model_manifest.v'):
     if private_name in serialized:
         test.error('model manifest exposes protected identifier ' + private_name)
 
