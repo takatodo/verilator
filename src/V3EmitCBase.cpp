@@ -41,6 +41,50 @@ EmitCParentModule::EmitCParentModule() {
 //######################################################################
 // EmitCUtil implementation
 
+namespace {
+
+class CoverageBinNumberVisitor final : public VNVisitorConst {
+    int m_globalBins = 0;  // Next global symbol-table counter offset
+    int m_localBins = 0;  // Next counter offset in the current module object
+
+    void visit(AstNodeModule* nodep) override {
+        VL_RESTORER(m_localBins);
+        m_localBins = 0;
+        iterateChildrenConst(nodep);
+    }
+    void visit(AstNodeCoverDecl* nodep) override {
+        if (nodep->dataDeclNullp()) return;
+        nodep->binNum(m_globalBins);
+        m_globalBins += nodep->size();
+        nodep->localBinNum(m_localBins);
+        m_localBins += nodep->size();
+    }
+    void visit(AstConstPool*) override {}
+    void visit(AstNode* nodep) override { iterateChildrenConst(nodep); }
+
+public:
+    explicit CoverageBinNumberVisitor(AstNetlist* const netlistp) { iterateConst(netlistp); }
+    int globalBins() const { return m_globalBins; }
+};
+
+}  // namespace
+
+int EmitCUtil::assignCoverageBinNumbers(AstNetlist* const netlistp) VL_MT_DISABLED {
+    return CoverageBinNumberVisitor{netlistp}.globalBins();
+}
+
+bool EmitCUtil::coverageUsesLocalCounter(const AstCFunc* const cfuncp,
+                                         const AstNodeModule* const modp,
+                                         AstNodeCoverDecl* const declp) VL_MT_STABLE {
+    // Only functions with an object receiver can address the module-local
+    // coverage array. Static/package/class helper functions still use the
+    // symbol-table array, as they may have vlSymsp but no vlSelf/this. Also
+    // require the declaration to belong to the current module; cloned task
+    // bodies can increment declarations owned by a different module.
+    return cfuncp && !cfuncp->isStatic() && !VN_IS(modp, Class) && !VN_IS(modp, ClassPackage)
+           && EmitCParentModule::get(declp->dataDeclThisp()) == modp;
+}
+
 string EmitCUtil::prefixNameProtect(const AstNode* nodep) VL_MT_STABLE {
     const string prefix = v3Global.opt.modPrefix() + "_" + VIdProtect::protect(nodep->name());
     // If all-uppercase prefix conflicts with a previous usage of the

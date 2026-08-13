@@ -76,6 +76,11 @@ public:
     static string topClassName() VL_MT_SAFE {  // Return name of top wrapper module
         return v3Global.opt.prefix();
     }
+    // Assign the generated coverage counter offsets and return the global array size.
+    static int assignCoverageBinNumbers(AstNetlist* netlistp) VL_MT_DISABLED;
+    // Return whether this generated function addresses the declaration through object storage.
+    static bool coverageUsesLocalCounter(const AstCFunc* cfuncp, const AstNodeModule* modp,
+                                         AstNodeCoverDecl* declp) VL_MT_STABLE;
     // Return C++ class name for a module/class object
     static string prefixNameProtect(const AstNode* nodep) VL_MT_STABLE;
     static bool isEmittedDesignVar(const AstVar* varp) VL_MT_STABLE {

@@ -149,15 +149,7 @@ protected:
     }
 
     bool coverageUsesLocalCounter(AstNodeCoverDecl* const declp) const {
-        // Only functions with an object receiver can address the module-local
-        // coverage array. Static/package/class helper functions still use the
-        // symbol-table array, as they may have vlSymsp but no vlSelf/this.
-        // Also require the coverage declaration to belong to the current
-        // module; cloned task bodies can increment declarations owned by a
-        // different module, and those must keep using the global array.
-        return m_cfuncp && !m_cfuncp->isStatic() && !VN_IS(m_modp, Class)
-               && !VN_IS(m_modp, ClassPackage)
-               && EmitCParentModule::get(declp->dataDeclThisp()) == m_modp;
+        return EmitCUtil::coverageUsesLocalCounter(m_cfuncp, m_modp, declp);
     }
     int coverageBinNum(AstNodeCoverDecl* const declp, bool forceGlobal = false) const {
         return !forceGlobal && coverageUsesLocalCounter(declp)
